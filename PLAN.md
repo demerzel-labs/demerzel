@@ -649,7 +649,8 @@ sprint exit.
 **Sprint 4.1 — Contract freeze & packaging** *(serves: owned — embeddable)*
 Deliverables: CLI contract v1 frozen (flags, exit codes, versioned sidecar schema);
 stdin diff; remote org-config fetcher schemes (`https://` incl. git raw endpoints,
-`s3://`; `file://` exists from 0.1); wheel + container builds.
+`s3://`; `file://` exists from 0.1); wheel + container builds, signed, with SBOM
+(see Distribution model — supply-chain hygiene lands here, not later).
 Verification:
 
 - Contract tests pinned to the frozen spec — any breaking change fails CI.
@@ -701,6 +702,28 @@ customer's models in their account). One or two design-partner pilots.
 - **M7 — CI triage vertical.** Log ingestion, failure classification, root-cause,
 remediation suggestions. Reuses everything below the pipeline layer; doubles the
 story from "review tool" to "pipeline agent platform" for renewal conversations.
+
+### Distribution model (non-OSS, decided)
+
+- **Source-available proprietary.** Readable source under a commercial annual
+  per-org license. No obfuscation, no compilation: the buyer's security team must
+  review source before it runs in-tenancy, and readable source *is* the audit-grade
+  positioning. The license restricts use and redistribution, not reading; the moat
+  is eval data, governance design, and the update stream — never the bits.
+- **No phone-home, ever.** Consistent with "no demerzel-hosted anything" and
+  air-gapped buyers. Renewal nudge = an offline signed license file validated by
+  `doctor`, which warns loudly on expiry but never hard-stops a pipeline. Contract
+  is the enforcement; do not build license-key plumbing.
+- **Channel by phase**: internal registry (M4, already in 4.1) → direct delivery of
+  signed artifacts that pilots import into their own registries (M6) → managed
+  private registry with per-customer revocable tokens at scale. Container image is
+  a first-class artifact: `image: …/demerzel:x.y` is the natural CI install.
+- **Supply-chain hygiene over DRM**: signed artifacts (cosign/attestations), SBOM,
+  pinned deps, stated CVE policy — lands in Sprint 4.1 with packaging, cheap there
+  and expensive to retrofit.
+- **Renewal logic**: the artifact decays (model IDs churn, price tables stale,
+  prompts retune per model generation, eval suite grows). The subscription is
+  updates + support + benchmark tooling; model churn is the recurring demand driver.
 
 
 
