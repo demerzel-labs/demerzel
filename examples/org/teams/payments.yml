@@ -1,0 +1,17 @@
+# Example team config for the payments org unit.
+# A repo opts into this layer via `extends:` (see examples/repo/.demerzel.yml).
+version: 1
+review:
+  tone: friendly
+  behavior:
+    focus: [security, correctness]
+    ignore_paths: ["**/generated/**"]
+  rules:
+    - id: no-plaintext-secrets
+      paths: ["services/payments/**"]
+      severity: error
+      instruction: "Flag secrets committed in plaintext; require a secrets manager."
+    - id: pci-logging
+      paths: ["services/payments/**"]
+      severity: warning
+      instruction: "Flag logging of full PAN or CVV; only masked values are allowed."

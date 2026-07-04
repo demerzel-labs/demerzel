@@ -1,0 +1,9 @@
+# org config (s3://org-bucket/demerzel.yml)
+locked: [review.behavior.categories.security]   # untouchable by lower layers
+bounds:
+  budget.max_cost_usd: { max: 0.50 }            # lower layers may lower, never raise
+teams:                       # repos matching these patterns inherit team config
+  - match: ["payments-*", "billing-*"]
+    extends: s3://org-bucket/demerzel/teams/payments.yml
+models:
+  allowed: ["bedrock:*"]     # tier remaps must stay within this list

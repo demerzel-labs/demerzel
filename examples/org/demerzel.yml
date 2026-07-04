@@ -1,0 +1,27 @@
+# Example org config (governance + value body).
+# Adapted from PLAN.md: the `teams[*].extends` s3:// URL is rewritten to a local
+# relative path so the demo runs from a clean checkout with no network.
+version: 1
+
+# --- Governance (parsed and carried through in 0.1; enforced in Sprint 2.2) ---
+locked: [review.behavior.categories.security]
+bounds:
+  budget.max_cost_usd: { max: 0.50 }
+teams:
+  - match: ["payments-*", "billing-*"]
+    extends: teams/payments.yml
+models:
+  allowed: ["bedrock:*"]
+
+# --- Value body (org is a value-contributing layer) ---
+review:
+  tone: formal
+  behavior:
+    max_findings: 50
+budget:
+  max_cost_usd: 0.75
+providers:
+  default: bedrock
+  bedrock:
+    region: us-east-1
+    auth: ambient

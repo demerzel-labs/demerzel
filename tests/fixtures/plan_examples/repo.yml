@@ -1,0 +1,53 @@
+# .demerzel.yml (repo layer)
+version: 1
+extends: s3://org-bucket/demerzel/teams/payments.yml   # opt into the team layer
+review:
+  tone: concise              # preset (concise|friendly|formal) or free text
+  output:
+    format: markdown         # markdown | json | sarif (later)
+    template: default        # or repo-relative path to a jinja template
+    sections: [summary, findings, nitpicks]
+  behavior:
+    focus: [security, correctness]
+    ignore_paths: ["vendor/**", "*.lock"]
+    report_threshold: info   # what gets reported...
+    fail_threshold: error    # ...vs what breaks the build (exit code 1)
+    categories: { style: ignore }    # per-category mute/remap
+    max_findings: 20
+  rules:                     # named + additive across layers; findings cite the id
+    - id: no-foo-client
+      paths: ["**/*.py"]
+      severity: error
+      instruction: "FooClient is deprecated; flag new usage. Suggest BarClient."
+    - id: migration-safety
+      paths: ["db/migrations/**"]
+      severity: warning
+      instruction: "Flag migrations that lock large tables or break rollback."
+  overrides:                 # path-scoped: monorepo granularity
+    - paths: ["services/payments/**"]
+      behavior: { report_threshold: info }
+      models:
+        routing: { review: deep }    # payments pays for the deep tier
+    - paths: ["tools/scripts/**"]
+      behavior: { fail_threshold: never }   # report, never block
+models:
+  routing:                   # which tier each pipeline stage uses
+    plan: fast
+    review: standard
+    verify: fast
+  tiers:                     # optional remap of tier -> concrete model
+    fast: bedrock:us.amazon.nova-lite-v1:0
+    standard: bedrock:us.anthropic.claude-sonnet-4-5
+budget:
+  max_cost_usd: 0.50         # hard cap per run; exceed = graceful degrade + warning
+providers:
+  default: bedrock
+  bedrock:
+    region: us-east-1
+    auth: assume_role        # or `ambient` (CI OIDC / instance / env credentials)
+    assume_role_arn: arn:aws:iam::123456789:role/agent-runner
+  anthropic:
+    auth: api_key
+    api_key_env: ANTHROPIC_API_KEY
+  litellm:                   # bridge for Azure OpenAI / Vertex / self-hosted vLLM
+    api_key_env: AZURE_API_KEY
