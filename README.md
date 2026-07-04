@@ -38,5 +38,5 @@ uv run ruff format . # format
 
 ## Docs
 
-Architecture, roadmap, and design rationale live in `PLAN.md`. Deeper `docs/` content
-lands in later sprints.
+Start at [`docs/index.md`](docs/index.md) for install, usage, and configuration
+reference. Architecture, roadmap, and design rationale live in `PLAN.md`.
