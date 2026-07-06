@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# uv
+# (uv.lock IS committed)
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local run artifacts / traces
+*.jsonl.local
+/tmp-artifacts/
+scratch/
+
+# OS
+.DS_Store
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+aws-credentials*

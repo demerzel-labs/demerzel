@@ -1,0 +1,12 @@
+{
+  "task": "review",
+  "runner": "strands",
+  "max_turns": 50,
+  "timeout_s": 2700,
+  "prompt_cache": true,
+  "quality_gate": true,
+  "inference": {
+    "thinking": {"enabled": true}
+  },
+  "system_prompt_file": "agents/prompts/review-default.md"
+}

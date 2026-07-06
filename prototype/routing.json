@@ -1,0 +1,15 @@
+{
+  "models": {
+    "haiku": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "sonnet": "us.anthropic.claude-sonnet-4-6",
+    "opus": "us.anthropic.claude-opus-4-8"
+  },
+  "defaults": {
+    "review": {"model": "opus", "effort": "high", "max_tokens": 32000},
+    "triage": {"model": "haiku", "max_tokens": 4096},
+    "gate": {"model": "haiku", "max_tokens": 8192},
+    "incident": {"model": "opus", "effort": "high", "max_tokens": 32000}
+  },
+  "budget_degrade": {"at_pct": 80, "order": ["opus", "sonnet", "haiku"]},
+  "fallback": {"model": "sonnet", "effort": "high", "max_tokens": 16000}
+}
