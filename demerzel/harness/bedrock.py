@@ -1,11 +1,11 @@
-"""Prototype Bedrock harness CLI (PLAN.md sec 1).
+"""Demerzel Bedrock harness CLI (PLAN.md sec 1).
 
-    python3 -m prototype.harness.bedrock \\
-        --config agents/configs/prototype-review.json \\
+    python3 -m demerzel.harness.bedrock \\
+        --config examples/agents/configs/demerzel-review.json \\
         --prompt-file /tmp/prompt.md \\
         --output /tmp/review.md \\
         --trace /tmp/trace.jsonl \\
-        --base-dir . --repo acme/core --diff-size 12000 \\
+        --base-dir examples --repo acme/core --diff-size 12000 \\
         --system-prompt-file /tmp/system_prompt.md
 
 Thin wiring only: resolve overrides + routing, run the budget preflight, invoke the
@@ -23,22 +23,22 @@ import time
 import traceback
 from pathlib import Path
 
-from prototype import __version__
-from prototype import budget as budget_mod
-from prototype import sandbox as sandbox_mod
-from prototype import secrets as secrets_mod
-from prototype.config import (
+from demerzel import __version__
+from demerzel import budget as budget_mod
+from demerzel import sandbox as sandbox_mod
+from demerzel import secrets as secrets_mod
+from demerzel.config import (
     ConfigError,
     assemble_system_prompt,
     effective_config_path,
     load_agent_config,
 )
-from prototype.overrides import OverrideResolution, OverridesConfig
-from prototype.routing import RoutingError, default_config_path
-from prototype.routing import resolve as resolve_routing
-from prototype.runner import get_runner
-from prototype.trace import RunManifest, TraceWriter, sha256_file, sha256_text
-from prototype.types import TaskProfile
+from demerzel.overrides import OverrideResolution, OverridesConfig
+from demerzel.routing import RoutingError, default_config_path
+from demerzel.routing import resolve as resolve_routing
+from demerzel.runner import get_runner
+from demerzel.trace import RunManifest, TraceWriter, sha256_file, sha256_text
+from demerzel.types import TaskProfile
 
 EXIT_OK = 0
 EXIT_FATAL = 1
@@ -52,6 +52,7 @@ def _strands_version() -> str | None:
         return version("strands-agents")
     except Exception:  # noqa: BLE001 - version lookup is best-effort provenance
         return None
+
 
 # Turn-scaling thresholds (bytes -> max turns), matching the current harness.
 _TURN_SCALE = [(5_000, 10), (20_000, 15), (50_000, 25), (150_000, 35)]
@@ -102,7 +103,7 @@ def _read_changed_files(path: str | None) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="prototype.harness.bedrock", description="Prototype Bedrock harness"
+        prog="demerzel.harness.bedrock", description="Demerzel Bedrock harness"
     )
     p.add_argument("--config", required=True, help="agent config JSON")
     p.add_argument("--prompt-file", required=True, help="user message (assembled prompt)")
@@ -227,8 +228,8 @@ def _run(args, argv, env, trace, manifest, output_path, _summary, finalize) -> i
 
     # Provenance digests — resolved up front so run_start (and, on a crash, the manifest)
     # can prove which routing table and overrides file actually ran (PLAN sec 8).
-    overrides_enabled = env.get("PROTOTYPE_OVERRIDES", "0") == "1"
-    ov_path = env.get("PROTOTYPE_OVERRIDES_FILE") or str(Path(base_dir) / "overrides.cfg")
+    overrides_enabled = env.get("DEMERZEL_OVERRIDES", "0") == "1"
+    ov_path = env.get("DEMERZEL_OVERRIDES_FILE") or str(Path(base_dir) / "overrides.cfg")
     routing_digest = sha256_file(default_config_path())
     overrides_digest = (
         sha256_file(ov_path) if overrides_enabled and Path(ov_path).exists() else None
@@ -279,7 +280,7 @@ def _run(args, argv, env, trace, manifest, output_path, _summary, finalize) -> i
     if overrides_enabled:
         if Path(ov_path).exists():
             # Overrides are best-effort enhancement: a broken override config degrades
-            # to the default Prototype review (no profile/teams) with a loud log + trace,
+            # to the default Demerzel review (no profile/teams) with a loud log + trace,
             # and never fails the review itself.
             try:
                 ov = OverridesConfig.load(ov_path)
@@ -403,14 +404,14 @@ def _run(args, argv, env, trace, manifest, output_path, _summary, finalize) -> i
     log(f"max_turns={max_turns} (config cap {cfg.raw.get('max_turns', 50)})")
 
     # --- run ---
-    from prototype.pricing import CostMeter
+    from demerzel.pricing import CostMeter
 
     meter = CostMeter(decision.model_id)
-    runner_name = env.get("PROTOTYPE_RUNNER", cfg.runner)
+    runner_name = env.get("DEMERZEL_RUNNER", cfg.runner)
     runner = get_runner(runner_name)
     tools_cwd = args.repo_root or base_dir
     if args.raw_trace:
-        env = {**env, "PROTOTYPE_RAW_TRACE_FILE": args.raw_trace}
+        env = {**env, "DEMERZEL_RAW_TRACE_FILE": args.raw_trace}
 
     _t_agent = time.monotonic()
     result = runner.run(
@@ -428,10 +429,10 @@ def _run(args, argv, env, trace, manifest, output_path, _summary, finalize) -> i
     # The gate can only help or no-op (PLAN sec 6.1): the ENTIRE stage — routing, trace,
     # and the model call — is wrapped, so any failure keeps the original review verbatim.
     review_text = result.final_text
-    gate_on = cfg.quality_gate or env.get("PROTOTYPE_QUALITY_GATE", "0") == "1"
+    gate_on = cfg.quality_gate or env.get("DEMERZEL_QUALITY_GATE", "0") == "1"
     if gate_on and review_text.strip():
         try:
-            from prototype import gate as gate_mod
+            from demerzel import gate as gate_mod
 
             gate_decision = resolve_routing(
                 TaskProfile(task="gate", repo=args.repo, month_spend_pct=month_pct),

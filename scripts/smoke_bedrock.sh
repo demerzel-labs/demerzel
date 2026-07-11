@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live smoke test: one real review against Bedrock.
-# Manual check. Verifies the Strands runner, effort passthrough, and model availability
-# per tier. Needs real credentials.
+# Manual caller-mode check. Verifies the Strands runner, effort passthrough, and model
+# availability per tier. Needs real credentials.
 #
 # Credentials:
 #   - Set AWS_REGION to the region where the Anthropic models are enabled.
@@ -9,7 +9,7 @@
 #     an already-resolved session in the environment / an AWS profile.
 #
 # Usage:
-#   AWS_REGION=us-east-1 AWS_ROLE_ARN=arn:aws:iam::ACCT:role/prototype-bedrock \
+#   AWS_REGION=us-east-1 AWS_ROLE_ARN=arn:aws:iam::ACCT:role/demerzel-bedrock \
 #     scripts/smoke_bedrock.sh [path-to-diff-file]
 set -euo pipefail
 
@@ -24,7 +24,7 @@ if [[ -n "${AWS_ROLE_ARN:-}" ]]; then
   echo "Assuming role $AWS_ROLE_ARN ..."
   CREDS_JSON="$(aws sts assume-role \
     --role-arn "$AWS_ROLE_ARN" \
-    --role-session-name "prototype-smoke-$(date +%s)" \
+    --role-session-name "demerzel-smoke-$(date +%s)" \
     --query 'Credentials' --output json)"
   AWS_ACCESS_KEY_ID="$(echo "$CREDS_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["AccessKeyId"])')"
   AWS_SECRET_ACCESS_KEY="$(echo "$CREDS_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["SecretAccessKey"])')"
@@ -34,7 +34,7 @@ fi
 
 echo "Caller identity:"; aws sts get-caller-identity || { echo "no valid credentials"; exit 1; }
 
-CONFIG="$SCRIPT_DIR_ROOT/examples/agents/configs/prototype-review.json"
+CONFIG="$SCRIPT_DIR_ROOT/examples/agents/configs/demerzel-review.json"
 BASE_DIR="$SCRIPT_DIR_ROOT/examples"
 PROMPT_PATH="$WORK/prompt.md"
 DIFF_FILE="${1:-}"
@@ -62,11 +62,11 @@ DIFF_SIZE="$(wc -c < "$PROMPT_PATH" | tr -d ' ')"
 
 # Point the budget preflight at a nonexistent budget so it degrades to a warning
 # rather than requiring a real AWS Budgets resource for the smoke.
-export PROTOTYPE_BUDGET_NAME="${PROTOTYPE_BUDGET_NAME:-does-not-exist-smoke}"
-export PROTOTYPE_RUNNER="${PROTOTYPE_RUNNER:-strands}"
+export DEMERZEL_BUDGET_NAME="${DEMERZEL_BUDGET_NAME:-does-not-exist-smoke}"
+export DEMERZEL_RUNNER="${DEMERZEL_RUNNER:-strands}"
 
 cd "$SCRIPT_DIR_ROOT"
-uv run python3 -m prototype.harness.bedrock \
+uv run python3 -m demerzel.harness.bedrock \
     --config "$CONFIG" \
     --prompt-file "$PROMPT_PATH" \
     --output "$WORK/review.md" \

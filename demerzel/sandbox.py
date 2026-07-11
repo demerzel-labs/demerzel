@@ -43,19 +43,19 @@ def detect_tier(
     *,
     can_unshare: Callable[[], bool] | None = None,
 ) -> str:
-    """Resolve the confinement tier. `PROTOTYPE_SANDBOX_TIER` forces a value (for CI
+    """Resolve the confinement tier. `DEMERZEL_SANDBOX_TIER` forces a value (for CI
     that knows its own capability); otherwise probe A, then honor declared B/C, else D.
     """
     env = os.environ if env is None else env
-    override = env.get("PROTOTYPE_SANDBOX_TIER")
+    override = env.get("DEMERZEL_SANDBOX_TIER")
     if override in VALID_TIERS:
         return override
     probe = can_unshare if can_unshare is not None else _probe_unshare
     if probe():
         return "A"
-    if env.get("PROTOTYPE_EGRESS_FIREWALL") == "1":
+    if env.get("DEMERZEL_EGRESS_FIREWALL") == "1":
         return "B"
-    if env.get("PROTOTYPE_REPO_RO_MOUNT") == "1":
+    if env.get("DEMERZEL_REPO_RO_MOUNT") == "1":
         return "C"
     return "D"
 

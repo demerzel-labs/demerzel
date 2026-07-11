@@ -2,7 +2,7 @@
 
 import pytest
 
-from prototype.overrides import OverrideError, OverridesConfig
+from demerzel.overrides import OverrideError, OverridesConfig
 
 
 def write_cfg(tmp_path, body: str, files: dict | None = None):

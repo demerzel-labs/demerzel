@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from prototype.routing import Pin
+from demerzel.routing import Pin
 
 # Most-capable first: when a diff touches multiple teams, the most capable pinned
 # model wins. Aliases not listed rank last (a full model id pinned by a team is

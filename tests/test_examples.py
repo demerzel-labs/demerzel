@@ -2,16 +2,16 @@
 
 from pathlib import Path
 
-from prototype.config import assemble_system_prompt, load_agent_config
-from prototype.overrides import OverridesConfig
-from prototype.routing import load_config
-from prototype.types import TaskProfile
+from demerzel.config import assemble_system_prompt, load_agent_config
+from demerzel.overrides import OverridesConfig
+from demerzel.routing import load_config
+from demerzel.types import TaskProfile
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 
 def test_example_agent_config_loads():
-    cfg = load_agent_config(EXAMPLES / "agents/configs/prototype-review.json")
+    cfg = load_agent_config(EXAMPLES / "agents/configs/demerzel-review.json")
     assert cfg.task == "review"
     assert cfg.quality_gate is True
     assert cfg.runner == "strands"
@@ -39,17 +39,17 @@ def test_example_overrides_validates_and_resolves():
 def test_example_prompt_assembles_with_teams():
     ov = OverridesConfig.load(EXAMPLES / "overrides.cfg")
     ov.validate(EXAMPLES)
-    cfg = load_agent_config(EXAMPLES / "agents/configs/prototype-review.json")
+    cfg = load_agent_config(EXAMPLES / "agents/configs/demerzel-review.json")
     res = ov.resolve("acme/core", changed_files=["src/payments/charge.py"])
     out = assemble_system_prompt(EXAMPLES, cfg, res)
     assert "## Team: payments" in out.text
-    assert out.text.startswith("You are Prototype")
+    assert out.text.startswith("You are Demerzel")
 
 
 def test_bundled_routing_json_is_valid():
-    cfg = load_config()  # the shipped prototype/routing.json
+    cfg = load_config()  # the shipped demerzel/routing.json
     assert "sonnet" in cfg["models"]
-    from prototype.routing import resolve
+    from demerzel.routing import resolve
 
     dec = resolve(TaskProfile(task="review", repo="acme/prod/x"), config=cfg, env={})
     assert "opus" in dec.model_id  # review default is opus (signal overrides dropped)

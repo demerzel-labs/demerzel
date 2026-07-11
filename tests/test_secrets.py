@@ -1,6 +1,6 @@
 """Output secret-scan: known credential shapes redacted, clean prose untouched."""
 
-from prototype.secrets import scan
+from demerzel.secrets import scan
 
 
 def test_clean_review_untouched():

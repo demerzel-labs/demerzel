@@ -2,7 +2,7 @@
 
 import json
 
-from prototype.trace import RunManifest, TraceWriter, sha256_file, sha256_text
+from demerzel.trace import RunManifest, TraceWriter, sha256_file, sha256_text
 
 
 def _read_jsonl(path):

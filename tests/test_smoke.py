@@ -1,11 +1,11 @@
 """Scaffold smoke test: the package imports and core types are constructible."""
 
-import prototype
-from prototype.types import AgentConfig, ModelDecision, TaskProfile
+import demerzel
+from demerzel.types import AgentConfig, ModelDecision, TaskProfile
 
 
 def test_version():
-    assert prototype.__version__
+    assert demerzel.__version__
 
 
 def test_core_types_construct():

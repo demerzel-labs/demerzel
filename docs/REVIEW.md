@@ -1,8 +1,8 @@
-# Review Harness — Hardening Review Record
+# Review Harness: Archived Hardening Review
 
-Historical record of the adversarial review of this package, kept so future maintainers
-can see what was checked, what was wrong, and what was changed before the harness was
-trusted in CI. Point-in-time; not a living spec (the spec is [`../PLAN.md`](../PLAN.md)).
+This is the point-in-time adversarial review of the personal clean-room prototype. The
+repository became Demerzel on 2026-07-10; the names and paths below remain aligned with
+the reviewed baseline. Current baseline context is in [`../PLAN.md`](../PLAN.md).
 
 - **Date:** 2026-07-04
 - **Baseline reviewed:** the initial rewrite at commit `3647dcd` ("Refresh HANDOFF.md

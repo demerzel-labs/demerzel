@@ -1,4 +1,4 @@
-"""End-to-end CLI tests via main(argv) + PROTOTYPE_RUNNER=fake. No AWS, no network.
+"""End-to-end CLI tests via main(argv) + DEMERZEL_RUNNER=fake. No AWS, no network.
 
 Exercises the full wiring: overrides, routing, budget preflight, runner, secret-scan,
 manifest, and every exit code (0 ok / 1 fatal / 2 budget exceeded).
@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from prototype.harness.bedrock import EXIT_BUDGET, EXIT_FATAL, EXIT_OK, compute_max_turns, main
+from demerzel.harness.bedrock import EXIT_BUDGET, EXIT_FATAL, EXIT_OK, compute_max_turns, main
 
 
 @pytest.fixture
@@ -34,10 +34,10 @@ def base(tmp_path, monkeypatch):
 
     # Force the fake runner and make the budget preflight degrade to check_failed
     # (no boto3 call succeeds in the hermetic env) so the run proceeds.
-    monkeypatch.setenv("PROTOTYPE_RUNNER", "fake")
-    monkeypatch.setenv("PROTOTYPE_BUDGET_NAME", "does-not-exist-budget")
-    monkeypatch.delenv("PROTOTYPE_OVERRIDES", raising=False)
-    monkeypatch.delenv("PROTOTYPE_DEGRADE", raising=False)
+    monkeypatch.setenv("DEMERZEL_RUNNER", "fake")
+    monkeypatch.setenv("DEMERZEL_BUDGET_NAME", "does-not-exist-budget")
+    monkeypatch.delenv("DEMERZEL_OVERRIDES", raising=False)
+    monkeypatch.delenv("DEMERZEL_DEGRADE", raising=False)
 
     return {
         "cfg": cfg,
@@ -81,7 +81,7 @@ def test_happy_path_exit_0(base):
     rc = main(_argv(base))
     assert rc == EXIT_OK
     assert base["out"].read_text().strip()  # review written
-    assert base["sysprompt"].read_text().startswith("You are Prototype")  # baseline present
+    assert base["sysprompt"].read_text().startswith("You are Demerzel")  # baseline present
 
     events = _events(base["trace"])
     kinds = [e["event"] for e in events]
@@ -127,7 +127,7 @@ def test_raw_trace_written(base, tmp_path):
 
 
 def test_fatal_path_exit_1_writes_empty_output_and_manifest(base, monkeypatch):
-    monkeypatch.setenv("PROTOTYPE_FAKE_RAISE", "boom in runner")
+    monkeypatch.setenv("DEMERZEL_FAKE_RAISE", "boom in runner")
     rc = main(_argv(base))
     assert rc == EXIT_FATAL
     assert base["out"].read_text() == ""  # frozen contract: empty output on failure
@@ -142,8 +142,8 @@ def test_fatal_path_exit_1_writes_empty_output_and_manifest(base, monkeypatch):
 def test_budget_exceeded_exit_2(base, monkeypatch):
     # Inject a fake budgets client via monkeypatching preflight's boto path is hard;
     # instead drive through the public seam: patch budget_mod.preflight.
-    from prototype import budget as budget_mod
-    from prototype.budget import BudgetStatus
+    from demerzel import budget as budget_mod
+    from demerzel.budget import BudgetStatus
 
     def fake_preflight(env=None, **kw):
         return BudgetStatus(
@@ -180,7 +180,7 @@ def test_assembled_prompt_is_auditable(base, monkeypatch, tmp_path):
     )
     changed = tmp_path / "changed.txt"
     changed.write_text("src/records-sync/sync.py\n")
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
 
     rc = main(_argv(base, changed_files=changed))
     assert rc == EXIT_OK
@@ -189,7 +189,7 @@ def test_assembled_prompt_is_auditable(base, monkeypatch, tmp_path):
     sysprompt = base["sysprompt"].read_text()
     assert "## Team: records-sync" in sysprompt
     assert "report Critical and High only" in sysprompt
-    assert sysprompt.startswith("You are Prototype")  # baseline intact
+    assert sysprompt.startswith("You are Demerzel")  # baseline intact
 
     events = _events(base["trace"])
     # 2) override_resolved: the team was matched and attributed to the file.
@@ -218,7 +218,7 @@ def test_overrides_applied_when_enabled(base, monkeypatch, tmp_path):
     )
     changed = tmp_path / "changed.txt"
     changed.write_text("src/payments/charge.py\nREADME.md\n")
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
 
     rc = main(_argv(base, changed_files=changed))
     assert rc == EXIT_OK
@@ -233,11 +233,11 @@ def test_overrides_applied_when_enabled(base, monkeypatch, tmp_path):
 
 def test_broken_override_degrades_to_default_review(base, monkeypatch, tmp_path):
     # A structurally broken overrides.cfg must NOT fail the run — it logs and falls
-    # back to the default Prototype review, which still posts.
+    # back to the default Demerzel review, which still posts.
     (tmp_path / "overrides.cfg").write_text(
         "[repos]\nacme/core = ghost-profile-that-does-not-exist\n"
     )
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
     rc = main(_argv(base))
     assert rc == EXIT_OK  # review still posted
     assert base["out"].read_text().strip()
@@ -251,7 +251,7 @@ def test_missing_context_file_still_posts_review(base, monkeypatch, tmp_path):
     (tmp_path / "overrides.cfg").write_text(
         "[profile:p]\ncontext = agents/gone.md\n[repos]\nacme/core = p\n"
     )
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
     rc = main(_argv(base))
     assert rc == EXIT_OK
     assert base["out"].read_text().strip()
@@ -262,7 +262,7 @@ def test_missing_context_file_still_posts_review(base, monkeypatch, tmp_path):
 
 
 def test_degrade_panic_lever(base, monkeypatch):
-    monkeypatch.setenv("PROTOTYPE_DEGRADE", "1")
+    monkeypatch.setenv("DEMERZEL_DEGRADE", "1")
     main(_argv(base))
     events = _events(base["trace"])
     decision = next(e for e in events if e["event"] == "model_decision")
@@ -270,8 +270,8 @@ def test_degrade_panic_lever(base, monkeypatch):
 
 
 def test_quality_gate_runs_when_enabled(base, monkeypatch):
-    monkeypatch.setenv("PROTOTYPE_QUALITY_GATE", "1")
-    monkeypatch.setenv("PROTOTYPE_FAKE_OUTPUT", "## Findings\n- [ ] **Bug** app.py:1 — x\n\nAPPROVE")
+    monkeypatch.setenv("DEMERZEL_QUALITY_GATE", "1")
+    monkeypatch.setenv("DEMERZEL_FAKE_OUTPUT", "## Findings\n- [ ] **Bug** app.py:1 — x\n\nAPPROVE")
     rc = main(_argv(base))
     assert rc == EXIT_OK
     events = _events(base["trace"])
@@ -294,9 +294,9 @@ def test_quality_gate_off_by_default(base):
 
 
 def test_quality_gate_failure_keeps_review(base, monkeypatch):
-    monkeypatch.setenv("PROTOTYPE_QUALITY_GATE", "1")
-    monkeypatch.setenv("PROTOTYPE_FAKE_OUTPUT", "## Findings\n- [ ] **Keep** a.py:1 — y\n\nAPPROVE")
-    monkeypatch.setenv("PROTOTYPE_FAKE_GATE_RAISE", "gate boom")
+    monkeypatch.setenv("DEMERZEL_QUALITY_GATE", "1")
+    monkeypatch.setenv("DEMERZEL_FAKE_OUTPUT", "## Findings\n- [ ] **Keep** a.py:1 — y\n\nAPPROVE")
+    monkeypatch.setenv("DEMERZEL_FAKE_GATE_RAISE", "gate boom")
     rc = main(_argv(base))
     assert rc == EXIT_OK  # gate failure never fails the run
     assert "Keep" in base["out"].read_text()  # original review preserved
@@ -309,7 +309,7 @@ def test_broken_profile_config_type_degrades_not_crashes(base, monkeypatch, tmp_
     (tmp_path / "overrides.cfg").write_text(
         "[profile:p]\nconfig = agents/configs/bad.json\n[repos]\nacme/core = p\n"
     )
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
     rc = main(_argv(base))
     assert rc == EXIT_OK
     assert base["out"].read_text().strip()  # review still posted
@@ -320,10 +320,9 @@ def test_broken_profile_config_type_degrades_not_crashes(base, monkeypatch, tmp_
 def test_typoed_pin_alias_degrades_not_crashes(base, monkeypatch, tmp_path):
     # A typo'd model alias in a profile pin must degrade to default routing, not exit 1.
     (tmp_path / "overrides.cfg").write_text(
-        "[profile:p]\nmodel = opsu\ncontext = agents/prompts/default.md\n"
-        "[repos]\nacme/core = p\n"
+        "[profile:p]\nmodel = opsu\ncontext = agents/prompts/default.md\n[repos]\nacme/core = p\n"
     )
-    monkeypatch.setenv("PROTOTYPE_OVERRIDES", "1")
+    monkeypatch.setenv("DEMERZEL_OVERRIDES", "1")
     rc = main(_argv(base))
     assert rc == EXIT_OK
     assert base["out"].read_text().strip()
@@ -344,10 +343,10 @@ def test_argparse_error_exits_fatal_not_budget(base):
 def test_manifest_write_failure_does_not_lose_review(base, monkeypatch):
     # A manifest write failure must not fail the review or clobber it: the review is the
     # product; the manifest is a compliance sidecar. run_end stays the terminal event.
-    from prototype.trace import RunManifest
+    from demerzel.trace import RunManifest
 
     monkeypatch.setenv(
-        "PROTOTYPE_FAKE_OUTPUT", "## Findings\n- a real, completed finding\n\nNEEDS_WORK"
+        "DEMERZEL_FAKE_OUTPUT", "## Findings\n- a real, completed finding\n\nNEEDS_WORK"
     )
 
     def boom(self, path, outcome):
@@ -364,7 +363,7 @@ def test_manifest_write_failure_does_not_lose_review(base, monkeypatch):
 
 def test_fatal_before_review_preserves_no_clobber_and_terminal_run_end(base, monkeypatch):
     # A genuine crash before any review: empty output (contract), run_end terminal, once.
-    monkeypatch.setenv("PROTOTYPE_FAKE_RAISE", "boom in runner")
+    monkeypatch.setenv("DEMERZEL_FAKE_RAISE", "boom in runner")
     rc = main(_argv(base))
     assert rc == EXIT_FATAL
     assert base["out"].read_text() == ""
@@ -377,7 +376,7 @@ def test_stale_output_cleared_on_early_failure(base, monkeypatch):
     # If --output already holds a previous run's review and THIS run fails before
     # producing one, the stale review must not survive (downstream would post it).
     base["out"].write_text("## STALE previous review\n- old finding\n")
-    monkeypatch.setenv("PROTOTYPE_FAKE_RAISE", "boom before any review")
+    monkeypatch.setenv("DEMERZEL_FAKE_RAISE", "boom before any review")
     rc = main(_argv(base))
     assert rc == EXIT_FATAL
     assert base["out"].read_text() == ""  # stale content gone, empty per contract
@@ -386,8 +385,8 @@ def test_stale_output_cleared_on_early_failure(base, monkeypatch):
 def test_gate_stage_routing_failure_keeps_review(base, monkeypatch):
     # A failure in the gate STAGE (routing/trace, outside run_quality_gate) must keep the
     # completed review and exit 0 — the gate can only help or no-op (PLAN sec 6.1).
-    from prototype import harness
-    from prototype.routing import RoutingError
+    from demerzel import harness
+    from demerzel.routing import RoutingError
 
     real_resolve = harness.bedrock.resolve_routing
 
@@ -397,8 +396,8 @@ def test_gate_stage_routing_failure_keeps_review(base, monkeypatch):
         return real_resolve(profile, **kw)
 
     monkeypatch.setattr(harness.bedrock, "resolve_routing", resolve_or_boom)
-    monkeypatch.setenv("PROTOTYPE_QUALITY_GATE", "1")
-    monkeypatch.setenv("PROTOTYPE_FAKE_OUTPUT", "## Findings\n- keep me\n\nAPPROVE")
+    monkeypatch.setenv("DEMERZEL_QUALITY_GATE", "1")
+    monkeypatch.setenv("DEMERZEL_FAKE_OUTPUT", "## Findings\n- keep me\n\nAPPROVE")
     rc = main(_argv(base))
     assert rc == EXIT_OK
     assert "keep me" in base["out"].read_text()
@@ -424,7 +423,7 @@ def test_provenance_and_phase_events(base):
 
 
 def test_secret_scan_redacts_output(base, monkeypatch):
-    monkeypatch.setenv("PROTOTYPE_FAKE_OUTPUT", "leak AKIAIOSFODNN7EXAMPLE in review")
+    monkeypatch.setenv("DEMERZEL_FAKE_OUTPUT", "leak AKIAIOSFODNN7EXAMPLE in review")
     main(_argv(base))
     out = base["out"].read_text()
     assert "AKIAIOSFODNN7EXAMPLE" not in out

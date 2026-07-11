@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from prototype.pricing import CostMeter
-    from prototype.trace import TraceWriter
-    from prototype.types import AgentConfig, ModelDecision
+    from demerzel.pricing import CostMeter
+    from demerzel.trace import TraceWriter
+    from demerzel.types import AgentConfig, ModelDecision
 
 
 @dataclass
@@ -46,11 +46,11 @@ def get_runner(name: str) -> Runner:
     """Resolve a runner by name. Imports the backend lazily so selecting `fake`
     never imports `strands` (and vice versa)."""
     if name == "fake":
-        from prototype.runner.fake import FakeRunner
+        from demerzel.runner.fake import FakeRunner
 
         return FakeRunner()
     if name == "strands":
-        from prototype.runner.strands import StrandsRunner
+        from demerzel.runner.strands import StrandsRunner
 
         return StrandsRunner()
     raise ValueError(f"unknown runner: {name!r} (expected 'strands' or 'fake')")

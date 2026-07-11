@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from prototype.routing import Pin, RoutingError, load_config, resolve
-from prototype.types import TaskProfile
+from demerzel.routing import Pin, RoutingError, load_config, resolve
+from demerzel.types import TaskProfile
 
 CONFIG = {
     "models": {
@@ -137,19 +137,19 @@ def test_pin_wins_over_signals():
     assert d.source == "team:docs"
 
 
-def test_prototype_degrade_panic_lever_forces_down():
-    d = r(TaskProfile(task="review"), env={"PROTOTYPE_DEGRADE": "1"})
+def test_demerzel_degrade_panic_lever_forces_down():
+    d = r(TaskProfile(task="review"), env={"DEMERZEL_DEGRADE": "1"})
     # sonnet -> haiku
     assert d.model_id == CONFIG["models"]["haiku"]
     assert d.degraded is True
-    assert "PROTOTYPE_DEGRADE" in d.rationale
+    assert "DEMERZEL_DEGRADE" in d.rationale
 
 
-def test_prototype_degrade_overrides_even_pins():
+def test_demerzel_degrade_overrides_even_pins():
     d = r(
         TaskProfile(task="review"),
         pin=Pin(model="opus", source="profile"),
-        env={"PROTOTYPE_DEGRADE": "2"},
+        env={"DEMERZEL_DEGRADE": "2"},
     )
     # opus -> haiku (2 steps)
     assert d.model_id == CONFIG["models"]["haiku"]
@@ -157,7 +157,7 @@ def test_prototype_degrade_overrides_even_pins():
 
 
 def test_degrade_clamps_at_cheapest():
-    d = r(TaskProfile(task="triage"), env={"PROTOTYPE_DEGRADE": "5"})
+    d = r(TaskProfile(task="triage"), env={"DEMERZEL_DEGRADE": "5"})
     # haiku is already cheapest; stays haiku, not moved
     assert d.model_id == CONFIG["models"]["haiku"]
 
@@ -178,13 +178,13 @@ def test_pin_off_allowlist_raises_routing_error():
         r(TaskProfile(task="review"), pin=Pin(model="eu.anthropic.custom-1:0", source="profile"))
 
 
-def test_prototype_degrade_applies_to_full_id_pin():
+def test_demerzel_degrade_applies_to_full_id_pin():
     # A pin given as a known full id still moves under the panic lever (regression:
-    # previously a full-id pin escaped PROTOTYPE_DEGRADE).
+    # previously a full-id pin escaped DEMERZEL_DEGRADE).
     d = r(
         TaskProfile(task="review"),
         pin=Pin(model=CONFIG["models"]["opus"], source="profile"),
-        env={"PROTOTYPE_DEGRADE": "2"},
+        env={"DEMERZEL_DEGRADE": "2"},
     )
     assert d.model_id == CONFIG["models"]["haiku"]
     assert d.degraded is True

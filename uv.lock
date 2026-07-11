@@ -1374,7 +1374,7 @@ wheels = [
 ]
 
 [[package]]
-name = "prototype-harness"
+name = "demerzel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

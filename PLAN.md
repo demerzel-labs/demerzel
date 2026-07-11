@@ -1,11 +1,13 @@
-# Review Harness Rewrite — Implementation Plan
+# Demerzel: Imported Harness Baseline
 
-Independent Python CI review-harness prototype. The package explores an observable,
-budgeted, routed Bedrock agent loop with a small caller-mode interface.
+This document records the code-review harness that became Demerzel on 2026-07-10. The
+implementation came from a personal clean-room prototype and carries an observable,
+budgeted, routed Bedrock loop into the personal codebase.
 
-Beyond talking to the LLM, the three functions this harness must provide well, in
-priority order: **observability**, **budget control**, **intelligent routing**.
-Everything below serves those.
+This is the imported implementation baseline, not the next-stage product plan. The
+generic prompt command, interactive session model, TUI choice, and broader capability
+sequence will be designed in the next planning phase. Until then, the code retains its
+caller-mode review contract and the architecture documented below.
 
 **Standing security invariant:** the harness is advisory — it produces a review
 artifact and never holds merge or repo-write authority. This caps the blast radius
@@ -13,13 +15,13 @@ of any prompt injection through the untrusted diff (§9) and is assumed througho
 
 ---
 
-## 1. Compatibility contract (frozen caller surface)
+## 1. Current caller-mode contract
 
-The work repo's bash layer invokes the harness like this and must keep working
-unmodified:
+The imported CI caller used the following shape. The rebrand changed the module and
+environment-variable names while preserving the flags, outputs, and exit behavior:
 
 ```bash
-python3 -m prototype.harness.bedrock \
+python3 -m demerzel.harness.bedrock \
     --config  "$AGENT_CONFIG" \
     --prompt-file "$PROMPT_PATH" \
     --output  "$RAW_REVIEW_FILE" \
@@ -49,21 +51,21 @@ Frozen semantics:
 | exit 1 | fatal error (exception path: FATAL line + traceback to stderr, empty output written; terminal `error`+`run_end` trace events and manifest still emitted — §8.1) |
 | exit 2 | monthly budget exceeded — refused to run (budget status written to trace; manifest emitted) |
 
-Env vars preserved: `AWS_REGION` (default `us-east-1`), `PROTOTYPE_MAX_COST` (per-run
-ceiling USD, default 3.0), `PROTOTYPE_BUDGET_NAME` (default `prototype-bedrock-monthly`),
-`AWS_ACCOUNT_ID`, `PROTOTYPE_BUDGET_THRESHOLD` (default 95), `PROTOTYPE_OVERRIDES`
+Current env vars: `AWS_REGION` (default `us-east-1`), `DEMERZEL_MAX_COST` (per-run
+ceiling USD, default 3.0), `DEMERZEL_BUDGET_NAME` (default `demerzel-bedrock-monthly`),
+`AWS_ACCOUNT_ID`, `DEMERZEL_BUDGET_THRESHOLD` (default 95), `DEMERZEL_OVERRIDES`
 (`1` enables override resolution).
 
 **Env surface policy (decided 2026-07-04):** env vars are capped at operational
 levers for CI configuration. Everything else (model choice, effort, task defaults,
-tier thresholds) lives in config files that deploy with the repo (§6). The
-current pile of growing routing env vars gets absorbed into `routing.json`, with a
-migration mapping documented for integration.
+tier thresholds) lives in config files that deploy with the repo (§6). The current
+pile of growing routing env vars gets absorbed into `routing.json`, with a migration
+mapping documented for integration.
 
-The full lever set: `PROTOTYPE_MAX_COST`, `PROTOTYPE_BUDGET_NAME`,
-`PROTOTYPE_BUDGET_THRESHOLD`, `PROTOTYPE_OVERRIDES`, plus two new ones —
-`PROTOTYPE_DEGRADE=<n>` (force every routing decision down n tiers immediately; the
-panic lever) and `PROTOTYPE_RUNNER` (`strands` default | `fake` for offline dry-runs).
+The full lever set: `DEMERZEL_MAX_COST`, `DEMERZEL_BUDGET_NAME`,
+`DEMERZEL_BUDGET_THRESHOLD`, `DEMERZEL_OVERRIDES`, plus two new ones —
+`DEMERZEL_DEGRADE=<n>` (force every routing decision down n tiers immediately; the
+panic lever) and `DEMERZEL_RUNNER` (`strands` default | `fake` for offline dry-runs).
 
 **New, backward-compatible flag additions** (bash layer may adopt incrementally):
 
@@ -77,7 +79,7 @@ panic lever) and `PROTOTYPE_RUNNER` (`strands` default | `fake` for offline dry-
   (§8.1). Without it, the manifest is written next to `--trace` with absolute paths.
 - `--raw-trace <path>` — verbatim model request/response + untruncated tool I/O JSONL
   for full-fidelity compliance/forensics (off by default; §8.1).
-- `PROTOTYPE_OVERRIDES_FILE` env — override config location (default `<base-dir>/overrides.cfg`).
+- `DEMERZEL_OVERRIDES_FILE` env — override config location (default `<base-dir>/overrides.cfg`).
 
 ## 2. Non-goals
 
@@ -93,15 +95,15 @@ panic lever) and `PROTOTYPE_RUNNER` (`strands` default | `fake` for offline dry-
 
 ## 3. Repo layout
 
-Package at repo root so the sample CI integration can copy the `prototype/` directory
+Package at repo root so the sample CI integration can copy the `demerzel/` directory
 and set `PYTHONPATH=$SCRIPT_DIR_ROOT`:
 
 ```
-prototype/
+demerzel/
   __init__.py
   harness/
     __init__.py
-    bedrock.py        # CLI entry (python3 -m prototype.harness.bedrock) — thin wiring only
+    bedrock.py        # CLI entry (python3 -m demerzel.harness.bedrock) — thin wiring only
   config.py           # agent config JSON load + system prompt assembly (with provenance)
   overrides.py        # override resolution: repo profiles + team layer (§7)
   routing.py          # ModelRouter: TaskProfile -> ModelDecision (§6)
@@ -170,7 +172,7 @@ class RunResult:
                   # usage totals, cost_usd, total_s, outcome
 ```
 
-Selected by `runner` key in agent config or `PROTOTYPE_RUNNER` env
+Selected by `runner` key in agent config or `DEMERZEL_RUNNER` env
 (`strands` default, `fake` for hermetic tests and pipeline dry-runs). Nothing
 outside `runner/` imports `strands`.
 
@@ -193,7 +195,7 @@ Strands primitives):
   <150KB→35, else config max) → native per-invocation cap `Limits(turns=...)`;
   `stopReason == limit_turns` is the trigger.
 - **Cost-ceiling governor** via hooks: an `AfterModelCallEvent` hook tracks cumulative
-  cost in `CostMeter`; crossing `PROTOTYPE_MAX_COST` sets `BeforeToolCallEvent
+  cost in `CostMeter`; crossing `DEMERZEL_MAX_COST` sets `BeforeToolCallEvent
   .cancel_tool = "COST BUDGET REACHED — produce your final review now"` (the string
   becomes the tool result the model reads, so it wraps up) once; past a grace factor a
   `BeforeModelCallEvent.cancel = True` hard-aborts and best-effort final text is
@@ -215,18 +217,18 @@ confirms the loop is testable with no AWS.**
 ## 5. Budget control (three layers)
 
 1. **Monthly preflight (existing, kept):** AWS Budgets `describe_budget` against
-   `PROTOTYPE_BUDGET_NAME`; at/above `PROTOTYPE_BUDGET_THRESHOLD` % → refuse to run,
+   `DEMERZEL_BUDGET_NAME`; at/above `DEMERZEL_BUDGET_THRESHOLD` % → refuse to run,
    write budget status to trace, empty output, exit 2. Check failure → proceed with a
    loud warning (the per-run ceiling still protects). Budgets client is injectable for
    tests.
-2. **Per-run ceiling (existing, kept + hardened):** `PROTOTYPE_MAX_COST` enforced by
+2. **Per-run ceiling (existing, kept + hardened):** `DEMERZEL_MAX_COST` enforced by
    the runner via `CostMeter` (now cache-token-aware); graceful wrap-up injection,
    then hard stop. Every crossing traced.
 3. **Budget-aware routing degrade (new):** preflight returns month-to-date spend %;
    past `budget_degrade.at_pct` in `routing.json` (default 80), non-pinned runs drop
    one model tier (opus→sonnet→haiku), `degraded: true` + rationale in the decision
    and trace. Profile/team-pinned runs are never silently degraded — only the
-   explicit `PROTOTYPE_DEGRADE` panic lever (§6) overrides pins, and it logs loudly.
+   explicit `DEMERZEL_DEGRADE` panic lever (§6) overrides pins, and it logs loudly.
 
 ## 6. Intelligent routing
 
@@ -284,7 +286,7 @@ class ModelDecision:
 model choice, effort, thresholds, and task defaults are `routing.json` entries,
 deployed and reviewed like code. The existing routing env vars get a documented
 migration mapping into `routing.json` during integration. The only env influence on
-routing is `PROTOTYPE_DEGRADE=<n>` — the CI-variable panic lever that
+routing is `DEMERZEL_DEGRADE=<n>` — the CI-variable panic lever that
 forces every decision down n tiers (applied last, always logged, never silently).
 
 **Single source for model selection (decided 2026-07-04):** `routing.json` is the
@@ -306,7 +308,7 @@ not team-pinned); make it team-overridable later only if gate spend ever matters
 
 Precedence (highest wins): **repo-profile pin → team pins (highest tier among
 matched teams) → first matching signal override → task default → fallback**, then
-budget degrade (§5.3) applied to non-pinned outcomes, then `PROTOTYPE_DEGRADE`
+budget degrade (§5.3) applied to non-pinned outcomes, then `DEMERZEL_DEGRADE`
 applied unconditionally. First-match-wins top-down for signal overrides. Every
 decision emits `source` + `rationale` so a reviewer can predict and audit any run
 from the config file.
@@ -321,7 +323,7 @@ router just exposes clean pins so the pipeline can request it.
 A second, cheap stage that runs after the main review to tighten quality and
 precision — the "leverage a cheaper agent for some intelligence" lever. Built as an
 quality-gate stage (one invocation still = one budget, one trace, one manifest),
-enabled per `quality_gate: true` in the agent config or `PROTOTYPE_QUALITY_GATE=1`.
+enabled per `quality_gate: true` in the agent config or `DEMERZEL_QUALITY_GATE=1`.
 
 **Scope split (decided): cheap = hygiene, not deep accuracy.** A cheaper judge
 reliably improves output quality and precision-hygiene; it cannot reliably re-judge
@@ -355,7 +357,7 @@ time, and the gate is the backstop, not the only lever.
 
 Current state: `overrides.cfg` (INI) maps repo → profile; a profile can replace the
 default prompt section, append context files, or swap the whole agent config. Gated by
-`PROTOTYPE_OVERRIDES=1`. Limitations: exact-match repos only, no sharing across repos,
+`DEMERZEL_OVERRIDES=1`. Limitations: exact-match repos only, no sharing across repos,
 no granularity below the repo, no validation, no provenance.
 
 Kept as INI (stdlib `configparser`, same file, existing entries stay valid).
@@ -456,7 +458,7 @@ time (pipeline-owned), not more granular prompts.
 4. **Overrides are best-effort — a broken override never fails the review.**
    Structural mistakes (unknown section/key, unknown profile/team reference,
    inheritance cycle) are caught, logged loudly to stderr + an `override_error` trace
-   event, and the run **degrades to the default Prototype review** (baseline + config's
+   event, and the run **degrades to the default Demerzel review** (baseline + config's
    default section + guardrails, no profile/teams). A missing referenced context/
    prompt file is skipped at assembly (logged + `prompt_files_missing` trace), and the
    rest of the prompt still assembles. A missing profile *config* replacement falls
@@ -629,7 +631,7 @@ credential isolation are handled. So the tool is **permissive about reads and an
 ### Controls, by load
 
 1. **Network egress to approved endpoints only** (operator-managed). `sandbox.detect_tier()` records which OS-level tier is actually active
-   (`PROTOTYPE_SANDBOX_TIER` / `PROTOTYPE_EGRESS_FIREWALL` / `PROTOTYPE_REPO_RO_MOUNT`, or
+   (`DEMERZEL_SANDBOX_TIER` / `DEMERZEL_EGRESS_FIREWALL` / `DEMERZEL_REPO_RO_MOUNT`, or
    `unshare -rn` probe → tiers A/B/C, else D) in `run_start` so the posture is always
    visible, never silently assumed. Tiers A–D and their detection remain in
    `sandbox.py`; the harness degrades gracefully and logs the tier.
@@ -691,7 +693,7 @@ Layered, hermetic by default (no AWS, no network):
    injection + hard stop, max-turn nudge, timeout outcome, usage accumulation into
    `CostMeter`, and the JSONL trace event sequence. Throttling/retry behavior
    asserted at the hook level.
-3. **CLI e2e**: invoke `main(argv)` with tmp files + `PROTOTYPE_RUNNER=fake` —
+3. **CLI e2e**: invoke `main(argv)` with tmp files + `DEMERZEL_RUNNER=fake` —
    asserts output file content, `--system-prompt-file` artifact, trace validity,
    `run_manifest.json` completeness (artifact list + sha256s match on disk), the
    crash path still emitting `run_end`+manifest, and each exit code
@@ -732,7 +734,7 @@ Each step lands with its tests; the suite stays green throughout.
    dependency needs.
 1. **Scaffold**: pyproject, package layout, runner seam types, pytest wiring.
 2. **Leaf modules** (parallelizable): `tools/bash.py`, `pricing.py`, `trace.py`.
-3. **Routing** (`routing.py` + default `routing.json`, incl. `PROTOTYPE_DEGRADE`).
+3. **Routing** (`routing.py` + default `routing.json`, incl. `DEMERZEL_DEGRADE`).
 4. **Overrides v2** (`overrides.py`, incl. CODEOWNERS ingestion).
 5. **Config + prompt assembly** (`config.py`).
 6. **Budget** (`budget.py`).
@@ -740,7 +742,7 @@ Each step lands with its tests; the suite stays green throughout.
 8. **CLI + finalize** (`harness/bedrock.py`): argument wiring, phase timing,
    crash-safe `finalize` (manifest + terminal trace events on every exit path),
    `--artifacts-dir`/`--raw-trace` handling; e2e tests + smoke scripts.
-9. **Docs**: README with integration steps (copy `prototype/`, install pinned
+9. **Docs**: README with integration steps (copy `demerzel/`, install pinned
    `strands-agents`, add `routing.json`, extend `overrides.cfg`, new optional flags
    for the bash layer, env-var → routing.json migration table).
 

@@ -26,16 +26,16 @@ from strands.hooks import (
 )
 from strands.types.agent import Limits
 
-from prototype.budget import COST_CEILING_PROMPT, CostCeiling, read_cost_ceiling
-from prototype.runner import RunResult
+from demerzel.budget import COST_CEILING_PROMPT, CostCeiling, read_cost_ceiling
+from demerzel.runner import RunResult
 
 if TYPE_CHECKING:
     from strands.hooks import HookRegistry
     from strands.models import Model
 
-    from prototype.pricing import CostMeter
-    from prototype.trace import TraceWriter
-    from prototype.types import AgentConfig, ModelDecision
+    from demerzel.pricing import CostMeter
+    from demerzel.trace import TraceWriter
+    from demerzel.types import AgentConfig, ModelDecision
 
 # Injected as the tool result when the wall-clock budget trips (mirror of the cost
 # soft-stop message in budget.py, but for time rather than money).
@@ -412,7 +412,7 @@ class StrandsRunner:
             ceiling=ceiling,
             timeout_s=cfg.timeout_s,
             start=start,
-            raw_path=env.get("PROTOTYPE_RAW_TRACE_FILE"),
+            raw_path=env.get("DEMERZEL_RAW_TRACE_FILE"),
         )
 
         # model is a test seam: when injected, use it as-is with NO tools so this
@@ -508,8 +508,8 @@ class StrandsRunner:
 
     def _make_bash_tool(self, tools_cwd: str, env: dict, governor: _Governor):
         # Imported lazily so this module (and its tests) don't hard-depend on bash.py.
-        import prototype.sandbox as sandbox
-        from prototype.tools.bash import BashTool
+        import demerzel.sandbox as sandbox
+        from demerzel.tools.bash import BashTool
 
         tier = sandbox.detect_tier(env)
         bash_tool = BashTool(

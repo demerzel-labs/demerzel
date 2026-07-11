@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Offline smoke test for the sample CI invocation. The fake runner needs no AWS or
-# network access and verifies the CLI contract end to end.
+# Offline smoke test for the sample caller-mode invocation. The fake runner needs no
+# AWS or network access and verifies the CLI contract end to end.
 set -euo pipefail
 
 SCRIPT_DIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-CONFIG="$SCRIPT_DIR_ROOT/examples/agents/configs/prototype-review.json"
+CONFIG="$SCRIPT_DIR_ROOT/examples/agents/configs/demerzel-review.json"
 PROMPT_PATH="$WORK/prompt.md"
 RAW_REVIEW_FILE="$WORK/review.md"
 TRACE_FILE="$WORK/trace.jsonl"
@@ -23,11 +23,11 @@ BASE_DIR="$SCRIPT_DIR_ROOT/examples"
 printf 'Please review this diff:\n' > "$PROMPT_PATH"
 head -c "$DIFF_SIZE" /dev/zero | tr '\0' 'x' >> "$PROMPT_PATH"
 
-export PROTOTYPE_RUNNER=fake
-export PROTOTYPE_BUDGET_NAME="does-not-exist-smoke"  # preflight -> check_failed -> proceed
+export DEMERZEL_RUNNER=fake
+export DEMERZEL_BUDGET_NAME="does-not-exist-smoke"  # preflight -> check_failed -> proceed
 
 cd "$SCRIPT_DIR_ROOT"
-uv run python3 -m prototype.harness.bedrock \
+if uv run python3 -m demerzel.harness.bedrock \
     --config "$CONFIG" \
     --prompt-file "$PROMPT_PATH" \
     --output "$RAW_REVIEW_FILE" \
@@ -36,8 +36,11 @@ uv run python3 -m prototype.harness.bedrock \
     --repo "$REPO" \
     --diff-size "${DIFF_SIZE:-0}" \
     --system-prompt-file "${RESULTS_DIR}/${JIRA_KEY}_system_prompt.md" \
-    2>"$HARNESS_LOG"
-HARNESS_EXIT=$?
+    2>"$HARNESS_LOG"; then
+  HARNESS_EXIT=0
+else
+  HARNESS_EXIT=$?
+fi
 
 echo "=== harness exit: $HARNESS_EXIT ==="
 echo "=== stderr log ==="; cat "$HARNESS_LOG"

@@ -1,16 +1,16 @@
 """Deterministic runner for hermetic tests and offline pipeline dry-runs.
 
-Selected with PROTOTYPE_RUNNER=fake. Imports no `strands` and makes no network calls,
+Selected with DEMERZEL_RUNNER=fake. Imports no `strands` and makes no network calls,
 so the full CLI (routing, overrides, budget, trace, manifest, exit codes) is
 end-to-end testable with zero AWS.
 
 Behavior is scripted via env so tests and smoke_fake.sh can drive it:
-  PROTOTYPE_FAKE_OUTPUT        - exact review text to emit (default: a canned review)
-  PROTOTYPE_FAKE_TURNS         - number of `turn` trace events to emit (default 1)
-  PROTOTYPE_FAKE_TOOL_CALLS    - number of `tool_call` trace events to emit (default 0)
-  PROTOTYPE_FAKE_INPUT_TOKENS  - input tokens to record in the meter (default 1000)
-  PROTOTYPE_FAKE_OUTPUT_TOKENS - output tokens to record (default 500)
-  PROTOTYPE_FAKE_RAISE         - if set, raise RuntimeError(<value>) to exercise the
+  DEMERZEL_FAKE_OUTPUT        - exact review text to emit (default: a canned review)
+  DEMERZEL_FAKE_TURNS         - number of `turn` trace events to emit (default 1)
+  DEMERZEL_FAKE_TOOL_CALLS    - number of `tool_call` trace events to emit (default 0)
+  DEMERZEL_FAKE_INPUT_TOKENS  - input tokens to record in the meter (default 1000)
+  DEMERZEL_FAKE_OUTPUT_TOKENS - output tokens to record (default 500)
+  DEMERZEL_FAKE_RAISE         - if set, raise RuntimeError(<value>) to exercise the
                                 CLI fatal path
 """
 
@@ -20,12 +20,12 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-from prototype.runner import RunResult
+from demerzel.runner import RunResult
 
 if TYPE_CHECKING:
-    from prototype.pricing import CostMeter
-    from prototype.trace import TraceWriter
-    from prototype.types import AgentConfig, ModelDecision
+    from demerzel.pricing import CostMeter
+    from demerzel.trace import TraceWriter
+    from demerzel.types import AgentConfig, ModelDecision
 
 
 def _int(env: dict, key: str, default: int) -> int:
@@ -51,15 +51,15 @@ class FakeRunner:
         env = os.environ if env is None else env
         t0 = time.monotonic()
 
-        if env.get("PROTOTYPE_FAKE_RAISE"):
-            raise RuntimeError(env["PROTOTYPE_FAKE_RAISE"])
+        if env.get("DEMERZEL_FAKE_RAISE"):
+            raise RuntimeError(env["DEMERZEL_FAKE_RAISE"])
 
-        turns = _int(env, "PROTOTYPE_FAKE_TURNS", 1)
-        tool_calls = _int(env, "PROTOTYPE_FAKE_TOOL_CALLS", 0)
-        in_tok = _int(env, "PROTOTYPE_FAKE_INPUT_TOKENS", 1000)
-        out_tok = _int(env, "PROTOTYPE_FAKE_OUTPUT_TOKENS", 500)
+        turns = _int(env, "DEMERZEL_FAKE_TURNS", 1)
+        tool_calls = _int(env, "DEMERZEL_FAKE_TOOL_CALLS", 0)
+        in_tok = _int(env, "DEMERZEL_FAKE_INPUT_TOKENS", 1000)
+        out_tok = _int(env, "DEMERZEL_FAKE_OUTPUT_TOKENS", 500)
 
-        raw_path = env.get("PROTOTYPE_RAW_TRACE_FILE")
+        raw_path = env.get("DEMERZEL_RAW_TRACE_FILE")
 
         def _raw(kind: str, payload: dict) -> None:
             if not raw_path:
@@ -116,7 +116,7 @@ class FakeRunner:
             f"Reviewed {len(user_message)} bytes of prompt.\n\n"
             "APPROVE\n"
         )
-        final_text = env.get("PROTOTYPE_FAKE_OUTPUT", default_output)
+        final_text = env.get("DEMERZEL_FAKE_OUTPUT", default_output)
 
         stats = {
             "turns": turns,
@@ -145,14 +145,14 @@ class FakeRunner:
         """Deterministic structured-output stand-in for the quality gate.
 
         Scripted via env for e2e tests:
-          PROTOTYPE_FAKE_GATE_REVIEW    - the cleaned review text to return
-          PROTOTYPE_FAKE_GATE_DROPPED   - comma-separated "title:reason" drops
-          PROTOTYPE_FAKE_GATE_RAISE     - if set, raise to exercise the gate's no-op path
+          DEMERZEL_FAKE_GATE_REVIEW    - the cleaned review text to return
+          DEMERZEL_FAKE_GATE_DROPPED   - comma-separated "title:reason" drops
+          DEMERZEL_FAKE_GATE_RAISE     - if set, raise to exercise the gate's no-op path
         Defaults to echoing the draft review unchanged (a faithful no-op gate).
         """
         env = os.environ if env is None else env
-        if env.get("PROTOTYPE_FAKE_GATE_RAISE"):
-            raise RuntimeError(env["PROTOTYPE_FAKE_GATE_RAISE"])
+        if env.get("DEMERZEL_FAKE_GATE_RAISE"):
+            raise RuntimeError(env["DEMERZEL_FAKE_GATE_RAISE"])
 
         meter.record_usage({"inputTokens": 200, "outputTokens": 100})
         trace.emit(
@@ -167,14 +167,14 @@ class FakeRunner:
         )
 
         dropped = []
-        raw_drops = env.get("PROTOTYPE_FAKE_GATE_DROPPED", "")
+        raw_drops = env.get("DEMERZEL_FAKE_GATE_DROPPED", "")
         for item in (d for d in raw_drops.split(",") if d.strip()):
             title, _, reason = item.partition(":")
             dropped.append({"title": title.strip(), "reason": (reason or "contract").strip()})
 
         # Extract the draft review from the prompt when no explicit override is given,
         # so the default fake gate is a faithful no-op (never loses findings).
-        default_review = env.get("PROTOTYPE_FAKE_GATE_REVIEW")
+        default_review = env.get("DEMERZEL_FAKE_GATE_REVIEW")
         if default_review is None:
             marker = "## Draft review to clean up\n"
             default_review = (

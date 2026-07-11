@@ -264,7 +264,7 @@ class BashTool:
         else:
             # Own the scratch HOME we create and clean it up at process exit so an
             # ephemeral job (or the test suite) doesn't leak /tmp dirs.
-            self.scratch_home = tempfile.mkdtemp(prefix="prototype-bash-home-")
+            self.scratch_home = tempfile.mkdtemp(prefix="demerzel-bash-home-")
             atexit.register(shutil.rmtree, self.scratch_home, ignore_errors=True)
         self.timeout_default = timeout_default
         self.max_timeout = max_timeout

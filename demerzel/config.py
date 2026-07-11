@@ -19,15 +19,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from prototype.overrides import OverrideResolution
-from prototype.types import AgentConfig
+from demerzel.overrides import OverrideResolution
+from demerzel.types import AgentConfig
 
 _JOINER = "\n\n---\n\n"
 DEFAULT_TEAM_CONTEXT_CAP = 32_768
 
 # Invariant prefix: mission + the prompt trust boundary. Always first.
 BASELINE = """\
-You are Prototype, an automated code reviewer running in CI. Your job is to review the
+You are Demerzel, an automated code reviewer running in CI. Your job is to review the
 provided diff and report correctness, security, and reliability issues that a careful
 senior engineer would flag. Prefer a few high-confidence findings over exhaustive noise.
 

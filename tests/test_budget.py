@@ -1,6 +1,6 @@
 """Budget preflight (injected fake Budgets client) + cost ceiling governor logic."""
 
-from prototype.budget import (
+from demerzel.budget import (
     DEFAULT_COST_CEILING,
     CostCeiling,
     preflight,
@@ -31,7 +31,7 @@ class BoomBudgets:
 
 def test_under_threshold_is_ok():
     client = FakeBudgets(actual=50, limit=100)
-    st = preflight({"PROTOTYPE_BUDGET_THRESHOLD": "95"}, client=client, account_id="1")
+    st = preflight({"DEMERZEL_BUDGET_THRESHOLD": "95"}, client=client, account_id="1")
     assert st.status == "ok"
     assert st.pct == 50.0
     assert not st.should_refuse
@@ -39,7 +39,7 @@ def test_under_threshold_is_ok():
 
 def test_at_or_above_threshold_refuses():
     client = FakeBudgets(actual=96, limit=100)
-    st = preflight({"PROTOTYPE_BUDGET_THRESHOLD": "95"}, client=client, account_id="1")
+    st = preflight({"DEMERZEL_BUDGET_THRESHOLD": "95"}, client=client, account_id="1")
     assert st.status == "exceeded"
     assert st.should_refuse
     assert "refusing to run" in st.message
@@ -54,7 +54,7 @@ def test_check_failure_proceeds():
 
 def test_custom_budget_name_passed_through():
     client = FakeBudgets(actual=10, limit=100)
-    preflight({"PROTOTYPE_BUDGET_NAME": "custom-budget"}, client=client, account_id="acct9")
+    preflight({"DEMERZEL_BUDGET_NAME": "custom-budget"}, client=client, account_id="acct9")
     assert client.calls == [("acct9", "custom-budget")]
 
 
@@ -68,20 +68,20 @@ def test_status_dict_serializable():
 
 def test_read_cost_ceiling_default_and_override():
     assert read_cost_ceiling({}) == DEFAULT_COST_CEILING
-    assert read_cost_ceiling({"PROTOTYPE_MAX_COST": "7.5"}) == 7.5
-    assert read_cost_ceiling({"PROTOTYPE_MAX_COST": "garbage"}) == DEFAULT_COST_CEILING
+    assert read_cost_ceiling({"DEMERZEL_MAX_COST": "7.5"}) == 7.5
+    assert read_cost_ceiling({"DEMERZEL_MAX_COST": "garbage"}) == DEFAULT_COST_CEILING
 
 
 def test_nonpositive_cost_ceiling_falls_back_to_default():
     # A zero/negative ceiling would trip on the first call -> empty review, exit 0.
-    assert read_cost_ceiling({"PROTOTYPE_MAX_COST": "0"}) == DEFAULT_COST_CEILING
-    assert read_cost_ceiling({"PROTOTYPE_MAX_COST": "-3"}) == DEFAULT_COST_CEILING
+    assert read_cost_ceiling({"DEMERZEL_MAX_COST": "0"}) == DEFAULT_COST_CEILING
+    assert read_cost_ceiling({"DEMERZEL_MAX_COST": "-3"}) == DEFAULT_COST_CEILING
 
 
 def test_nonpositive_threshold_does_not_refuse_every_run():
     # A non-positive threshold would otherwise refuse every run (exit 2).
     client = FakeBudgets(actual=10, limit=100)
-    st = preflight({"PROTOTYPE_BUDGET_THRESHOLD": "0"}, client=client, account_id="1")
+    st = preflight({"DEMERZEL_BUDGET_THRESHOLD": "0"}, client=client, account_id="1")
     assert st.status == "ok"
     assert not st.should_refuse
 

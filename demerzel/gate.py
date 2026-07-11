@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from prototype.trace import TraceWriter
+    from demerzel.trace import TraceWriter
 
 # Severities the gate must never downgrade or drop on its own judgment.
 PROTECTED_SEVERITIES = frozenset({"critical", "high"})

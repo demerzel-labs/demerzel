@@ -4,7 +4,7 @@ Three layers total; two live here:
   1. Monthly preflight — refuse to run (exit 2) if the month-to-date AWS Budget is at
      or above the threshold. Returns month-to-date spend %, which routing uses for the
      third layer (budget-aware tier degrade, in routing.py).
-  2. Per-run cost ceiling — the PROTOTYPE_MAX_COST value plus the governor decision
+  2. Per-run cost ceiling — the DEMERZEL_MAX_COST value plus the governor decision
      logic (soft wrap-up vs hard stop). Enforcement is wired into the runner via hooks
      using CostMeter; the *decisions* live here so they're testable without Strands.
 
@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 
 DEFAULT_COST_CEILING = 3.0
-DEFAULT_BUDGET_NAME = "prototype-bedrock-monthly"
+DEFAULT_BUDGET_NAME = "demerzel-bedrock-monthly"
 DEFAULT_BUDGET_THRESHOLD = 95.0
 DEFAULT_REGION = "us-east-1"  # AWS Budgets is global; client uses us-east-1
 
@@ -76,13 +76,13 @@ def preflight(
     """Check the monthly AWS Budget. Never raises — a check failure returns
     status='check_failed' so the run proceeds (the per-run ceiling still protects)."""
     env = os.environ if env is None else env
-    budget_name = env.get("PROTOTYPE_BUDGET_NAME", DEFAULT_BUDGET_NAME)
-    threshold = _f(env, "PROTOTYPE_BUDGET_THRESHOLD", DEFAULT_BUDGET_THRESHOLD)
+    budget_name = env.get("DEMERZEL_BUDGET_NAME", DEFAULT_BUDGET_NAME)
+    threshold = _f(env, "DEMERZEL_BUDGET_THRESHOLD", DEFAULT_BUDGET_THRESHOLD)
     if threshold <= 0:
         # A non-positive threshold makes every run refuse (exit 2) — almost certainly a
         # fat-fingered project variable, not intent. Fall back to the default, loudly.
         print(
-            f"[harness] WARN PROTOTYPE_BUDGET_THRESHOLD={env.get('PROTOTYPE_BUDGET_THRESHOLD')!r} "
+            f"[harness] WARN DEMERZEL_BUDGET_THRESHOLD={env.get('DEMERZEL_BUDGET_THRESHOLD')!r} "
             f"is non-positive; using default {DEFAULT_BUDGET_THRESHOLD}",
             file=sys.stderr,
         )
@@ -142,16 +142,16 @@ def preflight(
 
 
 def read_cost_ceiling(env: dict | None = None) -> float:
-    """Per-run USD ceiling from PROTOTYPE_MAX_COST (default 3.0).
+    """Per-run USD ceiling from DEMERZEL_MAX_COST (default 3.0).
 
     A non-positive ceiling would trip on the very first model call and return an empty
     review with a healthy exit 0 — a silent malformed-review footgun. Reject it loudly
     and fall back to the default instead."""
     env = os.environ if env is None else env
-    ceiling = _f(env, "PROTOTYPE_MAX_COST", DEFAULT_COST_CEILING)
+    ceiling = _f(env, "DEMERZEL_MAX_COST", DEFAULT_COST_CEILING)
     if ceiling <= 0:
         print(
-            f"[harness] WARN PROTOTYPE_MAX_COST={env.get('PROTOTYPE_MAX_COST')!r} is "
+            f"[harness] WARN DEMERZEL_MAX_COST={env.get('DEMERZEL_MAX_COST')!r} is "
             f"non-positive; using default ${DEFAULT_COST_CEILING}",
             file=sys.stderr,
         )

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from prototype.config import (
+from demerzel.config import (
     BASELINE,
     GUARDRAILS,
     ConfigError,
@@ -12,7 +12,7 @@ from prototype.config import (
     effective_config_path,
     load_agent_config,
 )
-from prototype.overrides import OverridesConfig
+from demerzel.overrides import OverridesConfig
 
 
 def write(tmp_path, rel, content):
@@ -234,7 +234,7 @@ def test_no_profile_still_assembles(tmp_path):
     cfg = load_agent_config(
         write(tmp_path, "c.json", json.dumps({"system_prompt": "inline default"}))
     )
-    from prototype.overrides import OverrideResolution
+    from demerzel.overrides import OverrideResolution
 
     out = assemble_system_prompt(tmp_path, cfg, OverrideResolution())
     assert "inline default" in out.text
@@ -276,7 +276,7 @@ r/x = p
 
 
 def test_effective_config_path_falls_back_to_default(tmp_path):
-    from prototype.overrides import OverrideResolution
+    from demerzel.overrides import OverrideResolution
 
     path = effective_config_path(OverrideResolution(), tmp_path / "default.json", tmp_path)
     assert path == tmp_path / "default.json"

@@ -1,16 +1,16 @@
 """Quality gate: pure helpers, boundary guards, and the never-lose-findings fallback."""
 
-from prototype.gate import (
+from demerzel.gate import (
     GateResult,
     apply_gate_result,
     build_gate_prompt,
     gate_system_prompt,
     run_quality_gate,
 )
-from prototype.pricing import CostMeter
-from prototype.runner.fake import FakeRunner
-from prototype.trace import TraceWriter
-from prototype.types import AgentConfig, ModelDecision
+from demerzel.pricing import CostMeter
+from demerzel.runner.fake import FakeRunner
+from demerzel.trace import TraceWriter
+from demerzel.types import AgentConfig, ModelDecision
 
 
 def _decision():
@@ -111,7 +111,7 @@ def test_run_quality_gate_survives_runner_error(tmp_path):
         cfg=AgentConfig(),
         trace=trace,
         meter=meter,
-        env={"PROTOTYPE_FAKE_GATE_RAISE": "boom"},
+        env={"DEMERZEL_FAKE_GATE_RAISE": "boom"},
     )
     trace.close()
     assert out == original  # gate failure returns the original review unchanged
@@ -135,8 +135,8 @@ def test_run_quality_gate_records_drops(tmp_path):
         trace=trace,
         meter=meter,
         env={
-            "PROTOTYPE_FAKE_GATE_REVIEW": "## Findings\n- [ ] **Real** a.py:1 — keep\n\nAPPROVE",
-            "PROTOTYPE_FAKE_GATE_DROPPED": "Phantom:bad_line_ref,DupNit:duplicate",
+            "DEMERZEL_FAKE_GATE_REVIEW": "## Findings\n- [ ] **Real** a.py:1 — keep\n\nAPPROVE",
+            "DEMERZEL_FAKE_GATE_DROPPED": "Phantom:bad_line_ref,DupNit:duplicate",
         },
     )
     trace.close()

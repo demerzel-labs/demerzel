@@ -7,7 +7,7 @@ is the whole cost-control brain in front of the runner (PLAN.md sec 6).
 Precedence (highest wins):
   profile pin -> team pins (highest tier among matched) -> first matching signal
   override -> task default -> fallback
-then budget-aware degrade (non-pinned only), then PROTOTYPE_DEGRADE (the panic lever,
+then budget-aware degrade (non-pinned only), then DEMERZEL_DEGRADE (the panic lever,
 applied unconditionally). Every decision carries `source` + `rationale`.
 """
 
@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from prototype.types import ModelDecision, TaskProfile
+from demerzel.types import ModelDecision, TaskProfile
 
 _DEFAULT_CONFIG = Path(__file__).with_name("routing.json")
 
@@ -39,7 +39,7 @@ class Pin:
     """An explicit model/effort request from an override profile or team.
 
     A pin overrides signal-based routing and is never silently degraded by the budget
-    governor (only PROTOTYPE_DEGRADE touches it)."""
+    governor (only DEMERZEL_DEGRADE touches it)."""
 
     model: str | None = None
     effort: str | None = None
@@ -78,7 +78,7 @@ def _normalize_pin_model(models: dict, name: str) -> str:
     error-prone than routing.json, so the plan bounds them: a pin may only name a
     model the allowlist knows (PLAN sec 6/7 "pins resolve through the routing models
     allowlist"). Returning the alias (not the full id) also keeps the pinned model on
-    the degrade ladder, so PROTOTYPE_DEGRADE applies to pins as documented.
+    the degrade ladder, so DEMERZEL_DEGRADE applies to pins as documented.
     """
     if name in models:
         return name
@@ -87,8 +87,7 @@ def _normalize_pin_model(models: dict, name: str) -> str:
         if mid == name:
             return alias
     raise RoutingError(
-        f"pin model {name!r} is not in the routing.json models allowlist "
-        f"(known: {sorted(models)})"
+        f"pin model {name!r} is not in the routing.json models allowlist (known: {sorted(models)})"
     )
 
 
@@ -118,7 +117,7 @@ def _match_override(rule: dict, profile: TaskProfile) -> bool:
 
 
 def _degrade_env(env: dict) -> int:
-    raw = env.get("PROTOTYPE_DEGRADE", "").strip()
+    raw = env.get("DEMERZEL_DEGRADE", "").strip()
     if not raw:
         return 0
     try:
@@ -210,12 +209,12 @@ def resolve(
             model_name = new_name
             degraded = True
 
-    # --- PROTOTYPE_DEGRADE panic lever (applies to everything, even pins) ---
+    # --- DEMERZEL_DEGRADE panic lever (applies to everything, even pins) ---
     steps = _degrade_env(env)
     if steps:
         new_name, moved = _step_down(model_name, degrade_order, steps)
         if moved:
-            reasons.append(f"PROTOTYPE_DEGRADE={steps}: forced {model_name}->{new_name}")
+            reasons.append(f"DEMERZEL_DEGRADE={steps}: forced {model_name}->{new_name}")
             model_name = new_name
             degraded = True
 

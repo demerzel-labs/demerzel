@@ -1,14 +1,14 @@
 """Sandbox tier detection: override, probe, declared tiers, graceful default."""
 
-from prototype import sandbox
+from demerzel import sandbox
 
 
 def test_explicit_override_wins():
-    assert sandbox.detect_tier({"PROTOTYPE_SANDBOX_TIER": "B"}, can_unshare=lambda: True) == "B"
+    assert sandbox.detect_tier({"DEMERZEL_SANDBOX_TIER": "B"}, can_unshare=lambda: True) == "B"
 
 
 def test_invalid_override_ignored_then_probes():
-    assert sandbox.detect_tier({"PROTOTYPE_SANDBOX_TIER": "Z"}, can_unshare=lambda: True) == "A"
+    assert sandbox.detect_tier({"DEMERZEL_SANDBOX_TIER": "Z"}, can_unshare=lambda: True) == "A"
 
 
 def test_probe_success_is_tier_a():
@@ -16,11 +16,11 @@ def test_probe_success_is_tier_a():
 
 
 def test_declared_firewall_is_tier_b():
-    assert sandbox.detect_tier({"PROTOTYPE_EGRESS_FIREWALL": "1"}, can_unshare=lambda: False) == "B"
+    assert sandbox.detect_tier({"DEMERZEL_EGRESS_FIREWALL": "1"}, can_unshare=lambda: False) == "B"
 
 
 def test_declared_ro_mount_is_tier_c():
-    assert sandbox.detect_tier({"PROTOTYPE_REPO_RO_MOUNT": "1"}, can_unshare=lambda: False) == "C"
+    assert sandbox.detect_tier({"DEMERZEL_REPO_RO_MOUNT": "1"}, can_unshare=lambda: False) == "C"
 
 
 def test_no_capability_is_tier_d():

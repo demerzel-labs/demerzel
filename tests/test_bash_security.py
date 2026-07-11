@@ -14,7 +14,7 @@ import shutil
 
 import pytest
 
-from prototype.tools.bash import BashResult, BashTool, classify, split_segments
+from demerzel.tools.bash import BashResult, BashTool, classify, split_segments
 
 BASH = shutil.which("bash")
 requires_bash = pytest.mark.skipif(BASH is None, reason="bash not available")

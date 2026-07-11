@@ -20,11 +20,11 @@ from strands import Agent, tool  # noqa: E402
 from strands.models import Model  # noqa: E402
 from strands.types.agent import Limits  # noqa: E402
 
-from prototype.budget import COST_CEILING_PROMPT, CostCeiling  # noqa: E402
-from prototype.pricing import CostMeter  # noqa: E402
-from prototype.runner.strands import StrandsRunner, _Governor, _model_kwargs  # noqa: E402
-from prototype.trace import TraceWriter  # noqa: E402
-from prototype.types import AgentConfig, ModelDecision  # noqa: E402
+from demerzel.budget import COST_CEILING_PROMPT, CostCeiling  # noqa: E402
+from demerzel.pricing import CostMeter  # noqa: E402
+from demerzel.runner.strands import StrandsRunner, _Governor, _model_kwargs  # noqa: E402
+from demerzel.trace import TraceWriter  # noqa: E402
+from demerzel.types import AgentConfig, ModelDecision  # noqa: E402
 
 # --- scripted model -------------------------------------------------------------
 
@@ -243,8 +243,12 @@ def test_tool_round_traces_and_counts(tmp_path):
         start=__import__("time").monotonic(),
     )
 
+    # Strands 1.45 runs synchronous decorated tools in the event loop's default
+    # executor, whose shutdown can deadlock across repeated Agent tests. The production
+    # BashTool's synchronous behavior has its own suite; this fixture covers Agent/tool
+    # hooks and trace accounting.
     @tool(context=True)
-    def bash(command: str, timeout: int = 120, tool_context=None) -> str:
+    async def bash(command: str, timeout: int = 120, tool_context=None) -> str:
         """Trivial reviewer tool."""
         tuid = (tool_context.tool_use or {}).get("toolUseId") if tool_context else None
         governor.bash_results[tuid] = {

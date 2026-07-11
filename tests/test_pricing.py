@@ -2,7 +2,7 @@
 
 import pytest
 
-from prototype.pricing import (
+from demerzel.pricing import (
     FALLBACK_PRICE,
     PRICES,
     CostMeter,
