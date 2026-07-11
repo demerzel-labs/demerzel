@@ -1,4 +1,362 @@
-# Demerzel: Imported Harness Baseline
+# Demerzel: Product Plan
+
+Demerzel is a self-hosted agent harness for repeatable developer workflows and
+governed enterprise automation. It uses the Strands agent loop, adds a stable layer for
+tools, context, policy, sessions, cost, traces, and evaluation, and lets each user choose
+where model inference runs.
+
+The product has two surfaces over one runtime:
+
+- **Enterprise runner:** headless execution inside CI or internal automation, with
+  organization policy, bounded tools, cost ceilings, portable run records, and eval
+  gates.
+- **Developer workspace:** direct one-shot prompts and resumable sessions from the
+  terminal, with project context, tool packs, MCP connectivity, and credentials supplied
+  by the developer.
+
+The imported Bedrock code-review harness is the first working workflow. It already
+proves the Strands loop, routing, budgets, traces, a quality gate, and offline test seams.
+The next work separates that runtime from its CI caller and Bedrock construction so the
+same loop can power both surfaces.
+
+The implementation remains a personal clean-room codebase. Demerzel may carry general
+concepts learned from building agent systems, while every line of product code and
+public documentation is authored independently.
+
+---
+
+## Product contract
+
+### One runtime, two execution modes
+
+Every invocation resolves the same five inputs:
+
+1. a workflow or prompt;
+2. a model profile;
+3. project and session context;
+4. an allowed tool set;
+5. execution policy for time, spend, data, and artifacts.
+
+The runtime returns a typed result, normalized usage, a trace, and an exit status. A
+terminal session may render those records interactively. A CI job may save them as build
+artifacts. The execution semantics stay the same.
+
+### Initial workflows
+
+- **Review:** preserve the current repository review loop as a built-in workflow.
+- **Run:** execute a named profile against a prompt for scripts and CI jobs.
+- **Session:** start or resume interactive work in a project.
+
+New workflows compose prompt blocks, context collectors, tools, and an output contract.
+They do not fork the runtime.
+
+### Deployment shape
+
+The first commercial package is self-hosted. Demerzel runs as a Python CLI or container
+inside the user's machine, CI runner, or cloud account. It calls model providers directly
+from that runtime. A hosted gateway, hosted secret store, and hosted source-code service
+are outside the first release.
+
+This shape supports both buyers:
+
+- platform teams install a pinned build, distribute policy, and use ambient cloud
+  identity or their secret manager;
+- individual developers install the CLI, select a profile, and point it at API or local
+  model endpoints they already control.
+
+---
+
+## Invocation and session model
+
+The CLI grows around the existing `demerzel.harness.bedrock` module. Compatibility stays
+until the built-in `review` workflow reproduces its artifacts and exit behavior.
+
+```text
+demerzel "explain the failing tests"             # one-shot prompt in this project
+demerzel run --profile reviewer "review HEAD~1"  # explicit profile, script friendly
+demerzel review --diff changes.diff              # built-in review workflow
+demerzel session                                 # interactive project session
+demerzel session --resume <id>                   # resume persisted context
+demerzel doctor                                  # providers, credentials, tools, policy
+```
+
+### One-shot mode
+
+`demerzel "prompt"` is the shortest useful path. It loads project config, selects the
+default profile, gathers bounded project context, runs the loop, prints the final answer,
+and records the run. It does not persist conversation history unless the user requests a
+session.
+
+### Interactive mode
+
+`demerzel session` starts with a plain streaming terminal interface. The session owns
+conversation history, context-compaction state, tool approvals, and run links. A richer
+TUI follows only after the session contract is stable; it will consume the same session
+API instead of becoming a second runtime.
+
+Session records live under the user's XDG data directory by default. Project config may
+choose a repo-local ignored directory. Secrets, raw environment values, and provider
+tokens are never written into a session record.
+
+### Automation mode
+
+`demerzel run` and `demerzel review` avoid prompts for input. They accept explicit output
+and artifact paths, support JSON status output, and use stable exit codes:
+
+| Exit | Meaning |
+|---|---|
+| `0` | run completed; inspect the typed result for workflow findings |
+| `1` | harness or provider failure |
+| `2` | policy refused the run, including budget refusal |
+| `3` | workflow completed and crossed its configured fail threshold |
+
+The existing caller-mode `0/1/2` behavior remains behind its compatibility entry point
+during migration. The new `review` command gets exit `3` only after downstream callers
+have a documented upgrade path.
+
+---
+
+## Model connectivity and bring-your-own credentials
+
+Strands 1.45 already provides native Python adapters for Bedrock, OpenAI, the OpenAI
+Responses API, Anthropic, Ollama, LiteLLM, llama.cpp, and other providers. Demerzel will
+use a small provider registry over the Strands `Model` contract. It will not build a
+second inference protocol.
+
+References checked 2026-07-10:
+
+- [Strands model providers](https://strandsagents.com/docs/user-guide/concepts/model-providers/)
+- [OpenAI Responses provider](https://strandsagents.com/docs/user-guide/concepts/model-providers/openai-responses/)
+- [Anthropic provider](https://strandsagents.com/docs/user-guide/concepts/model-providers/anthropic/)
+- [Ollama provider](https://strandsagents.com/docs/user-guide/concepts/model-providers/ollama/)
+
+### First-party provider set
+
+| Provider | Auth | Role in the first product sequence |
+|---|---|---|
+| Amazon Bedrock | standard AWS credential chain, profile, or assumed role | current baseline and first enterprise path |
+| OpenAI Responses | `OPENAI_API_KEY` from the process or secret command | first direct API connector |
+| Anthropic | `ANTHROPIC_API_KEY` from the process or secret command | second direct API connector |
+| Ollama | local endpoint, no key by default | first local developer connector |
+| OpenAI-compatible endpoint | base URL plus named credential env var | local servers and compatible gateways after native connectors pass parity |
+
+LiteLLM stays an optional expansion adapter. Native Strands providers cover the initial
+set with fewer translation layers. Add LiteLLM when a real provider request cannot fit
+the native registry.
+
+### Provider boundary
+
+```python
+class ProviderAdapter(Protocol):
+    name: str
+
+    def create_model(self, spec: ModelSpec, secrets: SecretResolver) -> Model: ...
+    def capabilities(self, spec: ModelSpec) -> ModelCapabilities: ...
+    def doctor(self, spec: ModelSpec, secrets: SecretResolver) -> DoctorResult: ...
+```
+
+The current Strands runner changes from constructing `BedrockModel` internally to
+receiving a Strands `Model`. Bedrock-specific request fields, retry settings, and usage
+normalization move into the Bedrock adapter.
+
+`ModelCapabilities` records tool calling, structured output, image input, streaming,
+prompt caching, native token counting, and usage fields. Workflow startup checks the
+required capabilities and fails before sending project context when a selected model
+cannot support them.
+
+### Secret handling
+
+- Config stores credential references such as `env:OPENAI_API_KEY`; it never stores key
+  values.
+- CLI flags do not accept raw API keys.
+- Personal use resolves environment variables first, then an optional local secret
+  command. OS keyring support waits for a concrete need.
+- Enterprise use favors ambient identity and existing secret injection in the runner.
+- Traces, manifests, errors, and session files pass through the existing secret scanner.
+- `demerzel doctor` reports presence and connectivity without printing a credential.
+
+Example model aliases:
+
+```yaml
+models:
+  local-fast:
+    provider: ollama
+    model: qwen3
+    endpoint: http://127.0.0.1:11434
+  cloud-deep:
+    provider: anthropic
+    model: ${DEMERZEL_DEEP_MODEL}
+    credential: env:ANTHROPIC_API_KEY
+
+profiles:
+  reviewer:
+    model: cloud-deep
+    tools: [workspace.read, git.read, test.run]
+```
+
+Model identifiers remain user configuration because providers change them independently
+of Demerzel releases. Product defaults use aliases such as `fast`, `standard`, and
+`deep`, resolved by a checked-in profile.
+
+---
+
+## Harness capabilities
+
+### Strands loop
+
+Keep Strands first-class for tool dispatch, conversation management, hooks, retries, and
+telemetry. Keep it behind the existing runner seam so workflows depend on Demerzel's run
+contract. The seam accepts an injected model and session manager.
+
+### Context engineering
+
+Context collectors become named, testable inputs. The initial collectors cover project
+instructions, git state, selected files, diffs, and prior session summaries. Each
+collector records provenance and byte or token size before the model sees it.
+
+### Tool registry
+
+The current read-only Bash tool becomes one registered tool pack. Built-in packs cover
+workspace reads, git inspection, test execution, and artifact writes. MCP servers enter
+through the same registry with explicit names, trust labels, and per-profile allowlists.
+
+Developer profiles may approve write tools per session. Enterprise profiles default to
+read-only tools and policy-owned allowlists. The product keeps the current advisory
+review invariant until a separate write-authority threat model and approval flow ship.
+
+### Configuration and policy
+
+Recover the useful pieces from the archived config-core implementation: typed schemas,
+layered project configuration, prompt slots, per-key provenance, `config show`, and
+`doctor`. Start with user config, project config, profile, and CLI layers. Add an
+organization policy layer when the local path works and has migration tests.
+
+### Evidence and evaluation
+
+Every run emits normalized usage, cost when pricing is known, tool decisions, model and
+profile identifiers, timings, and artifact hashes. Provider adapters normalize usage
+without pretending unavailable fields exist. Evaluation fixtures run the same workflow
+across model aliases and compare output quality, cost, latency, and tool behavior.
+
+---
+
+## Enterprise and developer packaging
+
+### Enterprise runner
+
+- pinned wheel and OCI image;
+- headless commands with JSON status and portable artifact bundles;
+- ambient AWS identity or injected provider secrets;
+- organization policy that may restrict providers, models, tools, spend, and data paths;
+- OpenTelemetry export only when the operator configures an endpoint;
+- eval command for comparing approved model profiles inside the customer's account.
+
+The first enterprise workflow is code review because the current implementation covers
+it. The product language sells the harness layer and treats review as a packaged
+workflow.
+
+### Developer distribution
+
+- `uv tool install` first, with a standalone installer considered after the CLI settles;
+- direct prompt, run, review, session, config, and doctor commands;
+- BYO OpenAI and Anthropic keys, Bedrock credentials, or an Ollama endpoint;
+- project profiles and tool packs that can be shared in a repository;
+- local session persistence with export and deletion commands.
+
+Pricing, licensing, and the public repository decision remain open. The site should use
+"private preview" and describe planned provider support by status until those decisions
+are made.
+
+---
+
+## Build sequence
+
+### M0: Contract and positioning
+
+**Deliverables:** this plan, the invocation contract, provider sequence, work/personal
+boundary, and a marketing site that distinguishes current code from planned capability.
+
+**Verify:** repository and vault say the same thing; site build and responsive QA pass.
+
+### M1: Runtime extraction
+
+Move `BedrockModel` construction out of the Strands runner. Introduce `ModelSpec`, the
+provider registry, normalized capabilities, and an injected session manager. Keep every
+existing caller-mode test green.
+
+**Verify:** current Bedrock fake and CLI smoke tests produce the same artifacts and exit
+codes; a provider-neutral fake model runs the loop.
+
+### M2: Direct invocation and provider health
+
+Add `demerzel "prompt"`, `demerzel run`, model aliases, secret references, and `doctor`.
+Implement Bedrock, OpenAI Responses, Anthropic, and Ollama adapters in that order.
+
+**Verify:** hermetic contract suites cover each adapter; opt-in live smoke tests run only
+when the matching credential or local endpoint exists; logs and artifacts contain no
+secret values.
+
+### M3: Sessions and context
+
+Add project-scoped sessions, streaming terminal output, resume, compaction, context
+collectors, and provenance. Preserve one-shot startup speed by avoiding session setup in
+one-shot mode.
+
+**Verify:** interruption and resume tests, context-budget tests, deletion/export tests,
+and a real multi-turn dogfood session in this repository.
+
+### M4: Tools and MCP
+
+Create the tool registry, split the Bash capabilities into named packs, add approval
+state for developer writes, and connect MCP servers through per-profile allowlists.
+
+**Verify:** tool policy tests cover personal and enterprise profiles; prompt-injection
+fixtures cannot cross the selected tool boundary; MCP failures remain isolated from the
+session store.
+
+### M5: Enterprise policy and evidence
+
+Add the organization policy layer, portable artifact bundles, provider-aware cost rules,
+evaluation matrices, and the packaged OCI runner. Migrate the caller-mode review workflow
+onto the public `demerzel review` command.
+
+**Verify:** clean-container CI demo, policy precedence tests, multi-provider eval report,
+artifact portability test, and documented caller migration.
+
+### M6: Private preview
+
+Run the harness against personal daily work first. Invite a small set of developer and
+platform users after M2 and M3 are stable. Record setup friction, missing providers, tool
+requests, and policy needs. Pricing and licensing decisions use those sessions.
+
+**Verify:** each preview user completes a real workflow with their own provider and can
+locate the trace, cost or usage record, and session data without assistance.
+
+---
+
+## Current non-goals
+
+- hosted inference proxy or credential vault;
+- browser IDE or team chat product;
+- autonomous repo writes in enterprise review;
+- a home-grown model API that duplicates Strands providers;
+- provider parity claims before capability and live smoke tests pass;
+- Copied code, prompts, customer context, or private documentation.
+
+---
+
+## Open decisions
+
+- License and distribution model after private-preview feedback.
+- Whether the richer interactive surface remains a terminal renderer or becomes the ADE
+  project using Demerzel as its engine.
+- The minimum organization-policy format needed beyond project profiles.
+- Which OpenAI-compatible endpoints deserve named adapters after Ollama.
+- Whether a hosted artifact viewer adds enough value to justify an optional service.
+
+---
+
+# Appendix A: Imported Harness Baseline
 
 This document records the code-review harness that became Demerzel on 2026-07-10. The
 implementation came from a personal clean-room prototype and carries an observable,

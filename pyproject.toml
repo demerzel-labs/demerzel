@@ -1,7 +1,7 @@
 [project]
 name = "demerzel"
 version = "0.1.0"
-description = "Personal agent harness with an observable, budgeted, routed code-review loop"
+description = "Self-hosted agent harness with an observable, budgeted Strands runtime"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

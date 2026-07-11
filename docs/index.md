@@ -1,7 +1,7 @@
 # Demerzel docs
 
-- [`../PLAN.md`](../PLAN.md): imported code-review harness baseline. The next personal
-  harness plan has not been written yet.
+- [`../PLAN.md`](../PLAN.md): current product direction, invocation and provider plan,
+  build sequence, and the imported code-review baseline in Appendix A.
 - [`HANDOFF.md`](HANDOFF.md): archived integration notes.
 - [`strands-notes.md`](strands-notes.md): pinned strands-agents API contract.
 - [`REVIEW.md`](REVIEW.md): archived hardening review (2026-07-04). The names remain
