@@ -1,44 +1,46 @@
 # Demerzel benchmark suite
 
-Performance claims are a product feature and ship with receipts. Every number
-Demerzel publishes is produced by scripts in this directory, with raw data
-committed under `results/`. Full context: [`PLAN.md`](../PLAN.md), "Benchmark
-program".
+Demerzel treats performance claims as product features. The scripts in this
+directory produce every performance number that Demerzel publishes. The raw
+data for each number goes into `results/`. The "Benchmark program" section of
+[`PLAN.md`](../PLAN.md) describes the full program.
 
 ## Rules
 
-1. **Reproducible**: the suite is versioned with the code; anyone can rerun it.
-2. **Pinned**: competitor versions are recorded in every report.
-3. **Disclosed**: the machine spec (CPU, RAM, kernel, filesystem) accompanies
-   every published table.
-4. **Statistical**: warmups and ≥50 runs for timing; hyperfine's confidence
-   intervals are part of the result, not trimmed off.
-5. **Comparable**: where a comparison with another agent is claimed, the metric
-   matches theirs — memory is PSS from `/proc/<pid>/smaps_rollup`, as jcode
-   measures.
-6. **Raw data or it didn't happen**: JSON output is committed next to any
-   published summary.
+1. **Reproducible.** The suite lives in this repository, next to the code. You
+   can run the same scripts and compare your numbers with ours.
+2. **Pinned.** Each report records the exact version of each competitor.
+3. **Disclosed.** Each report records the machine data: CPU, RAM, kernel, and
+   filesystem.
+4. **Statistical.** Timing benchmarks use warmup runs and 50 or more measured
+   runs. Each report keeps the confidence intervals that hyperfine calculates.
+5. **Comparable.** When a report compares Demerzel with another agent, it uses
+   the same metric as that agent. For memory, the metric is PSS from
+   `/proc/<pid>/smaps_rollup`, because jcode publishes PSS.
+6. **Raw data included.** We commit the raw JSON output next to each published
+   summary.
 
 ## Layers
 
-| Layer | What | How | Status |
+| Layer | Measures | Method | Status |
 |---|---|---|---|
-| 1 | Boot time, memory footprint, binary size | hyperfine; smaps_rollup PSS/USS; cgroup-v2 `memory.peak`; cargo-bloat | boot + PSS primitive here; PTY scenarios land with M1 interactive mode |
-| 2 | Harness overhead per turn/tool-call, render throughput | mock OpenAI-compatible server replaying canned transcripts; criterion; iai-callgrind CI gate | lands in M1 |
-| 3 | Agentic capability (harness + model) | Terminal-Bench 2.0; fixed-model A/B vs other harnesses; Coding Agent Index as external target | lands in M3/M4 |
-| 4 | Loop efficiency | prompt-cache hit rate on replays; tokens per completed task | lands in M4 |
+| 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner and the PSS sampler are here. The PTY scenarios come with the M1 interactive mode. |
+| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | Comes with M1 |
+| 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
+| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task | Comes with M4 |
 
-## Running
+## How to run
 
 ```bash
 cargo build --release
 
-# Layer 1: boot (pure binary start; PTY time-to-interactive comes with M1)
+# Layer 1: boot time (pure binary start; the PTY probe comes with M1)
 bench/boot/run.sh
 
-# Layer 1: memory primitive — PSS/USS for running agent PIDs
+# Layer 1: memory. Give the PIDs of running agent processes.
 bench/memory/pss.py <pid> [pid...]
 ```
 
-Requires `hyperfine` (Arch: `pacman -S hyperfine`). Linux-only for memory
-(smaps_rollup).
+The boot benchmark needs `hyperfine`. On Arch Linux, install it with
+`pacman -S hyperfine`. The memory benchmark works only on Linux, because it
+reads `/proc/<pid>/smaps_rollup`.

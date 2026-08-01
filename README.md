@@ -1,11 +1,13 @@
 # Demerzel
 
-An open-source terminal coding agent in Rust. One lightweight binary, any model
-provider, built for a rich extension ecosystem and a benchmark-backed
-performance claim.
+Demerzel is an open-source terminal coding agent written in Rust. It runs as
+one small binary. It connects to the model provider that you choose. Its three
+goals are a rich extension ecosystem, deep customization, and measured
+performance.
 
-**Status: pre-alpha.** The product plan is [`PLAN.md`](PLAN.md); the benchmark
-methodology is [`bench/README.md`](bench/README.md). Nothing is usable yet.
+**Status: pre-alpha.** You cannot use Demerzel yet. [`PLAN.md`](PLAN.md)
+contains the product plan. [`bench/README.md`](bench/README.md) contains the
+benchmark method.
 
 ## Build
 
@@ -16,15 +18,17 @@ cargo build --release
 
 ## Principles
 
-- **Provider-neutral**: OpenAI-compatible endpoints first (OpenAI, Ollama,
-  vLLM, LM Studio), Anthropic next; no adapter is privileged.
-- **Lightweight**: performance and memory numbers are product features and ship
-  with reproducible receipts in [`bench/`](bench/).
-- **Yours to extend**: markdown skills, subprocess hooks, MCP, subagents —
-  and auto-discovery of the agent config already in your repos.
+- **Provider-neutral.** No provider adapter has a special position. The first
+  adapter speaks the OpenAI-compatible API and covers OpenAI, Ollama, vLLM,
+  and LM Studio. The Anthropic adapter comes next.
+- **Lightweight.** Speed and memory use are product features. Each published
+  number comes from a reproducible benchmark in [`bench/`](bench/).
+- **Yours to extend.** You can add markdown skills, subprocess hooks, MCP
+  servers, and subagents. Demerzel also finds the agent configuration that
+  other tools already put in your repository.
 
-The previous contents of this repository (a Python pipeline review harness) are
-preserved on the `archive/python-pipeline-harness-2026-07-31` branch.
+The branch `archive/python-pipeline-harness-2026-07-31` holds the previous
+contents of this repository: a Python review harness for CI pipelines.
 
 ## License
 
