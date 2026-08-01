@@ -1,0 +1,13 @@
+[package]
+name = "demerzel"
+description = "Open-source terminal coding agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "demerzel"
+path = "src/main.rs"
+
+[dependencies]
