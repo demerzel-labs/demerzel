@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/demerzel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/demerzel-labs/demerzel"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
