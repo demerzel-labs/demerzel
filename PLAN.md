@@ -8,7 +8,8 @@ Three pillars, in order:
 
 1. **Rich ecosystem** — skills, slash commands, hooks, MCP, subagents, and
    zero-migration adoption of config other agents already left in your repos.
-2. **Customizability** — layered config, per-role model routing, theming, and an
+2. **Customizability** — layered config, per-role model routing, theming,
+   persistent memory and an agent personality tuned to how you work, and an
    unopinionated provider layer.
 3. **Lightweight and fast** — jcode-class boot time and memory footprint, backed by
    a published, reproducible benchmark suite instead of a README claim.
@@ -115,6 +116,34 @@ record is the source of truth for resume, compaction, and replay — and doubles
 as the fixture format for the bench suite's deterministic transcripts. No
 secrets in session files.
 
+### Memory and personality
+
+Memory is a first-class feature of the harness, not user-space scaffolding. A
+user does not have to build a second brain for their agent by hand.
+
+- **Project memory**: a per-project fact store under XDG data (SQLite). Each
+  record holds one fact with provenance: session id and date. The agent gets
+  explicit tools — save, search, forget.
+- **Auto-recall**: at session start the harness injects the most relevant
+  facts, inside a fixed token budget, at a fixed position in prompt assembly,
+  so the stable-prefix discipline holds.
+- **Lexical retrieval first**: BM25, the same engine as deferred tool
+  discovery. Simple beats embeddings until a measurement says otherwise, and
+  lexical retrieval protects the binary-size gate. Local embeddings are an
+  optional upgrade, added only if Layer-4 benches show lexical recall failing.
+- **Compaction feeds memory**: when a session compacts, durable facts distill
+  into the store instead of vanishing with the truncated context. One
+  mechanism serves context economy and long-term knowledge.
+- **Personality**: a user-scoped profile that tunes the agent to one human's
+  way of working — tone, workflow preferences (plan-first or dive-in,
+  test-before-done, verbosity), and standing corrections. The profile is a
+  plain file the user can read and edit. The agent proposes profile additions
+  from in-session feedback; it never rewrites the profile silently. Project
+  memory stays per repository; the personality travels with the user.
+
+Prior art: jcode's semantic memory, oh-my-pi's Hindsight fact bank, and the
+MEMORY.md pattern in Claude Code.
+
 ### Ecosystem and customizability
 
 - **Markdown-first extension**: project instructions (AGENTS.md), skills, and
@@ -200,6 +229,8 @@ micro-benchmarks; iai-callgrind instruction counts as the CI regression gate
 - Prompt-cache hit rate (cache-read tokens / input tokens) on replayed
   sessions — proves prefix discipline.
 - Tokens per completed task on the Layer-3 suites — cost per successful task.
+- Memory recall precision on replayed sessions with known relevant facts —
+  gates the optional move from BM25 to embeddings.
 
 ### Targets
 
@@ -243,14 +274,16 @@ replayed session; config precedence tests.
 ### M3 — Ecosystem
 
 Skills, hooks, MCP client with deferred discovery, subagents with typed
-results, competitor-config auto-discovery, theming. **Verify:** a skill, a hook,
+results, competitor-config auto-discovery, theming, project memory (store,
+tools, auto-recall), and the personality profile. **Verify:** a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
-existing `.claude`/`.cursor` config with zero edits.
+existing `.claude`/`.cursor` config with zero edits; a fact saved in one
+session comes back in a fresh session inside the token budget.
 
 ### M4 — Optimization pass and first benchmark report
 
-Profile against Layer 1/2 gates; land prefix stability, compaction, connection
-reuse. Publish the first full report: pinned competitor versions, machine spec,
+Profile against Layer 1/2 gates; land prefix stability, compaction with
+distillation into memory, connection reuse. Publish the first full report: pinned competitor versions, machine spec,
 raw data, all four layers. **Verify:** every gate in the targets table met or
 the miss documented with a profile trace.
 
@@ -279,8 +312,10 @@ under two minutes with each of: OpenAI key, Anthropic key, local Ollama.
 
 - Prompt/context format details: how skills and AGENTS.md compose into the
   system prompt while keeping the prefix stable.
-- Compaction strategy: summarize-and-truncate vs structured memory; measure
-  before choosing.
+- Compaction split: how much of a compacted session becomes memory facts and
+  how much becomes summary text; measure both on replayed sessions.
+- Personality profile format: one file or layered (user + per-project
+  overrides); decide in M3 with real dogfood feedback.
 - Subagent transport: in-process vs subprocess-per-agent; footprint benches
   decide.
 - Whether Terminal-Bench harness adapters accept a third-party agent cleanly or

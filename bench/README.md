@@ -27,7 +27,7 @@ data for each number goes into `results/`. The "Benchmark program" section of
 | 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner and the PSS sampler are here. The PTY scenarios come with the M1 interactive mode. |
 | 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | Comes with M1 |
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
-| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task | Comes with M4 |
+| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | Comes with M4 |
 
 ## How to run
 
