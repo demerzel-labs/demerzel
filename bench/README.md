@@ -3,7 +3,7 @@
 Demerzel treats performance claims as product features. The scripts in this
 directory produce every performance number that Demerzel publishes. The raw
 data for each number goes into `results/`. The "Benchmark program" section of
-[`PLAN.md`](../PLAN.md) describes the full program.
+[`docs/plan.md`](../docs/plan.md) describes the full program.
 
 ## Rules
 
