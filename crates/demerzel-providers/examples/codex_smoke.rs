@@ -1,7 +1,7 @@
 //! Live smoke call against the real Codex endpoint with the imported
 //! Codex CLI credentials. Part of the M1 step-2 verify line.
 //!
-//! Run: `cargo run -p demerzel-providers --example codex_smoke [model]`
+//! Run: `cargo run -p demerzel-providers --example codex_smoke -- [model] [prompt...]`
 
 use std::future::poll_fn;
 
@@ -11,9 +11,14 @@ use demerzel_providers::{Provider, Request, StreamEvent};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "gpt-5.6-sol".to_string());
+    let mut args = std::env::args().skip(1);
+    let model = args.next().unwrap_or_else(|| "gpt-5.6-sol".to_string());
+    let rest: Vec<String> = args.collect();
+    let prompt = if rest.is_empty() {
+        "Reply with exactly one word: pong".to_string()
+    } else {
+        rest.join(" ")
+    };
     let auth = AuthStore::open_default()?;
     let provider = OpenAiCodex::new(CodexConfig::default(), auth);
     let request = Request {
@@ -21,9 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: "You are demerzel, a terminal coding agent.".to_string(),
         messages: vec![Message {
             role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "Reply with exactly one word: pong".to_string(),
-            }],
+            content: vec![ContentBlock::Text { text: prompt }],
         }],
         tools: Vec::new(),
         max_output_tokens: None,
