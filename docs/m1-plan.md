@@ -1,6 +1,6 @@
 # M1 Implementation Plan — Dogfoodable Core
 
-This plan turns the M1 milestone of [`PLAN.md`](../PLAN.md) into ordered,
+This plan turns the M1 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. Status: draft, not reviewed.
 
 ## Goal
