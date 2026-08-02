@@ -1,0 +1,14 @@
+[package]
+name = "demerzel-providers"
+description = "Provider trait and adapters for the Demerzel harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+demerzel-core = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
