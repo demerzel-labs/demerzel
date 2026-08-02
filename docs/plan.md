@@ -149,6 +149,13 @@ MEMORY.md pattern in Claude Code.
 
 ### Ecosystem and customizability
 
+- **System prompt, fully customizable** (decided 2026-08-02): the harness
+  owns a small base prompt, and config can replace it completely — the Pi
+  model, not the Codex or Claude Code model. Extension layers (project
+  instructions, skills, personality, memory recall) compose at fixed
+  positions so the prompt prefix stays stable. A user who replaces the base
+  prompt owns the consequences; the harness does not merge or repair it.
+  The composition order is designed in M3.
 - **Markdown-first extension**: project instructions (AGENTS.md), skills, and
   slash commands as plain files. **Auto-discovery of competitor config** —
   `.claude/`, `.cursor/`, CLAUDE.md, pi/omp files — so adopting Demerzel in an
