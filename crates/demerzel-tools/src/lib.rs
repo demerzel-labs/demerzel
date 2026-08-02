@@ -15,8 +15,8 @@ mod create;
 mod edit;
 mod glob;
 mod grep;
-mod hashline;
 mod read;
+mod snapshot;
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -32,8 +32,8 @@ pub use create::CreateTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use hashline::file_tag;
 pub use read::ReadTool;
+pub use snapshot::file_tag;
 
 /// Input cap for the read and edit tools, and the walker's file-size
 /// cap for grep and glob. One bound, so the tools agree on what a

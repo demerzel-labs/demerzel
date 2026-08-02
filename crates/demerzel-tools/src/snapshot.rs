@@ -1,4 +1,4 @@
-//! Snapshot tags for the read and edit tools.
+//! Snapshot tags for the read, edit, and create tools.
 //!
 //! A tag is the FNV-1a 64-bit hash of the whole file content, xor-folded
 //! to 24 bits and printed as six hex characters. The read tool stamps
@@ -6,10 +6,9 @@
 //! while the live file still hashes to the same tag. One mismatch means
 //! the file changed and every line number from that read is void.
 //!
-//! Prior art: oh-my-pi's Hashline, which pairs a whole-file snapshot
-//! tag with plain line numbers. Line numbers are unique by construction,
-//! so no anchor is ever ambiguous — the failure class collapses into
-//! one precise "stale tag" error with one recovery: read again.
+//! Line numbers are unique by construction, so no edit target is ever
+//! ambiguous: file drift collapses into one precise stale-tag error
+//! with one recovery — read again.
 //!
 //! Header parse rule, for every consumer of tool output: the header is
 //! exactly line 1, shaped `[path#tag]`. The tag is the six characters

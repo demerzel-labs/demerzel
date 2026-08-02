@@ -8,7 +8,7 @@ use demerzel_core::{BoxFuture, ToolAccess};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::hashline::file_tag;
+use crate::snapshot::file_tag;
 use crate::{Tool, ToolError, ToolOutput, display_path, parse_input, resolve_write};
 
 pub struct CreateTool {
