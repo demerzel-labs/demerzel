@@ -76,8 +76,10 @@ trait Provider {
 ```
 
 Stream events: `TextDelta`, `ReasoningDelta`, `ToolCallStart`,
-`ToolCallDelta`, `ToolCallEnd`, `Usage`, `Done(StopReason)`.
-`ReasoningDelta` streams the readable reasoning summary.
+`ToolCallDelta`, `ToolCallEnd`, `ReasoningDone`, `Usage`,
+`Done(StopReason)`. `ReasoningDelta` streams the readable reasoning
+summary. `ReasoningDone` carries the sealed payload. `ToolCallEnd`
+carries the complete parsed tool input.
 
 `Capabilities` declares: streaming, tool calls, parallel tool calls, usage in
 stream, cache control, sealed reasoning. The harness reads the flags and
@@ -279,10 +281,11 @@ Each step is one PR with its own verify line.
 
 ## Decisions to make during M1
 
-- Refresh strategy for imported tokens. If the OAuth server rotates refresh
-  tokens on use, dmz and the Codex CLI can invalidate each other. Decide in
-  step 2 against the real flow: refresh independently, or re-import on
-  expiry.
+- Refresh strategy for imported tokens — resolved in step 2. When the Codex
+  CLI file holds a newer `last_refresh`, dmz re-imports it instead of
+  spending its own refresh token. Otherwise dmz runs the OAuth refresh and
+  saves to its own store only. This keeps the two programs from invalidating
+  each other while the Codex CLI stays in daily use.
 - Exact anchor scheme for edit (content hash vs content + position;
   duplicate-line handling). Decide in step 4 with tests as evidence.
 - rustyline vs reedline. Decide in step 6 by binary-size cost.
