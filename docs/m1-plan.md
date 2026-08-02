@@ -245,7 +245,6 @@ binary gate. Dev-only crates are exempt.
 | clap | CLI |
 | rustyline or reedline | REPL line editing (decide in step 6) |
 | grep-searcher, grep-regex, globset, ignore | in-process search tools |
-| blake3 or xxhash | edit anchors (decide in step 4) |
 | ulid | session ids |
 | etcetera or dirs | XDG paths |
 | thiserror, anyhow | errors |
@@ -286,8 +285,14 @@ Each step is one PR with its own verify line.
   spending its own refresh token. Otherwise dmz runs the OAuth refresh and
   saves to its own store only. This keeps the two programs from invalidating
   each other while the Codex CLI stays in daily use.
-- Exact anchor scheme for edit (content hash vs content + position;
-  duplicate-line handling). Decide in step 4 with tests as evidence.
+- Line-tag hash — resolved in step 3, because `read` emits the tags.
+  A tag is the FNV-1a 64-bit hash of the line content, folded to 24
+  bits, printed as six hex characters. The hash is inline code, so no
+  new dependency. The tag depends on the content only, so it is stable
+  across positions and reads. Identical lines share one tag; the edit
+  tool must reject an anchor that matches more than one line.
+- Edit addressing (anchor alone vs anchor + position; duplicate-line
+  handling). Decide in step 4 with tests as evidence.
 - rustyline vs reedline. Decide in step 6 by binary-size cost.
 - tokio runtime flavor. Start with `current_thread`; move to multi-thread
   only if a bench shows a need.
