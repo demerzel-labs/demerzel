@@ -1,0 +1,9 @@
+[package]
+name = "demerzel-tools"
+description = "Tool implementations for the Demerzel harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
