@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+demerzel-core = { workspace = true }
 demerzel-providers = { workspace = true }
 globset = { workspace = true }
 grep-regex = { workspace = true }
@@ -15,6 +16,10 @@ ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

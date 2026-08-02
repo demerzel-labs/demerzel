@@ -132,13 +132,14 @@ Common trait: name, description, JSON-Schema input, structured result.
 Output truncation adds explicit markers. Errors return to the model as
 `ToolResult { is_error: true }` with a message the model can act on.
 
-- **read** — returns lines tagged with short content hashes
-  (`a3f2c1|line text`). Prior art: oh-my-pi Hashline.
-- **edit** — addresses edits by anchor hash, not by string match. The tool
-  validates each anchor against current file content. A stale anchor returns
-  an error that lists the current hashes near the expected location.
-  Constraint: identical lines must resolve to unique anchors, or the tool
-  must reject the ambiguous anchor with a precise error.
+- **read** — returns a `[path#tag]` snapshot header and numbered lines
+  (`42:line text`). The tag is a short hash of the whole file. Prior art:
+  oh-my-pi Hashline.
+- **edit** — addresses lines by number and validates the snapshot tag from
+  the latest read. A stale tag returns an error that lists the current
+  lines near the edit target. Line numbers are unique, so no anchor is
+  ambiguous. The response returns the new tag and the renumbered changed
+  lines, so chained edits need no fresh read.
 - **bash** — real subprocess. Constructed environment (PATH, HOME, TERM,
   LANG; no ambient credentials). Per-call timeout. Captured stdout and
   stderr with truncation markers. Exit code in the result.
@@ -245,6 +246,7 @@ binary gate. Dev-only crates are exempt.
 | clap | CLI |
 | rustyline or reedline | REPL line editing (decide in step 6) |
 | grep-searcher, grep-regex, globset, ignore | in-process search tools |
+| libc (unix only) | bash process-group kill on timeout |
 | ulid | session ids |
 | etcetera or dirs | XDG paths |
 | thiserror, anyhow | errors |
@@ -285,14 +287,16 @@ Each step is one PR with its own verify line.
   spending its own refresh token. Otherwise dmz runs the OAuth refresh and
   saves to its own store only. This keeps the two programs from invalidating
   each other while the Codex CLI stays in daily use.
-- Line-tag hash — resolved in step 3, because `read` emits the tags.
-  A tag is the FNV-1a 64-bit hash of the line content, folded to 24
-  bits, printed as six hex characters. The hash is inline code, so no
-  new dependency. The tag depends on the content only, so it is stable
-  across positions and reads. Identical lines share one tag; the edit
-  tool must reject an anchor that matches more than one line.
-- Edit addressing (anchor alone vs anchor + position; duplicate-line
-  handling). Decide in step 4 with tests as evidence.
+- Edit addressing — resolved in step 4 from the Hashline source. omp
+  pairs one snapshot tag for the whole file with plain line numbers; it
+  does not tag single lines. Demerzel follows that scheme. The tag is
+  the FNV-1a 64-bit hash of the file content, folded to 24 bits, six
+  hex characters, inline code, no new dependency. Line numbers are
+  unique, so no edit target is ambiguous. One stale-tag error covers
+  every drift case, and the edit response re-grounds the model with the
+  new tag and the renumbered lines. This supersedes the step-3 per-line
+  tags, which could not address a duplicated line without a second
+  round trip.
 - rustyline vs reedline. Decide in step 6 by binary-size cost.
 - tokio runtime flavor. Start with `current_thread`; move to multi-thread
   only if a bench shows a need.

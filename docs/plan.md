@@ -75,12 +75,12 @@ own) is considered only if the bench suite shows ratatui as the bottleneck.
 
 ### Edits: hash-anchored
 
-File reads return lines tagged with short content hashes. The edit tool
-addresses edits by anchor hash instead of string matching. The harness validates
-anchors against current file content and rejects stale edits with a precise
-error the model can recover from. Prior art: oh-my-pi's Hashline (MIT), which
-reports large output-token savings and eliminates the
-whitespace-mismatch failure class of search/replace diffs.
+File reads return numbered lines under a short snapshot tag of the whole
+file. The edit tool addresses lines by number and sends the tag back. The
+harness applies the edits only while the file still hashes to that tag; a
+stale tag returns a precise error the model can recover from. Prior art:
+oh-my-pi's Hashline (MIT), which reports large output-token savings and
+eliminates the whitespace-mismatch failure class of search/replace diffs.
 
 ### Tools: in-process where it counts
 

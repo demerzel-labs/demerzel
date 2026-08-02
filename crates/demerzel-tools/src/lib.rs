@@ -6,6 +6,8 @@
 //! to the model as [`ToolOutput`] with `is_error: true`; they never
 //! panic the harness.
 
+mod bash;
+mod edit;
 mod glob;
 mod grep;
 mod hashline;
@@ -14,13 +16,16 @@ mod read;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use demerzel_core::ToolAccess;
 use demerzel_providers::{BoxFuture, ToolDefinition};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+pub use bash::BashTool;
+pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use hashline::line_tag;
+pub use hashline::file_tag;
 pub use read::ReadTool;
 
 /// Tool failure classes. Both reach the model as an error result with
@@ -71,6 +76,10 @@ pub trait Tool: Send + Sync {
 
     fn description(&self) -> &'static str;
 
+    /// The declared access class. The approval policy keys on it
+    /// before dispatch; it never reaches the model.
+    fn access(&self) -> ToolAccess;
+
     /// JSON Schema for the tool input.
     fn input_schema(&self) -> Value;
 
@@ -97,6 +106,19 @@ impl Registry {
         let root = root.into();
         let mut registry = Self::new();
         registry.register(Box::new(ReadTool::new(root.clone())));
+        registry.register(Box::new(GrepTool::new(root.clone())));
+        registry.register(Box::new(GlobTool::new(root)));
+        registry
+    }
+
+    /// The full tool set: read, edit, bash, grep, glob. The approval
+    /// policy gates the write and execute tools per call.
+    pub fn full(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let mut registry = Self::new();
+        registry.register(Box::new(ReadTool::new(root.clone())));
+        registry.register(Box::new(EditTool::new(root.clone())));
+        registry.register(Box::new(BashTool::new(root.clone())));
         registry.register(Box::new(GrepTool::new(root.clone())));
         registry.register(Box::new(GlobTool::new(root)));
         registry
@@ -143,6 +165,12 @@ impl Registry {
         })
     }
 
+    /// The declared access class of the named tool, for the approval
+    /// check before dispatch.
+    pub fn access(&self, name: &str) -> Option<ToolAccess> {
+        self.find(name).map(Tool::access)
+    }
+
     fn find(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -154,6 +182,19 @@ impl Registry {
 /// Parse a tool input value into its typed form.
 pub(crate) fn parse_input<T: DeserializeOwned>(input: Value) -> Result<T, ToolError> {
     serde_json::from_value(input).map_err(|error| ToolError::InvalidInput(error.to_string()))
+}
+
+/// Read a file as UTF-8 text with actionable errors, shared by the
+/// read and edit tools.
+pub(crate) fn read_text(path: &Path) -> Result<String, ToolError> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| ToolError::Failed(format!("cannot read {}: {error}", path.display())))?;
+    String::from_utf8(bytes).map_err(|_| {
+        ToolError::Failed(format!(
+            "{} is not valid UTF-8; only text files are supported",
+            path.display()
+        ))
+    })
 }
 
 /// Resolve a model-supplied path against the tool root.
@@ -227,12 +268,30 @@ mod tests {
     }
 
     #[test]
+    fn the_full_set_adds_edit_and_bash_with_their_access_classes() {
+        let dir = fixture();
+        let registry = Registry::full(dir.path());
+        let names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(names, ["read", "edit", "bash", "grep", "glob"]);
+        assert_eq!(registry.access("read"), Some(ToolAccess::ReadOnly));
+        assert_eq!(registry.access("grep"), Some(ToolAccess::ReadOnly));
+        assert_eq!(registry.access("glob"), Some(ToolAccess::ReadOnly));
+        assert_eq!(registry.access("edit"), Some(ToolAccess::Write));
+        assert_eq!(registry.access("bash"), Some(ToolAccess::Execute));
+        assert_eq!(registry.access("write"), None);
+    }
+
+    #[test]
     fn dispatch_runs_a_tool_end_to_end() {
         let dir = fixture();
         let registry = Registry::read_only(dir.path());
         let output = run_now(registry.dispatch("read", json!({"path": "hello.txt"})));
         assert!(!output.is_error);
-        assert!(output.content.contains("|hello"));
+        assert!(output.content.contains("1:hello"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use demerzel_core::ToolAccess;
 use demerzel_providers::BoxFuture;
 use grep_regex::RegexMatcher;
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
@@ -116,6 +117,10 @@ impl Tool for GrepTool {
 
     fn description(&self) -> &'static str {
         "Search file contents with a regular expression. The search skips files that .gitignore excludes."
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 
     fn input_schema(&self) -> Value {

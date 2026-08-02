@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use demerzel_core::ToolAccess;
 use demerzel_providers::BoxFuture;
 use globset::GlobBuilder;
 use serde::Deserialize;
@@ -79,6 +80,10 @@ impl Tool for GlobTool {
 
     fn description(&self) -> &'static str {
         "Find files that match a glob pattern. The search skips files that .gitignore excludes."
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 
     fn input_schema(&self) -> Value {
