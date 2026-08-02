@@ -6,6 +6,8 @@
 
 mod approval;
 mod message;
+mod tool;
 
-pub use approval::{ApprovalDecision, ApprovalMode, ToolAccess};
+pub use approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, ToolAccess};
 pub use message::{ContentBlock, Message, Role, SealedPayload, StopReason, Usage};
+pub use tool::{BoxFuture, ToolDefinition};

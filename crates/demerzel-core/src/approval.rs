@@ -51,6 +51,39 @@ impl ApprovalMode {
     }
 }
 
+/// One tool call, as the policy sees it before dispatch.
+///
+/// The policy receives the full call, not only the access class, so
+/// later per-tool rules, input inspection, and path checks extend the
+/// policy without a signature break.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalRequest<'a> {
+    /// Tool name, e.g. "bash".
+    pub tool: &'a str,
+    /// The access class the tool declared.
+    pub access: ToolAccess,
+    /// The call input, verbatim.
+    pub input: &'a serde_json::Value,
+}
+
+/// The approval policy for one session. In M1 it holds only the mode;
+/// per-tool overrides and session-scoped grants land here as fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalPolicy {
+    pub mode: ApprovalMode,
+}
+
+impl ApprovalPolicy {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self { mode }
+    }
+
+    /// Decide one tool call before dispatch.
+    pub fn decide(&self, request: &ApprovalRequest<'_>) -> ApprovalDecision {
+        self.mode.decide(request.access)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +105,18 @@ mod tests {
         for (mode, access, expected) in cases {
             assert_eq!(mode.decide(access), expected, "{mode:?} x {access:?}");
         }
+    }
+
+    #[test]
+    fn the_policy_applies_the_mode_to_a_full_request() {
+        let policy = ApprovalPolicy::new(ApprovalMode::Ask);
+        let input = serde_json::json!({"command": "ls"});
+        let request = ApprovalRequest {
+            tool: "bash",
+            access: ToolAccess::Execute,
+            input: &input,
+        };
+        assert_eq!(policy.decide(&request), AskUser);
     }
 
     #[test]

@@ -27,7 +27,7 @@ M1 is done when all of these hold:
 
 In: provider trait with capabilities, `openai-codex` adapter with streaming
 (the Responses API over the ChatGPT subscription), OAuth credential import
-and refresh, core tools (read, hash-anchored edit, bash, grep, glob),
+and refresh, core tools (read, hash-anchored edit, create, bash, grep, glob),
 approval modes, agent loop, JSONL sessions with resume, one-shot mode,
 plain-terminal REPL, mock server, first bench numbers.
 
@@ -44,7 +44,7 @@ crates/
   demerzel/            # bin: CLI, REPL, wiring
   demerzel-core/       # domain types, loop, sessions, approval policy
   demerzel-providers/  # provider trait + openai-codex adapter
-  demerzel-tools/      # read, edit, bash, grep, glob
+  demerzel-tools/      # read, edit, create, bash, grep, glob
   demerzel-mock/       # mock OpenAI-compatible server (dev/test/bench only)
 bench/                 # boot + memory runners, PTY probe, criterion harness
 ```
@@ -140,6 +140,9 @@ Output truncation adds explicit markers. Errors return to the model as
   lines near the edit target. Line numbers are unique, so no anchor is
   ambiguous. The response returns the new tag and the renumbered changed
   lines, so chained edits need no fresh read.
+- **create** — writes a new file. It fails when the file exists, so an
+  overwrite is always an explicit read plus edit. Prior art: omp keeps
+  file creation out of the Hashline edit language.
 - **bash** — real subprocess. Constructed environment (PATH, HOME, TERM,
   LANG; no ambient credentials). Per-call timeout. Captured stdout and
   stderr with truncation markers. Exit code in the result.

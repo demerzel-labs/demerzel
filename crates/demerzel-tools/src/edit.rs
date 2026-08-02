@@ -3,24 +3,23 @@
 //! The model takes the tag and the line numbers from its latest read.
 //! The tool applies the edits only while the live file still hashes to
 //! that tag; one mismatch voids every line number from that read. The
-//! response carries the new tag and the renumbered changed lines, so
-//! chained edits need no fresh read.
+//! response carries the new tag and the new position of every op — not
+//! the content, which the model already holds — so chained edits need
+//! no fresh read.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use demerzel_core::ToolAccess;
-use demerzel_providers::BoxFuture;
+use demerzel_core::{BoxFuture, ToolAccess};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::hashline::file_tag;
-use crate::{Tool, ToolError, ToolOutput, parse_input, read_text, resolve};
+use crate::{Tool, ToolError, ToolOutput, display_path, parse_input, read_text, resolve_write};
 
 /// Lines of stale-file context shown around the first edit target.
 const STALE_CONTEXT_LINES: usize = 3;
-
-/// Changed lines echoed back before the echo truncates.
-const MAX_ECHO_LINES: usize = 100;
 
 pub struct EditTool {
     root: PathBuf,
@@ -30,46 +29,127 @@ pub struct EditTool {
 #[serde(deny_unknown_fields)]
 struct EditInput {
     path: String,
-    /// Snapshot tag from the latest read. Required for every op except
-    /// `create`.
-    tag: Option<String>,
-    edits: Vec<EditOp>,
+    /// Snapshot tag from the latest read of the file.
+    tag: String,
+    /// Raw ops; each is routed to its strict per-variant shape.
+    edits: Vec<Value>,
 }
 
-// `deny_unknown_fields` does not compose with internally tagged enums,
-// so unknown fields inside one op pass silently; an unknown `op` still
-// fails with the variant list.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
 enum EditOp {
-    /// Replace lines `start..=end` with the content lines.
     Replace {
         start: usize,
         end: usize,
         content: String,
     },
-    /// Insert the content lines before line `line`. `line` may be
-    /// one past the last line to append at the end of the file.
-    InsertBefore { line: usize, content: String },
-    /// Insert the content lines after line `line`.
-    InsertAfter { line: usize, content: String },
-    /// Delete lines `start..=end`.
-    Delete { start: usize, end: usize },
-    /// Create a new file with the content. The file must not exist,
-    /// and `create` must be the only op in the call.
-    Create { content: String },
+    InsertBefore {
+        line: usize,
+        content: String,
+    },
+    InsertAfter {
+        line: usize,
+        content: String,
+    },
+    Delete {
+        start: usize,
+        end: usize,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceOp {
+    start: usize,
+    end: usize,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InsertOp {
+    line: usize,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteOp {
+    start: usize,
+    end: usize,
+}
+
+/// Parse one op strictly: the variant decides the accepted fields, so
+/// a stray field is an error instead of a silently dropped intent.
+fn parse_op(index: usize, value: &Value) -> Result<EditOp, ToolError> {
+    let invalid = |message: String| ToolError::InvalidInput(format!("edits[{index}]: {message}"));
+    let Some(object) = value.as_object() else {
+        return Err(invalid("each edit is an object with an `op` field".into()));
+    };
+    let Some(op) = object.get("op").and_then(Value::as_str) else {
+        return Err(invalid(
+            "missing `op`; use replace, insert_before, insert_after, or delete".into(),
+        ));
+    };
+    let mut fields = object.clone();
+    fields.remove("op");
+    let fields = Value::Object(fields);
+    match op {
+        "replace" => serde_json::from_value::<ReplaceOp>(fields)
+            .map(|op| EditOp::Replace {
+                start: op.start,
+                end: op.end,
+                content: op.content,
+            })
+            .map_err(|error| invalid(format!("replace takes start, end, content: {error}"))),
+        "insert_before" => serde_json::from_value::<InsertOp>(fields)
+            .map(|op| EditOp::InsertBefore {
+                line: op.line,
+                content: op.content,
+            })
+            .map_err(|error| invalid(format!("insert_before takes line, content: {error}"))),
+        "insert_after" => serde_json::from_value::<InsertOp>(fields)
+            .map(|op| EditOp::InsertAfter {
+                line: op.line,
+                content: op.content,
+            })
+            .map_err(|error| invalid(format!("insert_after takes line, content: {error}"))),
+        "delete" => serde_json::from_value::<DeleteOp>(fields)
+            .map(|op| EditOp::Delete {
+                start: op.start,
+                end: op.end,
+            })
+            .map_err(|error| invalid(format!("delete takes start, end: {error}"))),
+        other => Err(invalid(format!(
+            "unknown op `{other}`; use replace, insert_before, insert_after, or delete (the create tool makes new files)"
+        ))),
+    }
+}
+
+/// The caller's own words for one op, used in conflict errors and the
+/// response, so the model can map a message back to its input.
+fn describe(op: &EditOp) -> String {
+    match op {
+        EditOp::Replace { start, end, .. } => format!("replace {start}-{end}"),
+        EditOp::InsertBefore { line, .. } => format!("insert_before {line}"),
+        EditOp::InsertAfter { line, .. } => format!("insert_after {line}"),
+        EditOp::Delete { start, end } => format!("delete {start}-{end}"),
+    }
 }
 
 /// One validated op, positioned on the original file.
 enum Planned<'a> {
     /// Insert at gap `gap`: between line `gap` and line `gap + 1`;
     /// gap 0 is the file head, gap `total` is the file tail.
-    Insert { gap: usize, lines: Vec<&'a str> },
+    Insert {
+        gap: usize,
+        lines: Vec<&'a str>,
+        index: usize,
+    },
     /// Replace lines `start..=end`; `lines` empty means delete.
     Span {
         start: usize,
         end: usize,
         lines: Vec<&'a str>,
+        index: usize,
     },
 }
 
@@ -80,6 +160,12 @@ impl Planned<'_> {
         match self {
             Planned::Insert { gap, .. } => (*gap, 0),
             Planned::Span { start, .. } => (start - 1, 1),
+        }
+    }
+
+    fn index(&self) -> usize {
+        match self {
+            Planned::Insert { index, .. } | Planned::Span { index, .. } => *index,
         }
     }
 }
@@ -118,12 +204,15 @@ fn split_lines(text: &str) -> Vec<Line<'_>> {
     lines
 }
 
-/// Split op content into lines. One trailing newline is optional.
+/// Split op content into bare lines. One trailing newline is optional,
+/// and CRLF endings are normalized away — `apply` alone owns the
+/// terminators, so op content can never write a stray `\r`.
 fn content_lines(content: &str) -> Vec<&str> {
     content
         .strip_suffix('\n')
         .unwrap_or(content)
         .split('\n')
+        .map(|piece| piece.strip_suffix('\r').unwrap_or(piece))
         .collect()
 }
 
@@ -137,116 +226,76 @@ impl EditTool {
         if input.edits.is_empty() {
             return Err(ToolError::InvalidInput("edits must not be empty".into()));
         }
-        let path = resolve(&self.root, &input.path);
-        if let Some(EditOp::Create { content }) = input.edits.first() {
-            if input.edits.len() > 1 {
-                return Err(ToolError::InvalidInput(
-                    "create must be the only op in the call".into(),
-                ));
-            }
-            return self.create(&input.path, &path, content);
-        }
-        if input
+        let ops = input
             .edits
             .iter()
-            .any(|op| matches!(op, EditOp::Create { .. }))
-        {
-            return Err(ToolError::InvalidInput(
-                "create must be the only op in the call".into(),
-            ));
-        }
+            .enumerate()
+            .map(|(index, value)| parse_op(index, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let path = resolve_write(&self.root, &input.path)?;
+        let display = display_path(&self.root, &path);
 
         let text = read_text(&path)?;
         let current = file_tag(&text);
-        let Some(tag) = &input.tag else {
-            return Err(ToolError::InvalidInput(
-                "tag is required; take it from the latest read of the file".into(),
-            ));
-        };
+        if input.tag != current {
+            return Err(stale_error(&display, &ops, &current, &text));
+        }
         let lines = split_lines(&text);
         let total = lines.len();
-        if *tag != current {
-            return Err(stale_error(&input, &current, &lines));
-        }
 
-        let planned = plan(&input.edits, total)?;
-        let (new_text, echo, echo_truncated) = apply(&text, &lines, &planned);
+        let planned = plan(&ops, total)?;
+        let (new_text, new_total, placements) = apply(&text, &lines, &planned);
         write_atomic(&path, &new_text)?;
 
-        let new_total = split_lines(&new_text).len();
         let mut content = format!(
-            "[{}#{}]\napplied {} edit{}; the file now has {} line{}",
-            input.path,
+            "[{display}#{}]\napplied {} edit{}; the file now has {new_total} line{}",
             file_tag(&new_text),
-            input.edits.len(),
-            if input.edits.len() == 1 { "" } else { "s" },
-            new_total,
+            ops.len(),
+            if ops.len() == 1 { "" } else { "s" },
             if new_total == 1 { "" } else { "s" },
         );
-        if !echo.is_empty() {
-            content.push('\n');
-            content.push_str(&echo);
+        for (index, placement) in &placements {
+            let _ = write!(
+                content,
+                "\nedits[{index}] {} -> {placement}",
+                describe(&ops[*index])
+            );
         }
-        Ok(ToolOutput {
-            content,
-            is_error: false,
-            truncated: echo_truncated,
-        })
-    }
-
-    fn create(&self, display: &str, path: &Path, content: &str) -> Result<ToolOutput, ToolError> {
-        if path.exists() {
-            return Err(ToolError::Failed(format!(
-                "{display} exists; read it and edit with replace, insert, or delete"
-            )));
-        }
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                ToolError::Failed(format!("cannot create {}: {error}", parent.display()))
-            })?;
-        }
-        std::fs::write(path, content)
-            .map_err(|error| ToolError::Failed(format!("cannot create {display}: {error}")))?;
-        let total = split_lines(content).len();
-        Ok(ToolOutput::text(format!(
-            "[{display}#{}]\ncreated with {total} line{}",
-            file_tag(content),
-            if total == 1 { "" } else { "s" },
-        )))
+        Ok(ToolOutput::text(content).with_summary(format!("edit {display}: {} ops", ops.len())))
     }
 }
 
 /// Validate every op against the original file and position it.
-fn plan<'a>(edits: &'a [EditOp], total: usize) -> Result<Vec<Planned<'a>>, ToolError> {
-    let mut planned = Vec::with_capacity(edits.len());
-    for op in edits {
+fn plan<'a>(ops: &'a [EditOp], total: usize) -> Result<Vec<Planned<'a>>, ToolError> {
+    let mut planned = Vec::with_capacity(ops.len());
+    for (index, op) in ops.iter().enumerate() {
         planned.push(match op {
             EditOp::Replace {
                 start,
                 end,
                 content,
             } => {
-                check_span("replace", *start, *end, total)?;
+                check_span(index, "replace", *start, *end, total)?;
                 Planned::Span {
                     start: *start,
                     end: *end,
                     lines: content_lines(content),
+                    index,
                 }
             }
             EditOp::Delete { start, end } => {
-                check_span("delete", *start, *end, total)?;
+                check_span(index, "delete", *start, *end, total)?;
                 Planned::Span {
                     start: *start,
                     end: *end,
                     lines: Vec::new(),
+                    index,
                 }
             }
             EditOp::InsertBefore { line, content } => {
                 if *line == 0 || *line > total + 1 {
                     return Err(ToolError::InvalidInput(format!(
-                        "insert_before line {line} is out of range: valid lines are 1-{} (use {} to append)",
+                        "edits[{index}]: insert_before line {line} is out of range: valid lines are 1-{} (use {} to append)",
                         total + 1,
                         total + 1,
                     )));
@@ -254,37 +303,44 @@ fn plan<'a>(edits: &'a [EditOp], total: usize) -> Result<Vec<Planned<'a>>, ToolE
                 Planned::Insert {
                     gap: line - 1,
                     lines: content_lines(content),
+                    index,
                 }
             }
             EditOp::InsertAfter { line, content } => {
                 if *line == 0 || *line > total {
                     return Err(ToolError::InvalidInput(format!(
-                        "insert_after line {line} is out of range: the file has {total} line{}",
+                        "edits[{index}]: insert_after line {line} is out of range: the file has {total} line{}",
                         if total == 1 { "" } else { "s" },
                     )));
                 }
                 Planned::Insert {
                     gap: *line,
                     lines: content_lines(content),
+                    index,
                 }
             }
-            EditOp::Create { .. } => unreachable!("create is handled before planning"),
         });
     }
     planned.sort_by_key(Planned::position);
-    check_conflicts(&planned)?;
+    check_conflicts(&planned, ops)?;
     Ok(planned)
 }
 
-fn check_span(op: &str, start: usize, end: usize, total: usize) -> Result<(), ToolError> {
+fn check_span(
+    index: usize,
+    op: &str,
+    start: usize,
+    end: usize,
+    total: usize,
+) -> Result<(), ToolError> {
     if start == 0 || start > end {
         return Err(ToolError::InvalidInput(format!(
-            "{op} range {start}-{end} is invalid: start counts from 1 and must not pass end"
+            "edits[{index}]: {op} range {start}-{end} is invalid: start counts from 1 and must not pass end"
         )));
     }
     if end > total {
         return Err(ToolError::InvalidInput(format!(
-            "{op} range {start}-{end} is out of range: the file has {total} line{}",
+            "edits[{index}]: {op} range {start}-{end} is out of range: the file has {total} line{}",
             if total == 1 { "" } else { "s" },
         )));
     }
@@ -292,77 +348,55 @@ fn check_span(op: &str, start: usize, end: usize, total: usize) -> Result<(), To
 }
 
 /// Reject overlapping spans, two inserts at one gap, and inserts
-/// inside a span. `planned` is sorted by position.
-fn check_conflicts(planned: &[Planned<'_>]) -> Result<(), ToolError> {
+/// inside a span. `planned` is sorted by position, which makes every
+/// conflicting pair adjacent.
+fn check_conflicts(planned: &[Planned<'_>], ops: &[EditOp]) -> Result<(), ToolError> {
     for pair in planned.windows(2) {
-        let conflict = match (&pair[0], &pair[1]) {
-            (Planned::Span { start, end, .. }, Planned::Span { start: next, .. }) => {
-                if next <= end {
-                    Some(format!("lines {start}-{end} and lines {next}-…"))
-                } else {
-                    None
-                }
-            }
-            // Sorted order puts the insert first when its gap sits
-            // before or inside the span; inside means gap >= start.
-            (Planned::Insert { gap, .. }, Planned::Span { start, end, .. }) => {
-                if *gap >= *start {
-                    Some(format!("an insert at line {gap} and lines {start}-{end}"))
-                } else {
-                    None
-                }
-            }
-            (Planned::Span { start, end, .. }, Planned::Insert { gap, .. }) => {
-                if *gap < *end {
-                    Some(format!("lines {start}-{end} and an insert at line {gap}"))
-                } else {
-                    None
-                }
-            }
-            (Planned::Insert { gap, .. }, Planned::Insert { gap: next, .. }) => {
-                if gap == next {
-                    Some(format!("two inserts at line {gap}"))
-                } else {
-                    None
-                }
-            }
+        let conflicts = match (&pair[0], &pair[1]) {
+            (Planned::Span { end, .. }, Planned::Span { start: next, .. }) => next <= end,
+            // Sorted order puts an insert first only when its gap sits
+            // before the span, so the reverse pair is the inside case.
+            (Planned::Insert { .. }, Planned::Span { .. }) => false,
+            (Planned::Span { end, .. }, Planned::Insert { gap, .. }) => gap < end,
+            (Planned::Insert { gap, .. }, Planned::Insert { gap: next, .. }) => gap == next,
         };
-        if let Some(what) = conflict {
+        if conflicts {
+            let (first, second) = (pair[0].index(), pair[1].index());
             return Err(ToolError::InvalidInput(format!(
-                "edits conflict: {what}; merge them or send separate calls"
+                "edits conflict: edits[{first}] ({}) and edits[{second}] ({}) touch the same position; merge them or send separate calls",
+                describe(&ops[first]),
+                describe(&ops[second]),
             )));
         }
     }
     Ok(())
 }
 
-/// Build the new file text and the renumbered echo of changed lines.
-/// Original lines keep their own terminators; new lines take the file
-/// newline style.
-fn apply(text: &str, lines: &[Line<'_>], planned: &[Planned<'_>]) -> (String, String, bool) {
+/// Build the new file text and the new position of every op. Original
+/// lines keep their own terminators; new lines take the file newline
+/// style.
+fn apply(
+    text: &str,
+    lines: &[Line<'_>],
+    planned: &[Planned<'_>],
+) -> (String, usize, Vec<(usize, String)>) {
     let style = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let total = lines.len();
     let mut out = String::with_capacity(text.len());
-    let mut echo = String::new();
-    let mut echoed = 0usize;
-    let mut suppressed = 0usize;
+    let mut placements: Vec<(usize, String)> = Vec::with_capacity(planned.len());
     let mut new_number = 0usize;
     let mut next_op = 0usize;
-    let echo_section = |echo: &mut String,
-                        echoed: &mut usize,
-                        suppressed: &mut usize,
-                        number: usize,
-                        section: &[&str]| {
-        if !echo.is_empty() && *suppressed == 0 {
-            echo.push_str("…\n");
+    let emit = |out: &mut String, new_number: &mut usize, section: &[&str]| {
+        let first = *new_number + 1;
+        for line in section {
+            out.push_str(line);
+            out.push_str(style);
+            *new_number += 1;
         }
-        for (offset, line) in section.iter().enumerate() {
-            if *echoed >= MAX_ECHO_LINES {
-                *suppressed += 1;
-                continue;
-            }
-            echo.push_str(&format!("{}:{line}\n", number + offset));
-            *echoed += 1;
+        if section.len() == 1 {
+            format!("now line {first}")
+        } else {
+            format!("now lines {first}-{}", *new_number)
         }
     };
 
@@ -372,21 +406,12 @@ fn apply(text: &str, lines: &[Line<'_>], planned: &[Planned<'_>]) -> (String, St
         while let Some(Planned::Insert {
             gap: g,
             lines: section,
+            index: op_index,
         }) = planned.get(next_op)
             && *g == gap
         {
-            echo_section(
-                &mut echo,
-                &mut echoed,
-                &mut suppressed,
-                new_number + 1,
-                section,
-            );
-            for line in section {
-                out.push_str(line);
-                out.push_str(style);
-                new_number += 1;
-            }
+            let placement = emit(&mut out, &mut new_number, section);
+            placements.push((*op_index, placement));
             next_op += 1;
         }
         if index >= total {
@@ -396,23 +421,16 @@ fn apply(text: &str, lines: &[Line<'_>], planned: &[Planned<'_>]) -> (String, St
             start,
             end,
             lines: section,
+            index: op_index,
         }) = planned.get(next_op)
             && *start == index + 1
         {
-            if !section.is_empty() {
-                echo_section(
-                    &mut echo,
-                    &mut echoed,
-                    &mut suppressed,
-                    new_number + 1,
-                    section,
-                );
-                for line in section {
-                    out.push_str(line);
-                    out.push_str(style);
-                    new_number += 1;
-                }
-            }
+            let placement = if section.is_empty() {
+                format!("removed; the next line is now line {}", new_number + 1)
+            } else {
+                emit(&mut out, &mut new_number, section)
+            };
+            placements.push((*op_index, placement));
             index = *end;
             next_op += 1;
             continue;
@@ -434,53 +452,63 @@ fn apply(text: &str, lines: &[Line<'_>], planned: &[Planned<'_>]) -> (String, St
     if !had_trailing && out.ends_with(style) {
         out.truncate(out.len() - style.len());
     }
-    if suppressed > 0 {
-        echo.push_str(&format!(
-            "[echo truncated: {suppressed} more changed lines]\n"
-        ));
-    }
-    if echo.ends_with('\n') {
-        echo.pop();
-    }
-    (out, echo, suppressed > 0)
+    placements.sort_by_key(|(index, _)| *index);
+    (out, new_number, placements)
 }
 
-/// The stale-tag error: name both tags and show the current lines near
-/// the first edit target, so the model can re-anchor without a read.
-fn stale_error(input: &EditInput, current: &str, lines: &[Line<'_>]) -> ToolError {
-    let first_line = input
-        .edits
+/// The stale-tag error: name the current tag and show the current
+/// lines near the first edit target, so the model can re-anchor
+/// without a read.
+fn stale_error(display: &str, ops: &[EditOp], current: &str, text: &str) -> ToolError {
+    let target = ops
         .iter()
         .map(|op| match op {
             EditOp::Replace { start, .. } | EditOp::Delete { start, .. } => *start,
             EditOp::InsertBefore { line, .. } | EditOp::InsertAfter { line, .. } => *line,
-            EditOp::Create { .. } => 1,
         })
         .min()
         .unwrap_or(1)
         .max(1);
-    let total = lines.len();
+    let total = text.lines().count();
     let mut message = format!(
-        "stale tag for {}: the file changed since that read (tag is now {current}). Current lines near the edit target:",
-        input.path,
+        "stale tag for {display}: the file changed since that read (tag is now {current})."
     );
-    let start = first_line.saturating_sub(STALE_CONTEXT_LINES).max(1);
-    let end = (first_line + STALE_CONTEXT_LINES).min(total);
-    for number in start..=end {
-        message.push_str(&format!("\n{number}:{}", lines[number - 1].content));
-    }
     if total == 0 {
         message.push_str("\n[file is empty]");
+    } else {
+        // When the file shrank below the target, land the window on
+        // the file end instead of promising context and showing none.
+        let center = target.min(total);
+        let start = center.saturating_sub(STALE_CONTEXT_LINES).max(1);
+        let end = (center + STALE_CONTEXT_LINES).min(total);
+        if target > total {
+            let _ = write!(
+                message,
+                "\nThe file now has {total} line{}.",
+                if total == 1 { "" } else { "s" }
+            );
+        }
+        message.push_str("\nCurrent lines near the edit target:");
+        for (index, line) in text.lines().enumerate().skip(start - 1) {
+            let number = index + 1;
+            if number > end {
+                break;
+            }
+            let _ = write!(message, "\n{number}:{line}");
+        }
     }
-    message.push_str(&format!(
-        "\nSend the edit again with tag {current} and corrected line numbers, or read {} for more context.",
-        input.path,
-    ));
+    let _ = write!(
+        message,
+        "\nSend the edit again with tag {current} and corrected line numbers, or read {display} for more context."
+    );
     ToolError::Failed(message)
 }
 
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write through a same-directory temp file and rename, so a crash
-/// never leaves a half-written file. Keeps the original permissions.
+/// never leaves a half-written file. Keeps the original permissions,
+/// uses a unique temp name, and removes the temp file on failure.
 fn write_atomic(path: &Path, text: &str) -> Result<(), ToolError> {
     let fail = |error: std::io::Error| {
         ToolError::Failed(format!("cannot write {}: {error}", path.display()))
@@ -489,21 +517,31 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), ToolError> {
     // link itself.
     let target = path.canonicalize().map_err(fail)?;
     let mut temp_name = target.file_name().unwrap_or_default().to_os_string();
-    temp_name.push(".dmz-tmp");
+    temp_name.push(format!(
+        ".dmz-tmp.{}.{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     let temp = target.with_file_name(temp_name);
-    std::fs::write(&temp, text).map_err(fail)?;
-    let permissions = std::fs::metadata(&target).map_err(fail)?.permissions();
-    std::fs::set_permissions(&temp, permissions).map_err(fail)?;
-    std::fs::rename(&temp, &target).map_err(fail)
+    let write = || -> std::io::Result<()> {
+        std::fs::write(&temp, text)?;
+        let permissions = std::fs::metadata(&target)?.permissions();
+        std::fs::set_permissions(&temp, permissions)?;
+        std::fs::rename(&temp, &target)
+    };
+    write().map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        fail(error)
+    })
 }
 
 impl Tool for EditTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "edit"
     }
 
-    fn description(&self) -> &'static str {
-        "Edit a file with line ops validated against the snapshot tag from your latest read. The response returns the new tag and the renumbered changed lines. Use op `create` for a new file."
+    fn description(&self) -> &str {
+        "Edit a file with line ops validated against the snapshot tag from your latest read. The response returns the new tag and the new position of every op. The create tool makes new files."
     }
 
     fn access(&self) -> ToolAccess {
@@ -516,34 +554,64 @@ impl Tool for EditTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The file path, absolute or relative to the project root."
+                    "description": "The file path, relative to the project root."
                 },
                 "tag": {
                     "type": "string",
-                    "description": "The snapshot tag from your latest read of this file. Not used with `create`."
+                    "description": "The snapshot tag from your latest read of this file."
                 },
                 "edits": {
                     "type": "array",
                     "minItems": 1,
                     "description": "The ops to apply as one atomic change. Line numbers refer to the read that produced the tag.",
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "op": {
-                                "type": "string",
-                                "enum": ["replace", "insert_before", "insert_after", "delete", "create"],
-                                "description": "replace lines start-end; insert content before or after a line; delete lines start-end; create a new file."
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {"enum": ["replace"], "description": "Replace lines start-end with the content."},
+                                    "start": {"type": "integer", "minimum": 1},
+                                    "end": {"type": "integer", "minimum": 1},
+                                    "content": {"type": "string", "description": "The new lines. A trailing newline is optional."}
+                                },
+                                "required": ["op", "start", "end", "content"],
+                                "additionalProperties": false
                             },
-                            "start": {"type": "integer", "minimum": 1, "description": "First line of a replace or delete range, inclusive."},
-                            "end": {"type": "integer", "minimum": 1, "description": "Last line of a replace or delete range, inclusive."},
-                            "line": {"type": "integer", "minimum": 1, "description": "Target line of an insert."},
-                            "content": {"type": "string", "description": "The new lines. A trailing newline is optional."}
-                        },
-                        "required": ["op"]
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {"enum": ["insert_before"], "description": "Insert the content before this line. line may be one past the last line to append."},
+                                    "line": {"type": "integer", "minimum": 1},
+                                    "content": {"type": "string"}
+                                },
+                                "required": ["op", "line", "content"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {"enum": ["insert_after"], "description": "Insert the content after this line."},
+                                    "line": {"type": "integer", "minimum": 1},
+                                    "content": {"type": "string"}
+                                },
+                                "required": ["op", "line", "content"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {"enum": ["delete"], "description": "Delete lines start-end."},
+                                    "start": {"type": "integer", "minimum": 1},
+                                    "end": {"type": "integer", "minimum": 1}
+                                },
+                                "required": ["op", "start", "end"],
+                                "additionalProperties": false
+                            }
+                        ]
                     }
                 }
             },
-            "required": ["path", "edits"],
+            "required": ["path", "tag", "edits"],
             "additionalProperties": false
         })
     }
@@ -575,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn replaces_a_line_range_and_returns_the_new_tag() {
+    fn replaces_a_line_range_and_returns_the_new_tag_and_placement() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "f.txt", "one\ntwo\nthree\n");
         let output = edit(
@@ -583,12 +651,12 @@ mod tests {
             json!({
                 "path": "f.txt",
                 "tag": tag_of("one\ntwo\nthree\n"),
-                "edits": [{"op": "replace", "start": 2, "end": 3, "content": "TWO\nTHREE"}],
+                "edits": [{"op": "replace", "start": 2, "end": 3, "content": "TWO\nTHREE\nEXTRA"}],
             }),
         )
         .unwrap();
-        assert_eq!(content(&dir, "f.txt"), "one\nTWO\nTHREE\n");
-        let expected_tag = tag_of("one\nTWO\nTHREE\n");
+        assert_eq!(content(&dir, "f.txt"), "one\nTWO\nTHREE\nEXTRA\n");
+        let expected_tag = tag_of("one\nTWO\nTHREE\nEXTRA\n");
         assert!(
             output
                 .content
@@ -597,9 +665,14 @@ mod tests {
         assert!(
             output
                 .content
-                .contains("applied 1 edit; the file now has 3 lines")
+                .contains("applied 1 edit; the file now has 4 lines")
         );
-        assert!(output.content.contains("2:TWO\n3:THREE"));
+        assert!(
+            output
+                .content
+                .contains("edits[0] replace 2-3 -> now lines 2-4")
+        );
+        assert_eq!(output.summary.as_deref(), Some("edit f.txt: 1 ops"));
     }
 
     #[test]
@@ -625,27 +698,22 @@ mod tests {
     }
 
     #[test]
-    fn anchors_stay_valid_while_the_file_is_unchanged() {
-        // Two windows of one read share the tag; a later edit with that
-        // tag still applies.
+    fn a_stale_tag_on_a_shrunken_file_still_shows_context() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir, "f.txt", "a\nb\nc\n");
-        let tag = tag_of("a\nb\nc\n");
-        let first = edit(
+        write(&dir, "f.txt", "one\ntwo\n");
+        let error = edit(
             &dir,
-            json!({"path": "f.txt", "tag": tag, "edits": [{"op": "delete", "start": 2, "end": 2}]}),
-        )
-        .unwrap();
-        assert_eq!(content(&dir, "f.txt"), "a\nc\n");
-        // The old tag is now stale; the response tag re-grounds.
-        let stale = edit(
-            &dir,
-            json!({"path": "f.txt", "tag": tag, "edits": [{"op": "delete", "start": 1, "end": 1}]}),
+            json!({
+                "path": "f.txt",
+                "tag": "000000",
+                "edits": [{"op": "replace", "start": 40, "end": 40, "content": "X"}],
+            }),
         )
         .unwrap_err();
-        assert!(stale.to_string().contains("stale tag"));
-        let new_tag = tag_of("a\nc\n");
-        assert!(first.content.contains(&new_tag));
+        let message = error.to_string();
+        assert!(message.contains("The file now has 2 lines"));
+        assert!(message.contains("1:one"));
+        assert!(message.contains("2:two"));
     }
 
     #[test]
@@ -666,9 +734,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content(&dir, "f.txt"), "a\nb\nc\nd\ne\n");
-        assert!(output.content.contains("1:a"));
-        assert!(output.content.contains("3:c"));
-        assert!(output.content.contains("5:e"));
+        assert!(
+            output
+                .content
+                .contains("edits[0] insert_before 1 -> now line 1")
+        );
+        assert!(
+            output
+                .content
+                .contains("edits[1] insert_after 1 -> now line 3")
+        );
+        assert!(
+            output
+                .content
+                .contains("edits[2] insert_before 3 -> now line 5")
+        );
     }
 
     #[test]
@@ -693,12 +773,25 @@ mod tests {
             "two\nTHREE\nAND A HALF\nfour\nfive\n"
         );
         assert!(output.content.contains("the file now has 5 lines"));
-        assert!(output.content.contains("2:THREE\n3:AND A HALF"));
-        assert!(output.content.contains("5:five"));
+        assert!(
+            output
+                .content
+                .contains("edits[0] delete 1-1 -> removed; the next line is now line 1")
+        );
+        assert!(
+            output
+                .content
+                .contains("edits[1] replace 3-3 -> now lines 2-3")
+        );
+        assert!(
+            output
+                .content
+                .contains("edits[2] insert_after 4 -> now line 5")
+        );
     }
 
     #[test]
-    fn overlapping_and_conflicting_edits_are_rejected() {
+    fn conflicting_edits_are_rejected_with_their_indices() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "f.txt", "one\ntwo\nthree\nfour\n");
         let tag = tag_of("one\ntwo\nthree\nfour\n");
@@ -710,7 +803,11 @@ mod tests {
             ]}),
         )
         .unwrap_err();
-        assert!(overlap.to_string().contains("edits conflict"));
+        let message = overlap.to_string();
+        assert!(message.contains("edits conflict"));
+        assert!(message.contains("edits[0] (replace 1-2)"));
+        assert!(message.contains("edits[1] (delete 2-3)"));
+
         let inside = edit(
             &dir,
             json!({"path": "f.txt", "tag": tag, "edits": [
@@ -720,6 +817,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(inside.to_string().contains("edits conflict"));
+
         let same_gap = edit(
             &dir,
             json!({"path": "f.txt", "tag": tag, "edits": [
@@ -728,8 +826,27 @@ mod tests {
             ]}),
         )
         .unwrap_err();
-        assert!(same_gap.to_string().contains("two inserts"));
+        let message = same_gap.to_string();
+        assert!(message.contains("edits[0] (insert_after 2)"));
+        assert!(message.contains("edits[1] (insert_before 3)"));
         assert_eq!(content(&dir, "f.txt"), "one\ntwo\nthree\nfour\n");
+    }
+
+    #[test]
+    fn stray_fields_on_an_op_are_rejected_not_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "f.txt", "one\ntwo\n");
+        let error = edit(
+            &dir,
+            json!({"path": "f.txt", "tag": tag_of("one\ntwo\n"), "edits": [
+                {"op": "delete", "start": 2, "end": 2, "content": "REPLACEMENT"},
+            ]}),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("edits[0]"));
+        assert!(message.contains("delete takes start, end"));
+        assert_eq!(content(&dir, "f.txt"), "one\ntwo\n");
     }
 
     #[test]
@@ -756,20 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_tag_is_invalid_input() {
-        let dir = tempfile::tempdir().unwrap();
-        write(&dir, "f.txt", "one\n");
-        let error = edit(
-            &dir,
-            json!({"path": "f.txt", "edits": [{"op": "delete", "start": 1, "end": 1}]}),
-        )
-        .unwrap_err();
-        assert!(matches!(error, ToolError::InvalidInput(_)));
-        assert!(error.to_string().contains("tag is required"));
-    }
-
-    #[test]
-    fn crlf_endings_survive_on_untouched_lines() {
+    fn crlf_content_is_normalized_and_crlf_files_stay_crlf() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "f.txt", "one\r\ntwo\r\nthree\r\n");
         edit(
@@ -777,11 +881,23 @@ mod tests {
             json!({
                 "path": "f.txt",
                 "tag": tag_of("one\r\ntwo\r\nthree\r\n"),
-                "edits": [{"op": "replace", "start": 2, "end": 2, "content": "TWO"}],
+                "edits": [{"op": "replace", "start": 2, "end": 2, "content": "TWO\r\nMORE\r\n"}],
             }),
         )
         .unwrap();
-        assert_eq!(content(&dir, "f.txt"), "one\r\nTWO\r\nthree\r\n");
+        assert_eq!(content(&dir, "f.txt"), "one\r\nTWO\r\nMORE\r\nthree\r\n");
+
+        write(&dir, "lf.txt", "one\ntwo\n");
+        edit(
+            &dir,
+            json!({
+                "path": "lf.txt",
+                "tag": tag_of("one\ntwo\n"),
+                "edits": [{"op": "replace", "start": 2, "end": 2, "content": "TWO\r\n"}],
+            }),
+        )
+        .unwrap();
+        assert_eq!(content(&dir, "lf.txt"), "one\nTWO\n");
     }
 
     #[test]
@@ -818,36 +934,6 @@ mod tests {
     }
 
     #[test]
-    fn create_writes_a_new_file_and_refuses_an_existing_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = edit(
-            &dir,
-            json!({"path": "sub/new.txt", "edits": [{"op": "create", "content": "alpha\nbeta\n"}]}),
-        )
-        .unwrap();
-        assert_eq!(content(&dir, "sub/new.txt"), "alpha\nbeta\n");
-        assert!(output.content.contains("created with 2 lines"));
-        assert!(output.content.contains(&tag_of("alpha\nbeta\n")));
-
-        let error = edit(
-            &dir,
-            json!({"path": "sub/new.txt", "edits": [{"op": "create", "content": "x"}]}),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("exists"));
-
-        let mixed = edit(
-            &dir,
-            json!({"path": "other.txt", "edits": [
-                {"op": "create", "content": "x"},
-                {"op": "insert_after", "line": 1, "content": "y"},
-            ]}),
-        )
-        .unwrap_err();
-        assert!(mixed.to_string().contains("only op"));
-    }
-
-    #[test]
     fn editing_an_empty_file_inserts_at_the_head() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "f.txt", "");
@@ -861,7 +947,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content(&dir, "f.txt"), "first\n");
-        assert!(output.content.contains("1:first"));
+        assert!(
+            output
+                .content
+                .contains("edits[0] insert_before 1 -> now line 1")
+        );
+    }
+
+    #[test]
+    fn edits_outside_the_root_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "x\n").unwrap();
+        let error = run_now(EditTool::new(&root).run(json!({
+            "path": "../outside.txt",
+            "tag": tag_of("x\n"),
+            "edits": [{"op": "delete", "start": 1, "end": 1}],
+        })))
+        .unwrap_err();
+        assert!(error.to_string().contains("outside the project root"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("outside.txt")).unwrap(),
+            "x\n"
+        );
     }
 
     #[cfg(unix)]
@@ -883,27 +992,5 @@ mod tests {
         .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
-    }
-
-    #[test]
-    fn a_long_echo_truncates_with_a_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        write(&dir, "f.txt", "seed\n");
-        let big: String = (0..150).map(|n| format!("line {n}\n")).collect();
-        let output = edit(
-            &dir,
-            json!({
-                "path": "f.txt",
-                "tag": tag_of("seed\n"),
-                "edits": [{"op": "insert_after", "line": 1, "content": big}],
-            }),
-        )
-        .unwrap();
-        assert!(output.truncated);
-        assert!(
-            output
-                .content
-                .contains("[echo truncated: 50 more changed lines]")
-        );
     }
 }

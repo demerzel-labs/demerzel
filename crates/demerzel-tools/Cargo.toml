@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 demerzel-core = { workspace = true }
-demerzel-providers = { workspace = true }
 globset = { workspace = true }
 grep-regex = { workspace = true }
 grep-searcher = { workspace = true }

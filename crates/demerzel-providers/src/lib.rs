@@ -5,16 +5,16 @@
 //! never assumes a capability. The trait is object-safe so the harness
 //! can hold `Box<dyn Provider>` and route per model role.
 
-use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 use demerzel_core::{Message, SealedPayload, StopReason, Usage};
 use futures_core::Stream;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod openai_codex;
+
+pub use demerzel_core::{BoxFuture, ToolDefinition};
 
 /// What an adapter can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,15 +25,6 @@ pub struct Capabilities {
     pub usage_in_stream: bool,
     pub cache_control: bool,
     pub sealed_reasoning: bool,
-}
-
-/// A tool the model may call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    /// JSON Schema for the tool input.
-    pub input_schema: Value,
 }
 
 /// One model request. The system prompt stays separate from history so
@@ -99,9 +90,6 @@ pub enum ProviderError {
 /// The response event stream for one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
 
-/// Boxed future, used to keep the trait object-safe.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
 /// The contract every adapter implements.
 pub trait Provider: Send + Sync {
     /// Stable adapter id, e.g. "openai-codex". Sealed payloads carry
@@ -118,6 +106,7 @@ pub trait Provider: Send + Sync {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
     /// Minimal in-memory provider proving the contract is implementable

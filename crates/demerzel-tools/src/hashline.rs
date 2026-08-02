@@ -10,6 +10,11 @@
 //! tag with plain line numbers. Line numbers are unique by construction,
 //! so no anchor is ever ambiguous — the failure class collapses into
 //! one precise "stale tag" error with one recovery: read again.
+//!
+//! Header parse rule, for every consumer of tool output: the header is
+//! exactly line 1, shaped `[path#tag]`. The tag is the six characters
+//! before the final `]`; the path is everything between the leading
+//! `[` and the last `#`, and may itself contain `#` or `]`.
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
