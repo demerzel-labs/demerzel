@@ -1,0 +1,438 @@
+//! The `openai-codex` adapter: the Responses API against the
+//! ChatGPT-subscription Codex endpoint.
+//!
+//! Contract reference: the open-source Codex CLI client (`codex-rs`).
+//! The backend is not a public API, so the parser ignores unknown
+//! events and fields instead of failing on them.
+
+pub mod auth;
+mod sse;
+
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
+use futures_core::Stream;
+use serde_json::{Value, json};
+
+use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
+pub use auth::{AuthStore, CodexCredentials};
+use sse::SseParser;
+
+/// Stable adapter id. Sealed payloads carry this id.
+pub const PROVIDER_ID: &str = "openai-codex";
+
+/// Default Codex backend base URL.
+pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
+#[derive(Debug, Clone)]
+pub struct CodexConfig {
+    pub base_url: String,
+    /// `originator` header value. The backend expects a known client
+    /// name; the Codex CLI default keeps requests accepted.
+    pub originator: String,
+    /// Total attempts for retryable failures (429, 5xx, network).
+    pub max_attempts: u32,
+    pub base_delay: Duration,
+    /// `reasoning` request field, sent as-is when set.
+    pub reasoning: Option<Value>,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_BASE_URL.to_string(),
+            originator: "codex_cli_rs".to_string(),
+            max_attempts: 4,
+            base_delay: Duration::from_millis(500),
+            reasoning: Some(json!({"effort": "low", "summary": "auto"})),
+        }
+    }
+}
+
+pub struct OpenAiCodex {
+    config: CodexConfig,
+    http: reqwest::Client,
+    auth: tokio::sync::Mutex<AuthStore>,
+}
+
+impl OpenAiCodex {
+    pub fn new(config: CodexConfig, auth: AuthStore) -> Self {
+        Self {
+            config,
+            http: reqwest::Client::new(),
+            auth: tokio::sync::Mutex::new(auth),
+        }
+    }
+}
+
+impl Provider for OpenAiCodex {
+    fn id(&self) -> &'static str {
+        PROVIDER_ID
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            tool_calls: true,
+            parallel_tool_calls: false,
+            usage_in_stream: true,
+            cache_control: false,
+            sealed_reasoning: true,
+        }
+    }
+
+    fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
+        Box::pin(async move {
+            let body = build_body(&request, self.config.reasoning.as_ref());
+            let url = format!("{}/responses", self.config.base_url);
+            let mut refreshed = false;
+            let mut attempt: u32 = 0;
+            let response = loop {
+                let (token, account_id) = {
+                    let mut store = self.auth.lock().await;
+                    let creds = store.ensure()?;
+                    (creds.access_token.clone(), store.account_id())
+                };
+                let mut builder = self
+                    .http
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .header("accept", "text/event-stream")
+                    .header("originator", &self.config.originator)
+                    .json(&body);
+                if let Some(account_id) = &account_id {
+                    builder = builder.header("chatgpt-account-id", account_id);
+                }
+                match builder.send().await {
+                    Err(error) => {
+                        attempt += 1;
+                        if attempt >= self.config.max_attempts {
+                            return Err(ProviderError::Network(error.to_string()));
+                        }
+                        tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            break response;
+                        }
+                        if status.as_u16() == 401 {
+                            if refreshed {
+                                return Err(ProviderError::Auth(
+                                    "unauthorized after token refresh".to_string(),
+                                ));
+                            }
+                            refreshed = true;
+                            self.auth.lock().await.refresh(&self.http).await?;
+                            continue;
+                        }
+                        if status.as_u16() == 429 || status.is_server_error() {
+                            attempt += 1;
+                            if attempt >= self.config.max_attempts {
+                                return Err(if status.as_u16() == 429 {
+                                    ProviderError::RateLimited {
+                                        retry_after: retry_after(&response),
+                                    }
+                                } else {
+                                    ProviderError::Server(format!("status {status}"))
+                                });
+                            }
+                            tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                            continue;
+                        }
+                        let text = response.text().await.unwrap_or_default();
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "status {status}: {text}"
+                        )));
+                    }
+                }
+            };
+            Ok(spawn_event_stream(response))
+        })
+    }
+}
+
+fn backoff(base: Duration, attempt: u32) -> Duration {
+    base * 2u32.saturating_pow(attempt.saturating_sub(1))
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+/// Build the Responses API request body from the neutral request.
+fn build_body(request: &Request, reasoning: Option<&Value>) -> Value {
+    let mut input = Vec::new();
+    for message in &request.messages {
+        let (role, text_type) = match message.role {
+            Role::User => ("user", "input_text"),
+            Role::Assistant => ("assistant", "output_text"),
+        };
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } => input.push(json!({
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": text_type, "text": text}],
+                })),
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input: args,
+                } => input.push(json!({
+                    "type": "function_call",
+                    "name": name,
+                    "arguments": serde_json::to_string(args).unwrap_or_default(),
+                    "call_id": id,
+                })),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error: _,
+                } => input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_use_id,
+                    "output": content,
+                })),
+                // Same-provider sealed payloads round-trip verbatim.
+                // Foreign or missing payloads are dropped: the readable
+                // summary is for humans, not for the wire.
+                ContentBlock::Reasoning { sealed, .. } => {
+                    if let Some(sealed) = sealed
+                        && sealed.provider == PROVIDER_ID
+                    {
+                        input.push(sealed.data.clone());
+                    }
+                }
+            }
+        }
+    }
+    let tools: Vec<Value> = request
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "strict": false,
+                "parameters": tool.input_schema,
+            })
+        })
+        .collect();
+    let mut body = json!({
+        "model": request.model,
+        "input": input,
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "store": false,
+        "stream": true,
+        "include": ["reasoning.encrypted_content"],
+    });
+    if !request.system_prompt.is_empty() {
+        body["instructions"] = json!(request.system_prompt);
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    if let Some(reasoning) = reasoning {
+        body["reasoning"] = reasoning.clone();
+    }
+    if let Some(max) = request.max_output_tokens {
+        body["max_output_tokens"] = json!(max);
+    }
+    body
+}
+
+struct ChannelStream(tokio::sync::mpsc::Receiver<Result<StreamEvent, ProviderError>>);
+
+impl Stream for ChannelStream {
+    type Item = Result<StreamEvent, ProviderError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx)
+    }
+}
+
+#[derive(Default)]
+struct StreamState {
+    saw_tool_call: bool,
+    terminal: bool,
+    /// Maps wire item ids to call ids for argument-delta events.
+    call_ids: HashMap<String, String>,
+}
+
+fn spawn_event_stream(mut response: reqwest::Response) -> EventStream {
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut parser = SseParser::new();
+        let mut state = StreamState::default();
+        loop {
+            match response.chunk().await {
+                Ok(Some(bytes)) => {
+                    for payload in parser.push(&bytes) {
+                        for event in map_payload(&payload, &mut state) {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                        if state.terminal {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(ProviderError::Network(error.to_string())))
+                        .await;
+                    return;
+                }
+            }
+        }
+        if !state.terminal {
+            let _ = tx
+                .send(Err(ProviderError::Protocol(
+                    "stream ended before response.completed".to_string(),
+                )))
+                .await;
+        }
+    });
+    Box::pin(ChannelStream(rx))
+}
+
+/// Map one SSE payload to neutral events. Unknown payload types map to
+/// nothing.
+fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent, ProviderError>> {
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        state.terminal = true;
+        return vec![Err(ProviderError::Protocol(format!(
+            "sse payload is not JSON: {payload}"
+        )))];
+    };
+    match value["type"].as_str().unwrap_or("") {
+        "response.output_text.delta" => text_delta(&value)
+            .map(StreamEvent::TextDelta)
+            .map(|e| vec![Ok(e)])
+            .unwrap_or_default(),
+        "response.reasoning_summary_text.delta" => text_delta(&value)
+            .map(StreamEvent::ReasoningDelta)
+            .map(|e| vec![Ok(e)])
+            .unwrap_or_default(),
+        "response.output_item.added" => {
+            let item = &value["item"];
+            if item["type"] == "function_call" {
+                state.saw_tool_call = true;
+                let call_id = item["call_id"].as_str().unwrap_or_default().to_string();
+                if let Some(item_id) = item["id"].as_str() {
+                    state.call_ids.insert(item_id.to_string(), call_id.clone());
+                }
+                vec![Ok(StreamEvent::ToolCallStart {
+                    id: call_id,
+                    name: item["name"].as_str().unwrap_or_default().to_string(),
+                })]
+            } else {
+                Vec::new()
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let item_id = value["item_id"].as_str().unwrap_or_default();
+            let id = state
+                .call_ids
+                .get(item_id)
+                .cloned()
+                .unwrap_or_else(|| item_id.to_string());
+            text_delta(&value)
+                .map(|fragment| {
+                    vec![Ok(StreamEvent::ToolCallDelta {
+                        id,
+                        input_fragment: fragment,
+                    })]
+                })
+                .unwrap_or_default()
+        }
+        "response.output_item.done" => {
+            let item = &value["item"];
+            match item["type"].as_str().unwrap_or("") {
+                "function_call" => {
+                    let arguments = item["arguments"].as_str().unwrap_or("");
+                    let input = serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| Value::String(arguments.to_string()));
+                    vec![Ok(StreamEvent::ToolCallEnd {
+                        id: item["call_id"].as_str().unwrap_or_default().to_string(),
+                        input,
+                    })]
+                }
+                "reasoning" => {
+                    let summary = item["summary"]
+                        .as_array()
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|part| part["text"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .unwrap_or_default();
+                    vec![Ok(StreamEvent::ReasoningDone {
+                        summary,
+                        sealed: Some(SealedPayload {
+                            provider: PROVIDER_ID.to_string(),
+                            data: item.clone(),
+                        }),
+                    })]
+                }
+                _ => Vec::new(),
+            }
+        }
+        "response.completed" => {
+            state.terminal = true;
+            let usage = &value["response"]["usage"];
+            let stop = if state.saw_tool_call {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            };
+            vec![
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
+                    output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+                    cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
+                })),
+                Ok(StreamEvent::Done(stop)),
+            ]
+        }
+        "response.incomplete" => {
+            state.terminal = true;
+            vec![Ok(StreamEvent::Done(StopReason::MaxTokens))]
+        }
+        "response.failed" => {
+            state.terminal = true;
+            let error = &value["response"]["error"];
+            let message = error["message"].as_str().unwrap_or("response.failed");
+            let failure = if error["code"] == "rate_limit_exceeded" {
+                ProviderError::RateLimited { retry_after: None }
+            } else {
+                ProviderError::Server(message.to_string())
+            };
+            vec![Err(failure)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn text_delta(value: &Value) -> Option<String> {
+    value["delta"].as_str().map(str::to_string)
+}

@@ -9,10 +9,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use demerzel_core::{Message, StopReason, Usage};
+use demerzel_core::{Message, SealedPayload, StopReason, Usage};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub mod openai_codex;
 
 /// What an adapter can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,8 +62,16 @@ pub enum StreamEvent {
         id: String,
         input_fragment: String,
     },
+    /// End of one tool call, with the complete parsed input.
     ToolCallEnd {
         id: String,
+        input: Value,
+    },
+    /// End of one reasoning block. `sealed` carries the provider-tagged
+    /// opaque payload for same-provider round-trip.
+    ReasoningDone {
+        summary: String,
+        sealed: Option<SealedPayload>,
     },
     Usage(Usage),
     Done(StopReason),
