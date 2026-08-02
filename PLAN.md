@@ -96,13 +96,16 @@ the prompt (prompt-prefix stability, see efficiency checklist).
 The harness defines its own message, tool-call, and usage model; adapters
 translate. No adapter is privileged.
 
-- **M1: `openai-compat`** — Chat Completions against a configurable base URL.
-  One adapter covers OpenAI, Ollama, vLLM, LM Studio, llama.cpp, and most
-  gateways. This is the widest door for an open-source audience.
-- **M2: `anthropic`** — native Messages API with prompt-cache control. The
-  provider trait is written in M1 with this adapter in mind so wiring it is
-  mechanical, not architectural.
-- Later, by demand: `openai-responses`, Gemini, Bedrock.
+- **M1: `openai-codex`** — the Responses API against the ChatGPT-subscription
+  Codex endpoint, with OAuth credentials. No API key. The open-source Codex
+  CLI client is the contract reference.
+- **M2: `anthropic`** — native Messages API with prompt-cache control, and
+  the first API-key credential path (Anthropic supports no subscription
+  OAuth for third-party tools). The provider trait is written in M1 with
+  this adapter in mind so wiring it is mechanical, not architectural.
+- Later, by demand: `openai-compat` (Chat Completions against a configurable
+  base URL — Ollama, vLLM, LM Studio, llama.cpp, and most gateways; the
+  widest door for an open-source audience), Gemini, Bedrock.
 
 Adapters declare capabilities (tool calling, streaming, caching, usage fields);
 the harness degrades features per capability instead of assuming them. Model
@@ -256,18 +259,20 @@ succeeds; `demerzel --version` runs; bench scripts execute against the stub.
 
 ### M1 — Dogfoodable core
 
-Agent loop with streaming, `openai-compat` provider, core tools (read,
-hash-anchored edit, bash, grep, glob), approval modes, plain-terminal REPL
-(no full TUI), session JSONL with resume, one-shot mode. Provider trait +
-capability model designed for the M2 Anthropic adapter. **Verify:** a real
-multi-turn coding session in this repo against a local or OpenAI endpoint;
+Agent loop with streaming, `openai-codex` provider (ChatGPT-subscription
+credentials imported from the Codex CLI), core tools (read, hash-anchored
+edit, bash, grep, glob), approval modes, plain-terminal REPL (no full TUI),
+session JSONL with resume, one-shot mode. Provider trait + capability model
+designed for the M2 Anthropic adapter. **Verify:** a real multi-turn coding
+session in this repo against the Codex endpoint;
 hermetic loop tests against the mock server; boot/memory benches produce first
 real numbers.
 
 ### M2 — Interface and second provider
 
 ratatui TUI (streaming, edit previews, approvals), `anthropic` adapter with
-prompt caching, layered config (user, project, flags), slash commands, `doctor`.
+prompt caching and API-key credentials, `dmz login` for the ChatGPT
+subscription, layered config (user, project, flags), slash commands, `doctor`.
 **Verify:** TUI session parity with the REPL; cache-hit rate measured on a
 replayed session; config precedence tests.
 
@@ -292,7 +297,7 @@ the miss documented with a profile trace.
 Docs, contribution guide, CI (fmt, clippy, test, iai-callgrind gate),
 cargo-dist static releases (musl), `dmz` hardlink in installers, README with
 the benchmark report. **Verify:** clean-machine install to working session in
-under two minutes with each of: OpenAI key, Anthropic key, local Ollama.
+under two minutes with each of: ChatGPT subscription, Anthropic key.
 
 ---
 
