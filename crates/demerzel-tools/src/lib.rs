@@ -313,10 +313,15 @@ fn normalize(path: &Path) -> PathBuf {
 /// canonical root, so neither `..` nor a symlink can move a write
 /// outside the project.
 pub(crate) fn resolve_write(root: &Path, input: &str) -> Result<PathBuf, ToolError> {
-    let resolved = normalize(&resolve(root, input));
+    if input.trim().is_empty() {
+        return Err(ToolError::InvalidInput("path must not be empty".into()));
+    }
     let canonical_root = root
         .canonicalize()
         .map_err(|error| ToolError::Failed(format!("cannot resolve the project root: {error}")))?;
+    // Resolve against the canonical root, so the ancestor walk below
+    // always terminates at the root even when `root` is relative.
+    let resolved = normalize(&resolve(&canonical_root, input));
     let mut ancestor = resolved.as_path();
     let canonical_ancestor = loop {
         match ancestor.canonicalize() {
@@ -341,13 +346,18 @@ pub(crate) fn resolve_write(root: &Path, input: &str) -> Result<PathBuf, ToolErr
 
 /// Format a resolved path for model-facing output: relative to the
 /// root when inside it, absolute otherwise. Canonical, so one file has
-/// one display form.
+/// one display form. The canonical root also strips, so write paths
+/// resolved through a symlinked root still display relative.
 pub(crate) fn display_path(root: &Path, resolved: &Path) -> String {
-    resolved
-        .strip_prefix(root)
-        .unwrap_or(resolved)
-        .display()
-        .to_string()
+    if let Ok(stripped) = resolved.strip_prefix(root) {
+        return stripped.display().to_string();
+    }
+    if let Ok(canonical_root) = root.canonicalize()
+        && let Ok(stripped) = resolved.strip_prefix(&canonical_root)
+    {
+        return stripped.display().to_string();
+    }
+    resolved.display().to_string()
 }
 
 /// Walk the files under `base`, shared by grep and glob: hidden files
@@ -559,5 +569,16 @@ mod tests {
                     .contains("outside the project root")
             );
         }
+    }
+
+    #[test]
+    fn resolve_write_accepts_new_files_under_a_relative_root() {
+        // The cwd is an existing directory, so "." exercises the
+        // relative-root ancestor walk without touching the filesystem.
+        assert!(resolve_write(Path::new("."), "dmz-test-brand-new-file.txt").is_ok());
+        let escape = resolve_write(Path::new("."), "../dmz-escape.txt").unwrap_err();
+        assert!(escape.to_string().contains("outside the project root"));
+        let empty = resolve_write(Path::new("."), "  ").unwrap_err();
+        assert!(matches!(empty, ToolError::InvalidInput(_)));
     }
 }

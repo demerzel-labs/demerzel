@@ -115,9 +115,11 @@ impl BashTool {
         let timed_out = status.is_none();
         // Sweep the group on both paths: the timeout kills the command,
         // and after a normal exit the sweep takes grandchildren that
-        // would otherwise hold the pipes open forever.
+        // would otherwise hold the pipes open forever. The direct kill
+        // covers platforms where the group sweep is a no-op.
         guard.kill_now();
         if timed_out {
+            let _ = child.kill().await;
             let _ = child.wait().await;
         }
         let exit = status.and_then(Result::ok);
