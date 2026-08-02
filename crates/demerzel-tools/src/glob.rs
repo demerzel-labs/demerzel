@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use demerzel_providers::BoxFuture;
+use demerzel_core::{BoxFuture, ToolAccess};
 use globset::GlobBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -50,17 +50,19 @@ impl GlobTool {
         paths.sort();
 
         if paths.is_empty() {
-            return Ok(ToolOutput::text("no files match"));
+            return Ok(ToolOutput::text("no files match").with_summary("glob: no files"));
         }
         let truncated = paths.len() > MAX_RESULTS;
         if truncated {
             paths.truncate(MAX_RESULTS);
             paths.push(format!("[truncated after {MAX_RESULTS} files]"));
         }
+        let found = paths.len() - usize::from(truncated);
         Ok(ToolOutput {
             content: paths.join("\n"),
             is_error: false,
             truncated,
+            summary: Some(format!("glob: {found} files")),
         })
     }
 }
@@ -73,12 +75,16 @@ struct GlobInput {
 }
 
 impl Tool for GlobTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "glob"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Find files that match a glob pattern. The search skips files that .gitignore excludes."
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 
     fn input_schema(&self) -> Value {

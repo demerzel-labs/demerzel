@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use demerzel_providers::BoxFuture;
+use demerzel_core::{BoxFuture, ToolAccess};
 use grep_regex::RegexMatcher;
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use serde::Deserialize;
@@ -75,17 +75,19 @@ impl GrepTool {
         }
 
         if matches.is_empty() {
-            return Ok(ToolOutput::text("no matches"));
+            return Ok(ToolOutput::text("no matches").with_summary("grep: no matches"));
         }
         let over_limit = matches.len() > MAX_MATCHES;
         if over_limit {
             matches.truncate(MAX_MATCHES);
             matches.push(format!("[truncated after {MAX_MATCHES} matches]"));
         }
+        let found = matches.len() - usize::from(over_limit);
         Ok(ToolOutput {
             content: matches.join("\n"),
             is_error: false,
             truncated: over_limit || clipped,
+            summary: Some(format!("grep: {found} matches")),
         })
     }
 }
@@ -110,12 +112,16 @@ struct GrepInput {
 }
 
 impl Tool for GrepTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "grep"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search file contents with a regular expression. The search skips files that .gitignore excludes."
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 
     fn input_schema(&self) -> Value {

@@ -1,21 +1,25 @@
-//! The `read` tool: file content with hash-tagged lines.
+//! The `read` tool: numbered file content under a snapshot tag.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use demerzel_providers::BoxFuture;
+use demerzel_core::BoxFuture;
+use demerzel_core::ToolAccess;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::hashline::line_tag;
-use crate::{Tool, ToolError, ToolOutput, parse_input, resolve};
+use crate::snapshot::file_tag;
+use crate::{Tool, ToolError, ToolOutput, display_path, parse_input, read_text, resolve};
 
 /// Lines returned when the model sends no `limit`.
 const DEFAULT_LIMIT: usize = 2000;
 
-/// Output budget in bytes. The tool emits whole lines only — a partial
-/// line would break the tag contract — so one oversized line can pass
-/// the budget alone.
+/// Total output budget in bytes.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+
+/// Bytes of one line shown before the line clips. Keeps a minified
+/// one-line file from blowing the output budget in a single line.
+const MAX_LINE_BYTES: usize = 2000;
 
 pub struct ReadTool {
     root: PathBuf,
@@ -41,49 +45,49 @@ impl ReadTool {
             ));
         }
         let path = resolve(&self.root, &input.path);
-        let bytes = std::fs::read(&path).map_err(|error| {
-            ToolError::Failed(format!("cannot read {}: {error}", path.display()))
-        })?;
-        let text = String::from_utf8(bytes).map_err(|_| {
-            ToolError::Failed(format!(
-                "{} is not valid UTF-8; the read tool supports text files only",
-                path.display()
-            ))
-        })?;
-        let lines: Vec<&str> = text.lines().collect();
-        let total = lines.len();
+        let text = read_text(&path)?;
+        let display = display_path(&self.root, &path);
+        // The tag covers the whole file even for a window read: edit
+        // validates the whole snapshot, not the window.
+        let mut content = format!("[{display}#{}]\n", file_tag(&text));
+        let total = text.lines().count();
         if total == 0 {
-            return Ok(ToolOutput::text("[file is empty]"));
+            content.push_str("[file is empty]");
+            return Ok(ToolOutput::text(content).with_summary(format!("read {display} (empty)")));
         }
         if offset > total {
             return Err(ToolError::Failed(format!(
-                "offset {offset} is past the end of {}: the file has {total} lines",
-                path.display()
+                "offset {offset} is past the end of {display}: the file has {total} lines"
             )));
         }
 
-        let mut content = String::new();
         let mut last = offset - 1;
-        for (index, line) in lines.iter().enumerate().skip(offset - 1) {
-            let over_lines = index + 1 - offset >= limit;
-            // 8 = tag (6) + '|' + '\n'.
-            let over_bytes =
-                !content.is_empty() && content.len() + line.len() + 8 > MAX_OUTPUT_BYTES;
-            if over_lines || over_bytes {
+        let mut clipped = false;
+        for (index, line) in text.lines().enumerate().skip(offset - 1) {
+            let number = index + 1;
+            if number - offset >= limit {
                 break;
             }
-            content.push_str(&line_tag(line));
-            content.push('|');
-            content.push_str(line);
+            let (shown, marker) = clip(line);
+            let rendered_len = shown.len() + marker.map_or(0, str::len) + 12;
+            if last >= offset && content.len() + rendered_len > MAX_OUTPUT_BYTES {
+                break;
+            }
+            let _ = write!(content, "{number}:{shown}");
+            if let Some(marker) = marker {
+                clipped = true;
+                content.push_str(marker);
+            }
             content.push('\n');
-            last = index + 1;
+            last = number;
         }
-        let truncated = last < total;
-        if truncated {
-            content.push_str(&format!(
+        let truncated = last < total || clipped;
+        if last < total {
+            let _ = write!(
+                content,
                 "[truncated: lines {offset}-{last} of {total}; continue with offset={}]",
                 last + 1
-            ));
+            );
         } else {
             content.pop();
         }
@@ -91,8 +95,26 @@ impl ReadTool {
             content,
             is_error: false,
             truncated,
+            summary: Some(format!("read {display} lines {offset}-{last} of {total}")),
         })
     }
+}
+
+/// Cut one line to the byte cap on a character boundary. The marker
+/// names the full length, so the model does not copy a clipped line
+/// back through the edit tool as if it were complete.
+fn clip(line: &str) -> (&str, Option<&'static str>) {
+    if line.len() <= MAX_LINE_BYTES {
+        return (line, None);
+    }
+    let mut end = MAX_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    (
+        &line[..end],
+        Some(" [line truncated: do not copy this line into an edit]"),
+    )
 }
 
 #[derive(Deserialize)]
@@ -104,12 +126,16 @@ struct ReadInput {
 }
 
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read"
     }
 
-    fn description(&self) -> &'static str {
-        "Read a text file. Each output line starts with a six-character content-hash tag: `a3f2c1|line text`."
+    fn description(&self) -> &str {
+        "Read a text file. The output starts with a `[path#tag]` snapshot header; each line follows as `number:content`. The edit tool needs the tag and the line numbers."
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 
     fn input_schema(&self) -> Value {
@@ -155,45 +181,46 @@ mod tests {
     }
 
     #[test]
-    fn tags_every_line_with_its_content_hash() {
+    fn numbers_every_line_under_the_snapshot_header() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir, "f.txt", "fn main() {\nline text\n");
+        write(&dir, "f.txt", "hello\nworld\n");
         let output = read(&dir, json!({"path": "f.txt"})).unwrap();
-        assert_eq!(output.content, "74ebed|fn main() {\ne7edf3|line text");
+        assert_eq!(output.content, "[f.txt#1d0a3d]\n1:hello\n2:world");
         assert!(!output.truncated);
+        assert_eq!(output.summary.as_deref(), Some("read f.txt lines 1-2 of 2"));
     }
 
     #[test]
-    fn identical_lines_share_one_tag() {
+    fn the_header_path_is_canonical_for_dotted_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir, "f.txt", "alpha\nalpha\n");
-        let output = read(&dir, json!({"path": "f.txt"})).unwrap();
-        let lines: Vec<&str> = output.content.lines().collect();
-        assert_eq!(lines[0], lines[1]);
+        write(&dir, "f.txt", "hello\n");
+        let dotted = read(&dir, json!({"path": "./f.txt"})).unwrap();
+        let plain = read(&dir, json!({"path": "f.txt"})).unwrap();
+        assert_eq!(dotted.content, plain.content);
     }
 
     #[test]
-    fn crlf_endings_hash_like_lf_endings() {
+    fn the_tag_covers_the_whole_file_for_a_window_read() {
         let dir = tempfile::tempdir().unwrap();
-        write(&dir, "lf.txt", "alpha\nbeta\n");
-        write(&dir, "crlf.txt", "alpha\r\nbeta\r\n");
-        let lf = read(&dir, json!({"path": "lf.txt"})).unwrap();
-        let crlf = read(&dir, json!({"path": "crlf.txt"})).unwrap();
-        assert_eq!(lf.content, crlf.content);
+        write(&dir, "f.txt", "one\ntwo\nthree\n");
+        let full = read(&dir, json!({"path": "f.txt"})).unwrap();
+        let window = read(&dir, json!({"path": "f.txt", "offset": 2, "limit": 1})).unwrap();
+        assert!(full.content.starts_with("[f.txt#7b258d]\n"));
+        assert!(window.content.starts_with("[f.txt#7b258d]\n"));
+        assert!(window.content.contains("2:two"));
     }
 
     #[test]
-    fn offset_and_limit_select_a_window() {
+    fn offset_and_limit_select_a_window_with_absolute_numbers() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "f.txt", "one\ntwo\nthree\nfour\n");
         let output = read(&dir, json!({"path": "f.txt", "offset": 2, "limit": 2})).unwrap();
         assert!(output.truncated);
         let lines: Vec<&str> = output.content.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].ends_with("|two"));
-        assert!(lines[1].ends_with("|three"));
+        assert_eq!(lines[1], "2:two");
+        assert_eq!(lines[2], "3:three");
         assert_eq!(
-            lines[2],
+            lines[3],
             "[truncated: lines 2-3 of 4; continue with offset=4]"
         );
     }
@@ -205,7 +232,7 @@ mod tests {
         write(&dir, "f.txt", &content);
         let output = read(&dir, json!({"path": "f.txt"})).unwrap();
         assert!(output.truncated);
-        assert_eq!(output.content.lines().count(), 2001);
+        assert_eq!(output.content.lines().count(), 2002);
         assert!(
             output
                 .content
@@ -214,18 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn a_single_oversized_line_clips_instead_of_blowing_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{}\n", "x".repeat(500_000));
+        write(&dir, "big.txt", &content);
+        let output = read(&dir, json!({"path": "big.txt"})).unwrap();
+        assert!(output.truncated);
+        assert!(output.content.len() < 5_000);
+        assert!(output.content.contains("[line truncated"));
+    }
+
+    #[test]
     fn byte_budget_truncates_before_the_line_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let content = format!("{}\n{}\nshort\n", "a".repeat(200_000), "b".repeat(100_000));
+        let long = "a".repeat(1500);
+        let content: String = (0..200).map(|_| format!("{long}\n")).collect();
         write(&dir, "f.txt", &content);
         let output = read(&dir, json!({"path": "f.txt"})).unwrap();
         assert!(output.truncated);
-        assert_eq!(output.content.lines().count(), 2);
-        assert!(
-            output
-                .content
-                .ends_with("[truncated: lines 1-1 of 3; continue with offset=2]")
-        );
+        assert!(output.content.len() <= MAX_OUTPUT_BYTES + 100);
+        assert!(output.content.contains("; continue with offset="));
     }
 
     #[test]
@@ -244,17 +279,17 @@ mod tests {
         let missing = read(&dir, json!({"path": "missing.txt"})).unwrap_err();
         assert!(missing.to_string().contains("cannot read"));
 
-        std::fs::write(dir.path().join("bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        std::fs::write(dir.path().join("bin"), [0xff, 0x00, 0xfe, 0x01]).unwrap();
         let binary = read(&dir, json!({"path": "bin"})).unwrap_err();
-        assert!(binary.to_string().contains("not valid UTF-8"));
+        assert!(binary.to_string().contains("binary file"));
     }
 
     #[test]
-    fn empty_files_read_as_an_explicit_marker() {
+    fn empty_files_read_as_a_tagged_marker() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir, "empty.txt", "");
         let output = read(&dir, json!({"path": "empty.txt"})).unwrap();
-        assert_eq!(output.content, "[file is empty]");
+        assert_eq!(output.content, "[empty.txt#d0bfc1]\n[file is empty]");
         assert!(!output.is_error);
     }
 

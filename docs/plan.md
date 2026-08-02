@@ -64,7 +64,7 @@ crates/
   demerzel/        # bin: CLI, wiring          (exists from M0)
   demerzel-core/   # loop, sessions, compaction (split in M1)
   demerzel-providers/  # provider trait + adapters
-  demerzel-tools/  # read, edit, bash, grep, glob
+  demerzel-tools/  # read, edit, create, bash, grep, glob
   demerzel-tui/    # ratatui interface
 bench/             # benchmark suite (exists from M0, see below)
 ```
@@ -75,12 +75,12 @@ own) is considered only if the bench suite shows ratatui as the bottleneck.
 
 ### Edits: hash-anchored
 
-File reads return lines tagged with short content hashes. The edit tool
-addresses edits by anchor hash instead of string matching. The harness validates
-anchors against current file content and rejects stale edits with a precise
-error the model can recover from. Prior art: oh-my-pi's Hashline (MIT), which
-reports large output-token savings and eliminates the
-whitespace-mismatch failure class of search/replace diffs.
+File reads return numbered lines under a short snapshot tag of the whole
+file. The edit tool addresses lines by number and sends the tag back. The
+harness applies the edits only while the file still hashes to that tag; a
+stale tag returns a precise error the model can recover from. Prior art:
+oh-my-pi's Hashline (MIT), which reports large output-token savings and
+eliminates the whitespace-mismatch failure class of search/replace diffs.
 
 ### Tools: in-process where it counts
 
@@ -268,7 +268,7 @@ succeeds; `demerzel --version` runs; bench scripts execute against the stub.
 
 Agent loop with streaming, `openai-codex` provider (ChatGPT-subscription
 credentials imported from the Codex CLI), core tools (read, hash-anchored
-edit, bash, grep, glob), approval modes, plain-terminal REPL (no full TUI),
+edit, create, bash, grep, glob), approval modes, plain-terminal REPL (no full TUI),
 session JSONL with resume, one-shot mode. Provider trait + capability model
 designed for the M2 Anthropic adapter. **Verify:** a real multi-turn coding
 session in this repo against the Codex endpoint;
