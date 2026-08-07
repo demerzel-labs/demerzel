@@ -10,6 +10,35 @@ current.
 - Read [`docs/plan.md`](docs/plan.md) for the product plan and milestones.
 - Read [`docs/m1-plan.md`](docs/m1-plan.md) for the current milestone.
 
+## Build workflow
+
+- Each plan step is one pull request. Branch `agent/<step-name>` off
+  `main`.
+- Write commit subjects in the imperative. Do not add AI attribution.
+- Before you open a pull request, run these checks and make them pass:
+  1. `cargo fmt`
+  2. `cargo clippy --workspace --all-targets -- -D warnings`
+  3. `cargo test --workspace`
+- The final gate before every pull request that changes code: dispatch
+  adversarial review subagents (Opus 5, high reasoning effort) over the
+  full change set.
+  Use three lenses: performance and memory, API and architecture
+  stability, correctness. Fix the material findings. Verify the fixes
+  with one more review pass. Record the review results in the pull
+  request body.
+- Optimize for performance, low memory use, clean stable APIs, and an
+  architecture that stays clear as the project grows. Do not trade
+  customizability away for these goals.
+- Stop after you open the pull request. Daniel reviews and merges.
+
+## Source rules
+
+- Do not name other coding harnesses in source code or code comments —
+  no product names, no borrowed feature names. Prior-art credit lives
+  in `docs/` only.
+- Exception: the `openai-codex` adapter names the Codex CLI, because
+  that client is the wire-contract reference for the endpoint.
+
 ## Documentation placement
 
 - All documentation lands in `docs/` at the repo root.
