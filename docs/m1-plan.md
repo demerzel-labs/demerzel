@@ -1,7 +1,30 @@
 # M1 Implementation Plan — Dogfoodable Core
 
 This plan turns the M1 milestone of [`plan.md`](plan.md) into ordered,
-verifiable steps. Status: draft, not reviewed.
+verifiable steps.
+
+## Status (2026-08-07)
+
+Steps 1-4 of 7 are merged; step 5 is next. The build order below marks
+each step. Workspace state on `main`: 96 tests, `cargo fmt` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean, stub
+binary at 340 KB.
+
+Notes for the next session:
+
+- Start step 5 with one live smoke call that sends the tool
+  definitions. This confirms that the Codex endpoint accepts the edit
+  tool's `oneOf` input schema. If the endpoint rejects it, flatten the
+  schema before the loop lands.
+- The bash tool kills its whole process group after every call, so a
+  command cannot leave a background server running. This is the
+  accepted M1 posture (PR #11).
+- The loop consumes the step-4 seams: `Registry::dispatch` checks the
+  approval policy itself, `Registry::retain` shapes the tool set, and
+  `ToolOutput.summary` feeds the REPL status line and the session
+  record.
+- `AGENTS.md` holds the pull-request gate and the source rules that
+  bind every step.
 
 ## Goal
 
@@ -145,16 +168,19 @@ Output truncation adds explicit markers. Errors return to the model as
   file creation out of the Hashline edit language.
 - **bash** — real subprocess. Constructed environment (PATH, HOME, TERM,
   LANG; no ambient credentials). Per-call timeout. Captured stdout and
-  stderr with truncation markers. Exit code in the result.
+  stderr with truncation markers. Exit code in the result. The whole
+  process group ends with the call, on every exit path.
 - **grep** — in-process, `grep-searcher`/`grep-regex` crates. No fork-exec.
 - **glob** — in-process, `globset` + `ignore` crates. Respects `.gitignore`.
 
 ### Approval policy (demerzel-core)
 
 Three modes: `read-only`, `ask` (interactive default), `auto`. The policy
-gates edit and bash before dispatch. Policy lives in the harness, never in
-the prompt. Approval decisions go into the session log as non-prompt events,
-so the record stays auditable and the prefix stays stable.
+gates the write and execute tools (edit, create, bash), and the registry
+checks it inside `dispatch`, so no caller can skip the gate. Policy lives
+in the harness, never in the prompt. Approval decisions go into the
+session log as non-prompt events, so the record stays auditable and the
+prefix stays stable.
 
 Non-interactive runs (one-shot) default to `read-only`. `--auto` enables
 writes.
@@ -266,16 +292,24 @@ Each step is one PR with its own verify line.
 1. **Workspace split and domain types.** New crates `demerzel-core`,
    `demerzel-providers`, `demerzel-tools`. Message model, provider trait,
    capabilities. *Verify: build, unit tests, clippy.*
+   **Done — PR #5, merged 2026-08-02.**
 2. **Mock server, openai-codex adapter, credentials.** Responses-API SSE
    streaming, tool-call assembly, retries, auth import and refresh.
    *Verify: adapter conformance tests against the mock; one live smoke call
    with imported Codex CLI credentials.*
+   **Done — PR #8, merged 2026-08-02.**
 3. **Read-only tools.** Tool trait, registry, read with hash tags, grep,
    glob. *Verify: unit tests against fixtures.*
+   **Done — PR #10, merged 2026-08-02.** Step 4 revised the read output
+   to the snapshot-tag format; see the resolved decision below.
 4. **Write tools and policy.** Hash-anchored edit, bash sandbox, approval
    modes. *Verify: stale-anchor tests, timeout test, environment test.*
+   **Done — PR #11, merged 2026-08-02.** Also landed: the `create` tool,
+   write confinement to the project root, and the tool-type move into
+   `demerzel-core` that gives the step-5 loop its seam.
 5. **Loop and sessions.** Turn engine, JSONL store, resume, one-shot mode.
    *Verify: hermetic loop tests, prefix-stability test, resume test.*
+   **Next.**
 6. **REPL and CLI.** Flags, credential resolution, streaming render,
    approval prompts, ready marker. *Verify: a real dogfood session in this
    repo against the Codex endpoint; Ctrl-C behavior.*
