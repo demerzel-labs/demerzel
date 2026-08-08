@@ -2,8 +2,9 @@
 //! adapter against the mock server. No network, no model.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use demerzel::{RunConfig, run_one_shot};
+use demerzel::{AuthPaths, RunConfig, run_one_shot};
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, NoPrompt, Role,
     Session, SessionStore, TurnOutcome, replay,
@@ -58,6 +59,8 @@ fn text_turn(text: &str) -> MockResponse {
     MockResponse::stream(vec![text_delta(text), completed()])
 }
 
+fn noop(_: EngineEvent<'_>) {}
+
 /// A project dir, a data dir with a filled auth store, and the adapter
 /// pointed at the mock server.
 struct Bed {
@@ -73,7 +76,7 @@ impl Bed {
         let mock = MockServer::start(responses, Vec::new()).await;
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
-        let auth = auth_store(data.path(), &mock);
+        let auth = auth_store(data.path());
         let provider = OpenAiCodex::new(
             CodexConfig {
                 base_url: mock.url(),
@@ -113,7 +116,7 @@ impl Bed {
     }
 }
 
-fn auth_store(data_dir: &Path, _mock: &MockServer) -> AuthStore {
+fn auth_store(data_dir: &Path) -> AuthStore {
     let path = auth_path(data_dir);
     std::fs::write(
         &path,
@@ -129,10 +132,6 @@ fn auth_store(data_dir: &Path, _mock: &MockServer) -> AuthStore {
 
 fn auth_path(data_dir: &Path) -> PathBuf {
     data_dir.join("auth.json")
-}
-
-fn drop_sink() -> impl FnMut(EngineEvent<'_>) {
-    |_| {}
 }
 
 #[tokio::test]
@@ -157,9 +156,8 @@ async fn a_read_edit_bash_session_completes_end_to_end() {
     bed.write_file("f.txt", content);
     let mut engine = bed.engine(ApprovalMode::Auto);
 
-    let mut sink = drop_sink();
     let outcome = engine
-        .user_turn("update f.txt".into(), &mut sink, &mut NoPrompt)
+        .user_turn("update f.txt".into(), &noop, &mut NoPrompt)
         .await
         .unwrap();
 
@@ -188,12 +186,14 @@ async fn a_read_edit_bash_session_completes_end_to_end() {
     let last_body = received[3].body.to_string();
     assert!(last_body.contains("ALPHA"));
 
-    // The session file rebuilds the exact history and holds usage.
+    // The session file rebuilds the exact history and holds usage and
+    // approvals with their call ids.
     let replayed = replay(engine.session().path()).unwrap();
     assert_eq!(replayed.messages, engine.history());
     let raw = std::fs::read_to_string(engine.session().path()).unwrap();
     assert!(raw.contains(r#""type":"usage""#));
     assert!(raw.contains(r#""type":"approval""#));
+    assert!(raw.contains(r#""tool_use_id":"call_2""#));
 }
 
 #[tokio::test]
@@ -225,9 +225,8 @@ async fn a_stale_tag_error_reaches_the_model_and_recovery_succeeds() {
     bed.write_file("f.txt", content);
     let mut engine = bed.engine(ApprovalMode::Auto);
 
-    let mut sink = drop_sink();
     let outcome = engine
-        .user_turn("edit f.txt".into(), &mut sink, &mut NoPrompt)
+        .user_turn("edit f.txt".into(), &noop, &mut NoPrompt)
         .await
         .unwrap();
 
@@ -257,13 +256,12 @@ async fn the_wire_prefix_is_byte_stable_across_turns() {
     .await;
     let mut engine = bed.engine(ApprovalMode::Auto);
 
-    let mut sink = drop_sink();
     engine
-        .user_turn("one".into(), &mut sink, &mut NoPrompt)
+        .user_turn("one".into(), &noop, &mut NoPrompt)
         .await
         .unwrap();
     engine
-        .user_turn("two".into(), &mut sink, &mut NoPrompt)
+        .user_turn("two".into(), &noop, &mut NoPrompt)
         .await
         .unwrap();
 
@@ -298,17 +296,17 @@ async fn an_aborted_turn_leaves_a_valid_resumable_session() {
 
     // Abort by dropping the turn future mid-stream, the Ctrl-C shape.
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let mut tx = Some(tx);
-    let mut sink = |event: EngineEvent<'_>| {
+    let tx = Mutex::new(Some(tx));
+    let sink = |event: EngineEvent<'_>| {
         if let EngineEvent::TextDelta(_) = event
-            && let Some(tx) = tx.take()
+            && let Some(tx) = tx.lock().unwrap().take()
         {
             let _ = tx.send(());
         }
     };
     {
         let mut approver = NoPrompt;
-        let turn = engine.user_turn("go".into(), &mut sink, &mut approver);
+        let turn = engine.user_turn("go".into(), &sink, &mut approver);
         tokio::pin!(turn);
         tokio::select! {
             _ = &mut turn => panic!("the stalled turn must not complete"),
@@ -335,9 +333,8 @@ async fn an_aborted_turn_leaves_a_valid_resumable_session() {
         session,
         history,
     );
-    let mut sink = drop_sink();
     let outcome = resumed
-        .user_turn("again".into(), &mut sink, &mut NoPrompt)
+        .user_turn("again".into(), &noop, &mut NoPrompt)
         .await
         .unwrap();
     assert_eq!(outcome, TurnOutcome::Completed);
@@ -353,20 +350,21 @@ async fn one_shot_read_only_drops_write_tools_and_streams_text() {
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().join("store"));
     config.base_url = Some(bed.mock.url());
-    config.auth_paths = Some((auth_path(bed.data.path()), None));
+    config.auth = Some(AuthPaths {
+        store: auth_path(bed.data.path()),
+        codex_cli: None,
+    });
 
-    let mut text = String::new();
-    let mut sink = |event: EngineEvent<'_>| {
+    let text = Mutex::new(String::new());
+    let sink = |event: EngineEvent<'_>| {
         if let EngineEvent::TextDelta(delta) = event {
-            text.push_str(delta);
+            text.lock().unwrap().push_str(delta);
         }
     };
-    let outcome = run_one_shot(&config, "hello".into(), &mut sink)
-        .await
-        .unwrap();
+    let outcome = run_one_shot(&config, "hello".into(), &sink).await.unwrap();
 
     assert_eq!(outcome, TurnOutcome::Completed);
-    assert_eq!(text, "hi there");
+    assert_eq!(*text.lock().unwrap(), "hi there");
     // Read-only: the write tools are not advertised at all.
     let received = bed.mock.received();
     let names: Vec<&str> = received[0].body["tools"]
@@ -388,16 +386,14 @@ async fn one_shot_continue_resumes_the_latest_session() {
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().join("store"));
     config.base_url = Some(bed.mock.url());
-    config.auth_paths = Some((auth_path(bed.data.path()), None));
+    config.auth = Some(AuthPaths {
+        store: auth_path(bed.data.path()),
+        codex_cli: None,
+    });
 
-    let mut sink = drop_sink();
-    run_one_shot(&config, "one".into(), &mut sink)
-        .await
-        .unwrap();
+    run_one_shot(&config, "one".into(), &noop).await.unwrap();
     config.continue_last = true;
-    run_one_shot(&config, "two".into(), &mut sink)
-        .await
-        .unwrap();
+    run_one_shot(&config, "two".into(), &noop).await.unwrap();
 
     // One session file, holding both turns.
     let store = SessionStore::at(bed.data.path().join("store"));
@@ -408,6 +404,9 @@ async fn one_shot_continue_resumes_the_latest_session() {
     let path = store.latest(bed.project.path()).unwrap().unwrap();
     let replayed = replay(&path).unwrap();
     assert_eq!(replayed.messages.len(), 4);
+    // Resume appended a fresh meta record for the continuing run.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.matches(r#""type":"meta""#).count(), 2);
     // The second request resent the first turn's history.
     let second_body = bed.mock.received()[1].body.to_string();
     assert!(second_body.contains("first"));

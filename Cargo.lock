@@ -181,6 +181,7 @@ dependencies = [
  "demerzel-tools",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 

@@ -24,15 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let auth = AuthStore::open_default()?;
     let provider = OpenAiCodex::new(CodexConfig::default(), auth);
-    let request = Request {
-        model,
-        system_prompt: "You are demerzel, a terminal coding agent.".to_string(),
-        messages: vec![Message {
+    let request = {
+        let mut request = Request::new(model);
+        request.system_prompt = "You are demerzel, a terminal coding agent.".to_string();
+        request.messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: prompt }],
-        }],
-        tools: Registry::full(std::env::current_dir()?).definitions(),
-        max_output_tokens: None,
+        }];
+        request.tools = Registry::full(std::env::current_dir()?).definitions();
+        request
     };
 
     let mut stream = provider.stream(request).await?;

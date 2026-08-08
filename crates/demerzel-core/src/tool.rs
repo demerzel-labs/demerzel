@@ -7,7 +7,7 @@ use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::approval::{ApprovalDecision, ApprovalPolicy};
+use crate::approval::ToolAccess;
 
 /// A tool the model may call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,16 +61,20 @@ impl ToolOutput {
     }
 }
 
-/// The tool surface the loop drives: definitions for the request,
-/// policy decisions before dispatch, and approved execution. The
-/// registry in `demerzel-tools` implements it; MCP tool sets (M3) plug
-/// in through the same trait.
+/// The tool surface the loop drives: definitions for the request, the
+/// access class the policy keys on, and approved execution. The engine
+/// applies the approval policy itself, so a composite host cannot
+/// bypass it. The registry in `demerzel-tools` implements this trait;
+/// MCP tool sets (M3) plug in through it.
 pub trait ToolHost: Send + Sync {
     /// Tool definitions for the model request, in a stable order.
     fn definitions(&self) -> Vec<ToolDefinition>;
 
-    /// The approval decision for one call, before dispatch.
-    fn decide(&self, policy: &ApprovalPolicy, name: &str, input: &Value) -> ApprovalDecision;
+    /// The declared access class of the named tool. `None` means the
+    /// host does not hold the tool; the engine then skips the policy
+    /// and lets [`ToolHost::run_approved`] produce the unknown-tool
+    /// error for the model.
+    fn access(&self, name: &str) -> Option<ToolAccess>;
 
     /// Run one approved call. Unknown names and tool failures come back
     /// as error results for the model; this method never fails the

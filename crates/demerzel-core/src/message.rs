@@ -52,8 +52,10 @@ pub struct SealedPayload {
     pub data: serde_json::Value,
 }
 
-/// Token counts for one model response.
+/// Token counts for one model response. Fields default on read, so a
+/// session file written before a field existed still replays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,

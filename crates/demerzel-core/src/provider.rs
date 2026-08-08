@@ -29,8 +29,11 @@ pub struct Capabilities {
 }
 
 /// One model request. The system prompt stays separate from history so
-/// prompt assembly can keep the prefix stable.
+/// prompt assembly can keep the prefix stable. Build one with
+/// [`Request::new`]; the struct is non-exhaustive so later fields
+/// (cache breakpoints, per-request reasoning effort) stay additive.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Request {
     pub model: String,
     pub system_prompt: String,
@@ -39,9 +42,23 @@ pub struct Request {
     pub max_output_tokens: Option<u64>,
 }
 
+impl Request {
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_output_tokens: None,
+        }
+    }
+}
+
 /// Neutral stream events. Adapters map wire events to these; unknown
-/// wire events are dropped, not errors.
+/// wire events are dropped, not errors. An adapter emits at most one
+/// `Usage` event per stream; when it emits more, the last one wins.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StreamEvent {
     TextDelta(String),
     /// Readable reasoning-summary text.
@@ -73,6 +90,7 @@ pub enum StreamEvent {
 /// `Server`, and `Network` with backoff. On `Auth` it refreshes
 /// credentials once, retries once, then fails.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProviderError {
     #[error("authentication failed: {0}")]
     Auth(String),
@@ -168,16 +186,11 @@ mod tests {
         assert!(provider.capabilities().streaming);
         assert!(!provider.capabilities().tool_calls);
 
-        let request = Request {
-            model: "test".into(),
-            system_prompt: String::new(),
-            messages: vec![Message {
-                role: Role::User,
-                content: Vec::new(),
-            }],
-            tools: Vec::new(),
-            max_output_tokens: None,
-        };
+        let mut request = Request::new("test");
+        request.messages = vec![Message {
+            role: Role::User,
+            content: Vec::new(),
+        }];
         let future = provider.stream(request);
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);

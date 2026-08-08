@@ -7,6 +7,7 @@
 mod approval;
 mod engine;
 mod message;
+pub mod paths;
 mod provider;
 mod session;
 mod tool;

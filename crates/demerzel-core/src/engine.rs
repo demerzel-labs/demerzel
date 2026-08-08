@@ -7,6 +7,9 @@
 //! and volatile state (approvals, display) never enters it, so the
 //! prompt prefix stays byte-stable across turns.
 //!
+//! The engine applies the approval policy itself, before every
+//! dispatch, and records every decision in the session file.
+//!
 //! Cancellation contract: dropping the future returned by
 //! [`Engine::user_turn`] aborts the turn. Only complete records reach
 //! the session file, so an aborted session file stays valid. A tool
@@ -20,12 +23,11 @@ use std::io;
 
 use serde_json::Value;
 
-use crate::approval::{ApprovalDecision, ApprovalPolicy};
+use crate::approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::Request;
-use crate::provider::{Provider, ProviderError, StreamEvent};
-use crate::session::{Session, SessionRecord};
-use crate::tool::{BoxFuture, ToolHost, ToolOutput};
+use crate::provider::{Capabilities, Provider, ProviderError, Request, StreamEvent};
+use crate::session::Session;
+use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
 /// The fixed base system prompt for M1. Config replaces it in M3.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Demerzel, a terminal coding agent. \
@@ -56,16 +58,25 @@ impl EngineConfig {
 /// One display event. The renderer draws these; none of them feed back
 /// into the prompt.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EngineEvent<'a> {
     TextDelta(&'a str),
     ReasoningDelta(&'a str),
-    /// The model started a tool call.
+    /// The model started streaming a tool call.
     ToolStart {
         id: &'a str,
         name: &'a str,
     },
+    /// A tool call is about to dispatch, with its complete input. The
+    /// renderer uses this for previews and approval display.
+    ToolRun {
+        id: &'a str,
+        name: &'a str,
+        input: &'a Value,
+    },
     /// A tool call finished, with the tool's own one-line summary.
     ToolEnd {
+        id: &'a str,
         name: &'a str,
         summary: Option<&'a str>,
         is_error: bool,
@@ -74,16 +85,18 @@ pub enum EngineEvent<'a> {
     ModelUsage(Usage),
 }
 
-/// Receives display events during a turn.
-pub trait EventSink {
-    fn event(&mut self, event: EngineEvent<'_>);
+/// Receives display events during a turn. Implementations take `&self`
+/// so a renderer can hold the sink while the turn future runs; use
+/// interior mutability or a channel to collect.
+pub trait EventSink: Send + Sync {
+    fn event(&self, event: EngineEvent<'_>);
 }
 
 impl<F> EventSink for F
 where
-    F: FnMut(EngineEvent<'_>),
+    F: Fn(EngineEvent<'_>) + Send + Sync,
 {
-    fn event(&mut self, event: EngineEvent<'_>) {
+    fn event(&self, event: EngineEvent<'_>) {
         self(event)
     }
 }
@@ -115,6 +128,7 @@ impl Approver for NoPrompt {
 
 /// How a user turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TurnOutcome {
     /// The model ended its turn.
     Completed,
@@ -125,6 +139,7 @@ pub enum TurnOutcome {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EngineError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
@@ -140,6 +155,11 @@ pub struct Engine<'a> {
     config: EngineConfig,
     session: Session,
     history: Vec<Message>,
+    /// Snapshots taken at construction: the tool set and capabilities
+    /// are fixed for a session, and the snapshot keeps the request
+    /// tools block byte-identical across model calls.
+    tool_definitions: Vec<ToolDefinition>,
+    capabilities: Capabilities,
 }
 
 impl<'a> Engine<'a> {
@@ -164,6 +184,8 @@ impl<'a> Engine<'a> {
         history: Vec<Message>,
     ) -> Self {
         Self {
+            tool_definitions: tools.definitions(),
+            capabilities: provider.capabilities(),
             provider,
             tools,
             policy,
@@ -181,19 +203,30 @@ impl<'a> Engine<'a> {
         &self.session
     }
 
+    /// Take the session and the history back, so a driver can rebuild
+    /// the engine — say with another approval mode — without dropping
+    /// the open session file.
+    pub fn into_parts(self) -> (Session, Vec<Message>) {
+        (self.session, self.history)
+    }
+
     /// Run one user turn: repair the history if the last turn was cut,
     /// append the user message, then alternate model calls and tool
     /// calls until the model ends the turn or a limit stops it.
     pub async fn user_turn(
         &mut self,
         text: String,
-        sink: &mut dyn EventSink,
+        sink: &dyn EventSink,
         approver: &mut dyn Approver,
     ) -> Result<TurnOutcome, EngineError> {
-        self.repair_dangling_calls()?;
+        // Repair results ride in front of the user text, inside one
+        // message, so roles keep alternating and the wire order stays
+        // results-then-text.
+        let mut content = self.dangling_repairs();
+        content.push(ContentBlock::Text { text });
         self.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text }],
+            content,
         })?;
 
         let mut calls = 0u32;
@@ -215,7 +248,7 @@ impl<'a> Engine<'a> {
                 self.push(message.clone())?;
             }
             if let Some(usage) = usage {
-                self.session.append(&SessionRecord::Usage(usage))?;
+                self.session.append_usage(&usage)?;
                 sink.event(EngineEvent::ModelUsage(usage));
             }
 
@@ -239,67 +272,71 @@ impl<'a> Engine<'a> {
     }
 
     /// Fixed prompt assembly: system prompt, then history. Nothing
-    /// volatile enters the request.
+    /// volatile enters the request. Tools go along only when the
+    /// provider declares the capability.
     fn assemble(&self) -> Request {
-        Request {
-            model: self.config.model.clone(),
-            system_prompt: self.config.system_prompt.clone(),
-            messages: self.history.clone(),
-            tools: self.tools.definitions(),
-            max_output_tokens: self.config.max_output_tokens,
+        let mut request = Request::new(self.config.model.clone());
+        request.system_prompt = self.config.system_prompt.clone();
+        request.messages = self.history.clone();
+        if self.capabilities.tool_calls {
+            request.tools = self.tool_definitions.clone();
         }
+        request.max_output_tokens = self.config.max_output_tokens;
+        request
     }
 
     /// Append one message to the session file and the history, in that
     /// order, so the file never lags the prompt.
     fn push(&mut self, message: Message) -> Result<(), EngineError> {
-        self.session
-            .append(&SessionRecord::Message(message.clone()))?;
+        self.session.append_message(&message)?;
         self.history.push(message);
         Ok(())
     }
 
-    /// Answer tool calls that a cut-off turn left unanswered, so the
-    /// next request never carries a dangling call. The repair appends a
-    /// normal message record; the prefix stays stable afterward.
-    fn repair_dangling_calls(&mut self) -> Result<(), EngineError> {
-        let mut answered = std::collections::HashSet::new();
+    /// Error results for tool calls that a cut-off turn left
+    /// unanswered. Calls pair with results positionally, so a call id
+    /// an adapter reuses later still gets its own answer; duplicate
+    /// dangling ids repair once.
+    fn dangling_repairs(&self) -> Vec<ContentBlock> {
+        let mut unanswered: Vec<&str> = Vec::new();
         for message in &self.history {
             for block in &message.content {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    answered.insert(tool_use_id.clone());
+                match block {
+                    ContentBlock::ToolUse { id, .. } => unanswered.push(id),
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        if let Some(position) =
+                            unanswered.iter().rposition(|open| *open == tool_use_id)
+                        {
+                            unanswered.remove(position);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
-        let mut repairs = Vec::new();
-        for message in &self.history {
-            for block in &message.content {
-                if let ContentBlock::ToolUse { id, .. } = block
-                    && !answered.contains(id)
-                {
-                    repairs.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: "interrupted: the session ended before this call ran".to_string(),
-                        is_error: true,
-                    });
-                }
-            }
-        }
-        if !repairs.is_empty() {
-            self.push(Message {
-                role: Role::User,
-                content: repairs,
-            })?;
-        }
-        Ok(())
+        let mut seen = std::collections::HashSet::new();
+        unanswered
+            .into_iter()
+            .filter(|id| seen.insert(*id))
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: "interrupted: the session ended before this call returned a result; \
+                          the call may have run"
+                    .to_string(),
+                is_error: true,
+            })
+            .collect()
     }
 
-    /// Run every tool call in the message, in order, through the
-    /// approval policy. Each decision goes into the session record.
+    /// Run every tool call in the message, in order. The engine checks
+    /// the policy against the access class the host declares, and each
+    /// decision goes into the session record with its call id. A name
+    /// the host does not hold skips the policy: `run_approved` returns
+    /// the unknown-tool error and nothing runs.
     async fn run_tools(
         &mut self,
         message: &Message,
-        sink: &mut dyn EventSink,
+        sink: &dyn EventSink,
         approver: &mut dyn Approver,
     ) -> Result<Vec<ContentBlock>, EngineError> {
         let calls: Vec<(String, String, Value)> = message
@@ -315,29 +352,44 @@ impl<'a> Engine<'a> {
 
         let mut results = Vec::with_capacity(calls.len());
         for (id, name, input) in calls {
-            let decision = self.tools.decide(&self.policy, &name, &input);
-            let approved = match decision {
-                ApprovalDecision::Allow => true,
-                ApprovalDecision::Deny => false,
-                ApprovalDecision::AskUser => approver.approve(&name, &input).await,
-            };
-            self.session.append(&SessionRecord::Approval {
-                tool: name.clone(),
-                mode: self.policy.mode,
-                decision,
-                approved: matches!(decision, ApprovalDecision::AskUser).then_some(approved),
-            })?;
-
-            let output = if approved {
-                self.tools.run_approved(&name, input).await
-            } else if decision == ApprovalDecision::Deny {
-                ToolOutput::error(format!(
-                    "the approval mode refuses the {name} tool in this session"
-                ))
-            } else {
-                ToolOutput::error(approver.deny_message(&name))
+            sink.event(EngineEvent::ToolRun {
+                id: &id,
+                name: &name,
+                input: &input,
+            });
+            let output = match self.tools.access(&name) {
+                None => self.tools.run_approved(&name, input).await,
+                Some(access) => {
+                    let decision = self.policy.decide(&ApprovalRequest {
+                        tool: &name,
+                        access,
+                        input: &input,
+                    });
+                    let approved = match decision {
+                        ApprovalDecision::Allow => true,
+                        ApprovalDecision::Deny => false,
+                        ApprovalDecision::AskUser => approver.approve(&name, &input).await,
+                    };
+                    self.session.append_approval(
+                        &name,
+                        self.policy.mode,
+                        decision,
+                        &id,
+                        matches!(decision, ApprovalDecision::AskUser).then_some(approved),
+                    )?;
+                    if approved {
+                        self.tools.run_approved(&name, input).await
+                    } else if decision == ApprovalDecision::Deny {
+                        ToolOutput::error(format!(
+                            "the approval mode refuses the {name} tool in this session"
+                        ))
+                    } else {
+                        ToolOutput::error(approver.deny_message(&name))
+                    }
+                }
             };
             sink.event(EngineEvent::ToolEnd {
+                id: &id,
                 name: &name,
                 summary: output.summary.as_deref(),
                 is_error: output.is_error,
@@ -362,7 +414,7 @@ struct ModelResponse {
 /// block order the model produced.
 async fn collect_response(
     mut stream: crate::provider::EventStream,
-    sink: &mut dyn EventSink,
+    sink: &dyn EventSink,
 ) -> Result<ModelResponse, EngineError> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut call_names: HashMap<String, String> = HashMap::new();
@@ -398,7 +450,11 @@ async fn collect_response(
             }
             StreamEvent::ToolCallDelta { .. } => {}
             StreamEvent::ToolCallEnd { id, input } => {
-                let name = call_names.get(&id).cloned().unwrap_or_default();
+                let Some(name) = call_names.get(&id).cloned() else {
+                    return Err(EngineError::Provider(ProviderError::Protocol(format!(
+                        "tool call {id} ended without a start event"
+                    ))));
+                };
                 blocks.push(ContentBlock::ToolUse { id, name, input });
             }
             StreamEvent::Usage(u) => usage = Some(u),
@@ -421,9 +477,8 @@ mod tests {
     use super::*;
     use crate::approval::{ApprovalMode, ToolAccess};
     use crate::message::SealedPayload;
-    use crate::provider::{Capabilities, EventStream};
+    use crate::provider::EventStream;
     use crate::session::{SessionStore, replay};
-    use crate::tool::ToolDefinition;
     use futures_core::Stream;
     use serde_json::json;
     use std::collections::VecDeque;
@@ -457,6 +512,7 @@ mod tests {
     struct ScriptedProvider {
         scripts: Mutex<VecDeque<Vec<StreamEvent>>>,
         requests: Mutex<Vec<Request>>,
+        caps: Capabilities,
     }
 
     impl ScriptedProvider {
@@ -464,7 +520,18 @@ mod tests {
             Self {
                 scripts: Mutex::new(scripts.into()),
                 requests: Mutex::new(Vec::new()),
+                caps: Capabilities {
+                    streaming: true,
+                    tool_calls: true,
+                    ..Capabilities::default()
+                },
             }
+        }
+
+        fn without_tool_calls(scripts: Vec<Vec<StreamEvent>>) -> Self {
+            let mut provider = Self::new(scripts);
+            provider.caps.tool_calls = false;
+            provider
         }
 
         fn requests(&self) -> Vec<Request> {
@@ -478,11 +545,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                streaming: true,
-                tool_calls: true,
-                ..Capabilities::default()
-            }
+            self.caps
         }
 
         fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
@@ -499,7 +562,8 @@ mod tests {
         }
     }
 
-    /// Two tools: `note` is read-only, `write` writes.
+    /// Two tools: `note` is read-only, `write` writes. Any other name
+    /// is unknown.
     struct FakeTools;
 
     impl ToolHost for FakeTools {
@@ -514,22 +578,22 @@ mod tests {
                 .collect()
         }
 
-        fn decide(&self, policy: &ApprovalPolicy, name: &str, input: &Value) -> ApprovalDecision {
-            let access = if name == "write" {
-                ToolAccess::Write
-            } else {
-                ToolAccess::ReadOnly
-            };
-            policy.decide(&crate::approval::ApprovalRequest {
-                tool: name,
-                access,
-                input,
-            })
+        fn access(&self, name: &str) -> Option<ToolAccess> {
+            match name {
+                "note" => Some(ToolAccess::ReadOnly),
+                "write" => Some(ToolAccess::Write),
+                _ => None,
+            }
         }
 
         fn run_approved(&self, name: &str, input: Value) -> BoxFuture<'_, ToolOutput> {
-            let output = ToolOutput::text(format!("{name} ran: {input}"))
-                .with_summary(format!("{name}: ok"));
+            let output = if self.access(name).is_some() {
+                ToolOutput::text(format!("{name} ran: {input}")).with_summary(format!("{name}: ok"))
+            } else {
+                ToolOutput::error(format!(
+                    "unknown tool: {name}; available tools: note, write"
+                ))
+            };
             Box::pin(std::future::ready(output))
         }
     }
@@ -589,6 +653,10 @@ mod tests {
         ]
     }
 
+    fn noop_sink() -> impl EventSink {
+        |_: EngineEvent<'_>| {}
+    }
+
     #[test]
     fn a_text_turn_lands_in_history_and_the_session_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -600,15 +668,15 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
-        let mut seen = String::new();
-        let mut sink = |event: EngineEvent<'_>| {
+        let seen = Mutex::new(String::new());
+        let sink = |event: EngineEvent<'_>| {
             if let EngineEvent::TextDelta(delta) = event {
-                seen.push_str(delta);
+                seen.lock().unwrap().push_str(delta);
             }
         };
-        let outcome = block_on(engine.user_turn("hi".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let outcome = block_on(engine.user_turn("hi".into(), &sink, &mut ApproveAll)).unwrap();
         assert_eq!(outcome, TurnOutcome::Completed);
-        assert_eq!(seen, "hello");
+        assert_eq!(*seen.lock().unwrap(), "hello");
         assert_eq!(engine.history().len(), 2);
         assert_eq!(
             engine.history()[1].content,
@@ -631,15 +699,27 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
-        let mut events = Vec::new();
-        let mut sink = |event: EngineEvent<'_>| {
-            if let EngineEvent::ToolEnd { name, is_error, .. } = event {
-                events.push((name.to_string(), is_error));
+        let events = Mutex::new(Vec::new());
+        let sink = |event: EngineEvent<'_>| match event {
+            EngineEvent::ToolRun { id, name, .. } => {
+                events.lock().unwrap().push(format!("run {name} {id}"));
             }
+            EngineEvent::ToolEnd {
+                id, name, is_error, ..
+            } => {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(format!("end {name} {id} err={is_error}"));
+            }
+            _ => {}
         };
-        let outcome = block_on(engine.user_turn("go".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let outcome = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
         assert_eq!(outcome, TurnOutcome::Completed);
-        assert_eq!(events, vec![("note".to_string(), false)]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["run note call_1", "end note call_1 err=false"]
+        );
 
         // user, assistant tool call, user tool result, assistant text.
         assert_eq!(engine.history().len(), 4);
@@ -660,6 +740,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].messages.len(), 3);
 
+        // The approval record names the call id.
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        assert!(raw.contains(r#""tool_use_id":"call_1""#));
+
         let replayed = replay(engine.session().path()).unwrap();
         assert_eq!(replayed.messages, engine.history());
     }
@@ -674,8 +758,8 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        block_on(engine.user_turn("go".into(), &mut sink, &mut NoPrompt)).unwrap();
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut NoPrompt)).unwrap();
 
         let ContentBlock::ToolResult {
             content, is_error, ..
@@ -701,8 +785,8 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::ReadOnly, session_in(&dir));
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        block_on(engine.user_turn("go".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
 
         let ContentBlock::ToolResult {
             content, is_error, ..
@@ -712,6 +796,45 @@ mod tests {
         };
         assert!(is_error);
         assert!(content.contains("refuses the write tool"));
+    }
+
+    #[test]
+    fn an_unknown_tool_errors_without_an_approval_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            tool_call("call_1", "nope", json!({})),
+            text_done("ok"),
+        ]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::ReadOnly, session_in(&dir));
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
+
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &engine.history()[2].content[0]
+        else {
+            panic!("expected a tool result");
+        };
+        assert!(is_error);
+        assert!(content.contains("unknown tool: nope"));
+        // No policy decision exists for a tool the host does not hold,
+        // so the audit log carries none.
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        assert!(!raw.contains(r#""type":"approval""#));
+    }
+
+    #[test]
+    fn a_provider_without_tool_calls_gets_no_tool_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::without_tool_calls(vec![text_done("plain")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
+        assert!(provider.requests()[0].tools.is_empty());
     }
 
     #[test]
@@ -743,8 +866,8 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        block_on(engine.user_turn("go".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
 
         let assistant = &engine.history()[1];
         assert_eq!(
@@ -778,14 +901,14 @@ mod tests {
             session,
         );
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        let outcome = block_on(engine.user_turn("go".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let sink = noop_sink();
+        let outcome = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
         assert_eq!(outcome, TurnOutcome::CallLimit);
         assert_eq!(provider.requests().len(), 2);
     }
 
     #[test]
-    fn a_dangling_tool_call_is_repaired_before_the_next_turn() {
+    fn a_dangling_tool_call_is_repaired_in_the_next_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(vec![text_done("recovered")]);
         let tools = FakeTools;
@@ -812,12 +935,14 @@ mod tests {
             history,
         );
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        block_on(engine.user_turn("again".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let sink = noop_sink();
+        block_on(engine.user_turn("again".into(), &sink, &mut ApproveAll)).unwrap();
 
-        // Repair message first, then the new user text.
+        // One user message: the repair result first, then the text, so
+        // roles keep alternating.
         let repair = &engine.history()[2];
         assert_eq!(repair.role, Role::User);
+        assert_eq!(repair.content.len(), 2);
         let ContentBlock::ToolResult {
             tool_use_id,
             is_error,
@@ -828,13 +953,72 @@ mod tests {
         };
         assert_eq!(tool_use_id, "call_cut");
         assert!(is_error);
-        assert!(content.contains("interrupted"));
+        assert!(content.contains("may have run"));
         assert_eq!(
-            engine.history()[3].content,
-            vec![ContentBlock::Text {
+            repair.content[1],
+            ContentBlock::Text {
                 text: "again".into()
-            }]
+            }
         );
+    }
+
+    #[test]
+    fn repair_pairs_calls_and_results_positionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("ok")]);
+        let tools = FakeTools;
+        // call_1 was answered in turn one; an adapter that restarts its
+        // ids reissued call_1 later and the turn was cut.
+        let history = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "go".into() }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "note".into(),
+                    input: json!({}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "first answer".into(),
+                    is_error: false,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "note".into(),
+                    input: json!({"n": 2}),
+                }],
+            },
+        ];
+        let mut engine = Engine::with_history(
+            &provider,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            EngineConfig::new("test-model"),
+            session_in(&dir),
+            history,
+        );
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("again".into(), &sink, &mut ApproveAll)).unwrap();
+
+        // The reissued call_1 got exactly one repair result.
+        let repair = &engine.history()[4];
+        let repairs: Vec<_> = repair
+            .content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            .collect();
+        assert_eq!(repairs.len(), 1);
     }
 
     #[test]
@@ -847,10 +1031,29 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        let error =
-            block_on(engine.user_turn("go".into(), &mut sink, &mut ApproveAll)).unwrap_err();
+        let sink = noop_sink();
+        let error = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap_err();
         assert!(error.to_string().contains("without a tool call"));
+    }
+
+    #[test]
+    fn a_tool_call_end_without_a_start_is_a_protocol_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamEvent::ToolCallEnd {
+                id: "ghost".into(),
+                input: json!({}),
+            },
+            StreamEvent::Done(StopReason::ToolUse),
+        ]]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let sink = noop_sink();
+        let error = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap_err();
+        assert!(error.to_string().contains("without a start event"));
+        // The history holds only the user message; nothing partial.
+        assert_eq!(engine.history().len(), 1);
     }
 
     #[test]
@@ -866,9 +1069,9 @@ mod tests {
         // must not disturb the prompt.
         let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
 
-        let mut sink = |_: EngineEvent<'_>| {};
-        block_on(engine.user_turn("one".into(), &mut sink, &mut ApproveAll)).unwrap();
-        block_on(engine.user_turn("two".into(), &mut sink, &mut ApproveAll)).unwrap();
+        let sink = noop_sink();
+        block_on(engine.user_turn("one".into(), &sink, &mut ApproveAll)).unwrap();
+        block_on(engine.user_turn("two".into(), &sink, &mut ApproveAll)).unwrap();
 
         let requests = provider.requests();
         assert_eq!(requests.len(), 3);
@@ -888,5 +1091,20 @@ mod tests {
             let text = serde_json::to_string(&request.messages).unwrap();
             assert!(!text.contains("approval"));
         }
+    }
+
+    #[test]
+    fn into_parts_returns_the_session_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("hi")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+        let sink = noop_sink();
+        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
+
+        let (session, history) = engine.into_parts();
+        assert_eq!(history.len(), 2);
+        let replayed = replay(session.path()).unwrap();
+        assert_eq!(replayed.messages, history);
     }
 }

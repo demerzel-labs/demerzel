@@ -1,22 +1,29 @@
 use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use demerzel::{RunConfig, run_one_shot};
 use demerzel_core::{ApprovalMode, EngineEvent, TurnOutcome};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const USAGE: &str = "usage: demerzel [--auto | --read-only] [-c] \"prompt\"
+const USAGE: &str = "usage: demerzel [--auto | --read-only] [-c] [--] \"prompt\"
        demerzel --version
 
 One-shot mode runs one prompt and exits. Writes are off by default;
 --auto turns them on. -c continues the latest session in this project.
+Use -- before a prompt that starts with a dash.
 The interactive REPL arrives with M1 step 6.";
 
 fn main() {
     let mut approval = ApprovalMode::ReadOnly;
     let mut continue_last = false;
     let mut words: Vec<String> = Vec::new();
+    let mut flags_done = false;
     for arg in std::env::args().skip(1) {
+        if flags_done {
+            words.push(arg);
+            continue;
+        }
         match arg.as_str() {
             "--version" | "-V" => {
                 println!("demerzel {VERSION}");
@@ -29,11 +36,17 @@ fn main() {
                 println!("{USAGE}");
                 return;
             }
+            "--" => flags_done = true,
             other if other.starts_with('-') => {
                 eprintln!("unknown flag: {other}\n{USAGE}");
                 std::process::exit(2);
             }
-            word => words.push(word.to_string()),
+            word => {
+                // The prompt starts here; everything after it is
+                // prompt text, dashes included.
+                flags_done = true;
+                words.push(word.to_string());
+            }
         }
     }
     let prompt = words.join(" ");
@@ -52,10 +65,14 @@ fn main() {
     let mut config = RunConfig::new(cwd);
     config.approval = approval;
     config.continue_last = continue_last;
-    if let Ok(model) = std::env::var("DEMERZEL_MODEL") {
+    if let Ok(model) = std::env::var("DEMERZEL_MODEL")
+        && !model.is_empty()
+    {
         config.model = model;
     }
-    if let Ok(base_url) = std::env::var("DEMERZEL_BASE_URL") {
+    if let Ok(base_url) = std::env::var("DEMERZEL_BASE_URL")
+        && !base_url.is_empty()
+    {
         config.base_url = Some(base_url);
     }
 
@@ -64,12 +81,12 @@ fn main() {
         .build()
         .expect("build the tokio runtime");
     let outcome = runtime.block_on(async {
-        let mut pending_newline = false;
-        let mut sink = |event: EngineEvent<'_>| match event {
+        let pending_newline = AtomicBool::new(false);
+        let sink = |event: EngineEvent<'_>| match event {
             EngineEvent::TextDelta(delta) => {
                 print!("{delta}");
                 let _ = std::io::stdout().flush();
-                pending_newline = !delta.ends_with('\n');
+                pending_newline.store(!delta.ends_with('\n'), Ordering::Relaxed);
             }
             EngineEvent::ToolStart { name, .. } => {
                 eprintln!("· {name} …");
@@ -78,14 +95,15 @@ fn main() {
                 name,
                 summary,
                 is_error,
+                ..
             } => {
                 let mark = if is_error { "✗" } else { "·" };
                 eprintln!("{mark} {}", summary.unwrap_or(name));
             }
-            EngineEvent::ReasoningDelta(_) | EngineEvent::ModelUsage(_) => {}
+            _ => {}
         };
-        let result = run_one_shot(&config, prompt, &mut sink).await;
-        if pending_newline {
+        let result = run_one_shot(&config, prompt, &sink).await;
+        if pending_newline.load(Ordering::Relaxed) {
             println!();
         }
         result
@@ -101,6 +119,7 @@ fn main() {
             eprintln!("demerzel: the turn hit the model-call limit");
             std::process::exit(1);
         }
+        Ok(_) => {}
         Err(error) => {
             eprintln!("demerzel: {error}");
             std::process::exit(1);

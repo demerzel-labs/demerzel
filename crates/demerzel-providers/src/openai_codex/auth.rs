@@ -76,13 +76,12 @@ impl AuthStore {
 
     /// Open the store at the default paths.
     pub fn open_default() -> Result<Self, ProviderError> {
-        let home = std::env::var("HOME")
-            .map_err(|_| ProviderError::Auth("HOME is not set".to_string()))?;
-        let data_home = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(&home).join(".local/share"));
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| ProviderError::Auth("HOME is not set".to_string()))?;
+        let data_dir = demerzel_core::paths::data_dir()
+            .map_err(|error| ProviderError::Auth(error.to_string()))?;
         Self::open(
-            data_home.join("demerzel/auth.json"),
+            data_dir.join("auth.json"),
             Some(Path::new(&home).join(".codex/auth.json")),
         )
     }

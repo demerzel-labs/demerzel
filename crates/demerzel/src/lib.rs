@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use demerzel_core::{
-    ApprovalMode, ApprovalPolicy, Engine, EngineConfig, EventSink, NoPrompt, Session, SessionStore,
-    ToolAccess, TurnOutcome,
+    ApprovalMode, ApprovalPolicy, Engine, EngineConfig, EngineError, EventSink, Message, NoPrompt,
+    ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
@@ -14,6 +14,16 @@ use demerzel_tools::Registry;
 
 /// Default model until per-role model routing arrives (M2 config).
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+/// Auth store locations for one run.
+#[derive(Debug, Clone)]
+pub struct AuthPaths {
+    /// The dmz auth store file.
+    pub store: PathBuf,
+    /// The Codex CLI `auth.json` to import from; `None` turns the
+    /// import off.
+    pub codex_cli: Option<PathBuf>,
+}
 
 /// Everything one run needs. `main` fills it from flags and the
 /// environment; tests fill it directly.
@@ -29,9 +39,8 @@ pub struct RunConfig {
     pub data_root: Option<PathBuf>,
     /// Endpoint override; `None` uses the Codex default.
     pub base_url: Option<String>,
-    /// Auth store override as `(store path, Codex CLI import path)`;
-    /// `None` uses the default paths.
-    pub auth_paths: Option<(PathBuf, Option<PathBuf>)>,
+    /// Auth store override; `None` uses the default paths.
+    pub auth: Option<AuthPaths>,
 }
 
 impl RunConfig {
@@ -45,9 +54,21 @@ impl RunConfig {
             continue_last: false,
             data_root: None,
             base_url: None,
-            auth_paths: None,
+            auth: None,
         }
     }
+}
+
+/// What stopped a run before or during the turn.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RunError {
+    #[error("{0}")]
+    Auth(ProviderError),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error("session: {0}")]
+    Session(#[from] std::io::Error),
 }
 
 /// Run one prompt to completion and exit. Display events go to `sink`;
@@ -55,8 +76,8 @@ impl RunConfig {
 pub async fn run_one_shot(
     config: &RunConfig,
     prompt: String,
-    sink: &mut dyn EventSink,
-) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+    sink: &dyn EventSink,
+) -> Result<TurnOutcome, RunError> {
     let store = match &config.data_root {
         Some(root) => SessionStore::at(root),
         None => SessionStore::open_default()?,
@@ -69,9 +90,11 @@ pub async fn run_one_shot(
         registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
     }
 
-    let auth = match &config.auth_paths {
-        Some((path, codex_cli)) => AuthStore::open(path.clone(), codex_cli.clone())?,
-        None => AuthStore::open_default()?,
+    let auth = match &config.auth {
+        Some(paths) => {
+            AuthStore::open(paths.store.clone(), paths.codex_cli.clone()).map_err(RunError::Auth)?
+        }
+        None => AuthStore::open_default().map_err(RunError::Auth)?,
     };
     let mut codex_config = CodexConfig::default();
     if let Some(base_url) = &config.base_url {
@@ -93,17 +116,32 @@ pub async fn run_one_shot(
 }
 
 /// Open the session for this run: the latest one when `continue_last`
-/// asks for it and one exists, else a fresh one.
+/// asks for it and one matches this project, else a fresh one. Resume
+/// appends a fresh meta record, so the file names the model and
+/// provider that continue it.
 fn open_session(
     store: &SessionStore,
     config: &RunConfig,
     provider_id: &str,
-) -> Result<(Session, Vec<demerzel_core::Message>), Box<dyn std::error::Error>> {
+) -> Result<(Session, Vec<Message>), RunError> {
     if config.continue_last
         && let Some(path) = store.latest(&config.project_dir)?
     {
-        let (session, replay) = Session::resume(&path)?;
-        return Ok((session, replay.messages));
+        let (mut session, replay) = Session::resume(&path)?;
+        // A hash collision in the project directory name is the only
+        // way another project's file lands here; refuse to mix them.
+        let same_project = replay
+            .meta
+            .as_ref()
+            .is_none_or(|meta| meta.cwd == config.project_dir.display().to_string());
+        if same_project {
+            session.append_meta(&SessionMeta::now(
+                &config.project_dir,
+                provider_id,
+                &config.model,
+            ))?;
+            return Ok((session, replay.messages));
+        }
     }
     let session = store.create(&config.project_dir, provider_id, &config.model)?;
     Ok((session, Vec::new()))

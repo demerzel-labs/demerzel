@@ -183,11 +183,12 @@ Output truncation adds explicit markers. Errors return to the model as
 ### Approval policy (demerzel-core)
 
 Three modes: `read-only`, `ask` (interactive default), `auto`. The policy
-gates the write and execute tools (edit, create, bash), and the registry
-checks it inside `dispatch`, so no caller can skip the gate. Policy lives
+gates the write and execute tools (edit, create, bash). The engine checks
+the policy before every dispatch, keyed on the access class the tool host
+declares, so a composite tool host cannot bypass the gate. Policy lives
 in the harness, never in the prompt. Approval decisions go into the
-session log as non-prompt events, so the record stays auditable and the
-prefix stays stable.
+session log as non-prompt events with their call ids, so the record stays
+auditable and the prefix stays stable.
 
 Non-interactive runs (one-shot) default to `read-only`. `--auto` enables
 writes.
