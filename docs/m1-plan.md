@@ -13,11 +13,16 @@ release binary at 7.0 MB.
 First bench numbers (2026-08-08, Ryzen 9 5900X; raw data and the
 machine spec sit in `bench/results/`):
 
-- Boot (`--version`): 1.2 ms mean.
-- Time to interactive (PTY probe): 1.8 ms warm, 6.5 ms cold.
-- Idle REPL memory: 3.8 MiB PSS, 3.7 MiB USS.
-- Turn latency against the mock: 141 µs text only, 342 µs with one
-  read dispatch.
+- Boot (`--version`): 1.0 ms mean over 50 runs.
+- Time to interactive (PTY probe, median of 50): 1.2 ms warm, 4.4 ms
+  cold with verified page-cache eviction. The probe's own spawn
+  floor, 0.55 ms, sits inside both numbers.
+- Idle REPL memory (median of 10 launches): 516 KiB anonymous — the
+  stable own-heap number — and 3.5 MiB PSS, which also counts clean
+  mapped binary text.
+- Per-turn latency against the local mock (mean): 140 µs text only,
+  302 µs with one read dispatch, over a 42 µs transport floor. The
+  harness itself adds roughly 97 µs to a text turn.
 
 Notes for the next session:
 

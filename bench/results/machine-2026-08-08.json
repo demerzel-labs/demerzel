@@ -1,0 +1,14 @@
+{
+  "date": "2026-08-08",
+  "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+  "cores": 24,
+  "cpu_governor": "performance",
+  "mem_total_kb": 65735980,
+  "kernel": "7.1.6-arch1-1",
+  "distro": "Arch Linux",
+  "filesystem": "btrfs",
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "binary_bytes": 6924224,
+  "git_rev": "1f24828",
+  "git_dirty": false
+}
