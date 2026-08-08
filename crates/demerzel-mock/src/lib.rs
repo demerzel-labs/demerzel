@@ -5,6 +5,8 @@
 //! the credential-refresh path. It records every request so tests can
 //! assert on serialization and headers. Never part of the shipped binary.
 
+pub mod codex;
+
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -119,9 +121,11 @@ impl MockServer {
         Self::start_inner(responses, token_responses, false).await
     }
 
-    /// Start the server with a response script that cycles forever.
-    /// This mode records no requests, so an unbounded benchmark run
-    /// holds no growing state.
+    /// Start the server with a `/responses` script that cycles
+    /// forever. This mode records no requests on any route, so an
+    /// unbounded benchmark run holds no growing state and
+    /// [`MockServer::received`] returns an empty list. The token
+    /// route has no script, so a refresh attempt gets 410.
     pub async fn start_looping(responses: Vec<MockResponse>) -> Self {
         Self::start_inner(responses, Vec::new(), true).await
     }
@@ -237,8 +241,10 @@ async fn handle_token(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    record(&state, "/oauth/token", &headers, body);
+    if !state.cycle {
+        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        record(&state, "/oauth/token", &headers, body);
+    }
     let next = state.token_responses.lock().unwrap().pop_front();
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock token script exhausted").into_response();

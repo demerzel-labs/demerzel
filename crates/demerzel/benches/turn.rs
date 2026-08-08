@@ -1,84 +1,70 @@
-//! Layer-2 benchmark: harness-added latency per turn against the mock
-//! server. The number includes the localhost round-trip to the mock
-//! and the session-file appends; it excludes engine construction and
-//! session creation, which happen outside the timed span.
+//! Layer-2 benchmark: per-turn latency against a local mock endpoint.
+//!
+//! Three benches decompose the number:
+//! - `transport_floor`: one bare HTTP POST to the mock, full body
+//!   read. Everything below the harness: localhost round-trip, mock
+//!   parse, SSE serialize.
+//! - `turn_text`: one full engine turn with a text-only reply. The
+//!   harness-added latency is `turn_text - transport_floor`.
+//! - `turn_read_tool`: a turn with one read dispatch, two model calls.
+//!
+//! The bench drives `demerzel::Runtime`, the same wiring seam the
+//! REPL and the one-shot mode use, so later runtime work shows up in
+//! this number. Session and engine construction, and the session-file
+//! removal, run outside the timed span. Session files land under the
+//! cargo target directory, not tmpfs, so appends hit the same class
+//! of filesystem the product writes to.
 //!
 //! The mock runs on its own single-worker runtime, so server work
 //! never shares the bench thread. The bench runtime is
-//! `current_thread`, the flavor the shipped binary uses.
+//! `current_thread`, the flavor the shipped binary uses. The auth
+//! store keeps its default token URL; the script never answers 401,
+//! so no refresh fires.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use demerzel_core::{
-    ApprovalMode, ApprovalPolicy, Engine, EngineConfig, EngineEvent, NoPrompt, SessionStore,
-};
+use demerzel::{AuthPaths, RunConfig, Runtime};
+use demerzel_core::{ApprovalMode, EngineEvent, NoPrompt, TurnOutcome};
+use demerzel_mock::codex::{text_turn, tool_turn};
 use demerzel_mock::{MockResponse, MockServer};
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
-use demerzel_tools::Registry;
-use serde_json::{Value, json};
-
-fn text_delta(text: &str) -> Value {
-    json!({"type": "response.output_text.delta", "delta": text})
-}
-
-fn completed() -> Value {
-    json!({
-        "type": "response.completed",
-        "response": {"usage": {
-            "input_tokens": 10,
-            "output_tokens": 5,
-            "input_tokens_details": {"cached_tokens": 2},
-        }},
-    })
-}
-
-fn text_turn(text: &str) -> MockResponse {
-    MockResponse::stream(vec![text_delta(text), completed()])
-}
-
-fn tool_turn(name: &str, input: Value) -> MockResponse {
-    MockResponse::stream(vec![
-        json!({
-            "type": "response.output_item.added",
-            "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": name},
-        }),
-        json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "call_id": "call_1",
-                "arguments": input.to_string(),
-            },
-        }),
-        completed(),
-    ])
-}
+use serde_json::json;
 
 fn noop(_: EngineEvent<'_>) {}
 
-/// The long-lived pieces one bench shares across iterations: the mock,
-/// the adapter with its connection pool, the registry, and the store.
+/// The workspace target directory: a real filesystem, unlike `/tmp`.
+fn bench_root() -> PathBuf {
+    let target = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+    };
+    let root = target.join("bench-data");
+    std::fs::create_dir_all(&root).expect("create the bench data root");
+    root
+}
+
+/// The long-lived pieces one bench shares across iterations. Field
+/// order matters: the mock drops before its runtime.
 struct Bed {
+    mock: MockServer,
     _server_rt: tokio::runtime::Runtime,
-    _mock: MockServer,
     project: tempfile::TempDir,
     _data: tempfile::TempDir,
-    provider: OpenAiCodex,
-    registry: Registry,
-    store: SessionStore,
+    runtime: Runtime,
 }
 
 impl Bed {
     fn start(script: Vec<MockResponse>) -> Self {
+        let root = bench_root();
         let server_rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .expect("build the mock-server runtime");
         let mock = server_rt.block_on(MockServer::start_looping(script));
-        let project = tempfile::tempdir().unwrap();
-        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir_in(&root).unwrap();
+        let data = tempfile::tempdir_in(&root).unwrap();
         let auth_path = data.path().join("auth.json");
         std::fs::write(
             &auth_path,
@@ -89,38 +75,44 @@ impl Bed {
             .to_string(),
         )
         .unwrap();
-        let provider = OpenAiCodex::new(
-            CodexConfig {
-                base_url: mock.url(),
-                ..CodexConfig::default()
-            },
-            AuthStore::open(auth_path, None).unwrap(),
-        );
-        let registry = Registry::full(project.path());
-        let store = SessionStore::at(data.path().join("sessions"));
+
+        let mut config = RunConfig::new(project.path().to_path_buf());
+        config.model = "bench-model".into();
+        config.approval = ApprovalMode::Auto;
+        config.data_root = Some(data.path().join("sessions"));
+        config.base_url = Some(mock.url());
+        config.auth = Some(AuthPaths {
+            store: auth_path,
+            codex_cli: None,
+        });
+        let runtime = Runtime::new(config).expect("build the harness runtime");
+
         Self {
+            mock,
             _server_rt: server_rt,
-            _mock: mock,
             project,
             _data: data,
-            provider,
-            registry,
-            store,
+            runtime,
         }
     }
 
-    fn engine(&self) -> Engine<'_> {
-        let session = self
-            .store
-            .create(self.project.path(), "openai-codex", "bench-model")
+    /// One measured turn: build the engine and remove the session file
+    /// outside the timed span; assert the workload really ran.
+    async fn timed_turn(&self, expected_history: usize) -> Duration {
+        let (session, history) = self.runtime.open_session().unwrap();
+        let mut engine = self.runtime.engine(session, history);
+        let start = Instant::now();
+        let outcome = engine
+            .user_turn("bench".into(), &noop, &mut NoPrompt)
+            .await
             .unwrap();
-        Engine::new(
-            &self.provider,
-            &self.registry,
-            ApprovalPolicy::new(ApprovalMode::Auto),
-            EngineConfig::new("bench-model"),
-            session,
-        )
+        let elapsed = start.elapsed();
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(engine.history().len(), expected_history);
+        let path = engine.session().path().to_path_buf();
+        drop(engine);
+        std::fs::remove_file(path).unwrap();
+        elapsed
     }
 }
 
@@ -130,21 +122,29 @@ fn bench_turns(c: &mut Criterion) {
         .build()
         .expect("build the bench runtime");
 
-    // One model call, text only: the floor of the per-turn overhead.
+    // The transport-and-mock floor under every turn.
     let bed = Bed::start(vec![text_turn("done")]);
-    c.bench_function("turn_text", |b| {
+    let client = reqwest::Client::new();
+    let url = format!("{}/responses", bed.mock.url());
+    c.bench_function("transport_floor", |b| {
         b.to_async(&bench_rt).iter_custom(|iters| {
-            let bed = &bed;
+            let client = &client;
+            let url = &url;
             async move {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut engine = bed.engine();
                     let start = Instant::now();
-                    engine
-                        .user_turn("bench".into(), &noop, &mut NoPrompt)
+                    let body = client
+                        .post(url)
+                        .json(&json!({"model": "bench-model"}))
+                        .send()
+                        .await
+                        .unwrap()
+                        .text()
                         .await
                         .unwrap();
                     total += start.elapsed();
+                    assert!(body.contains("response.completed"));
                 }
                 total
             }
@@ -152,10 +152,26 @@ fn bench_turns(c: &mut Criterion) {
     });
     drop(bed);
 
-    // Two model calls with one read dispatch between them: the tool
-    // round-trip cost on top of the text floor.
+    // One model call, text only: user and assistant in the history.
+    let bed = Bed::start(vec![text_turn("done")]);
+    c.bench_function("turn_text", |b| {
+        b.to_async(&bench_rt).iter_custom(|iters| {
+            let bed = &bed;
+            async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    total += bed.timed_turn(2).await;
+                }
+                total
+            }
+        })
+    });
+    drop(bed);
+
+    // Two model calls with one read dispatch between them: user,
+    // tool-call, tool-result, and final assistant in the history.
     let bed = Bed::start(vec![
-        tool_turn("read", json!({"path": "f.txt"})),
+        tool_turn("call_1", "read", json!({"path": "f.txt"})),
         text_turn("done"),
     ]);
     std::fs::write(bed.project.path().join("f.txt"), "alpha\nbeta\n").unwrap();
@@ -165,13 +181,7 @@ fn bench_turns(c: &mut Criterion) {
             async move {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut engine = bed.engine();
-                    let start = Instant::now();
-                    engine
-                        .user_turn("bench".into(), &noop, &mut NoPrompt)
-                        .await
-                        .unwrap();
-                    total += start.elapsed();
+                    total += bed.timed_turn(4).await;
                 }
                 total
             }

@@ -248,6 +248,22 @@ line per tool call, approval prompts (yes / always / no). It prints a ready
 marker on start;
 the PTY boot probe waits for that marker. No ratatui in M1.
 
+Decisions that bind the M1 REPL (landed in step 6):
+
+- One dedicated thread owns the line editor and stdin. The REPL loop
+  and the approval prompts request lines over a channel, so no two
+  readers ever hold stdin.
+- Ctrl-C during a turn aborts the turn by a drop of the turn future.
+  Ctrl-C at the main prompt clears the prompt. Ctrl-C at an approval
+  prompt stops the whole turn, and every unrun call gets an error
+  result. The session file stays valid across aborts; the next turn
+  repairs a cut tool call.
+- The approval prompt takes yes, always, or no. An `always` answer
+  grants the tool name for the rest of the run. The grant does not
+  survive a resume; per-input grants are an M2 decision.
+- Sessions open on the first submitted prompt, so an idle boot reads
+  and writes no session file.
+
 ### Mock server and tests (demerzel-mock)
 
 The mock server implements `/responses` and replays canned Responses-API SSE
@@ -364,10 +380,14 @@ Each step is one PR with its own verify line.
   features adds 308 KB. Demerzel uses rustyline without default
   features and in-memory history. File-backed history can come with
   layered config (M2).
-- tokio runtime flavor. Start with `current_thread`; move to multi-thread
-  only if a bench shows a need.
-- Sequential vs parallel tool execution. Start sequential; revisit with
-  Layer-2 numbers.
+- tokio runtime flavor — resolved in step 7. The harness stays on
+  `current_thread`. The Layer-2 numbers put the harness-added cost per
+  turn far below one millisecond, and nothing contends for the loop
+  thread. Revisit only if a future bench shows a need.
+- Sequential vs parallel tool execution — kept sequential. The Layer-2
+  numbers put the harness's per-call overhead far below real tool
+  runtimes, so parallel dispatch buys nothing at this layer. Revisit
+  when Layer-3 workloads show tool-bound turns.
 
 ## Risks
 

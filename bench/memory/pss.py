@@ -5,8 +5,8 @@ Reads /proc/<pid>/smaps_rollup for each given PID and prints PSS and USS in
 KiB, plus totals. PSS is the metric jcode publishes, so cross-agent comparisons
 use it; USS is reported alongside because it is the stricter number.
 
-Scenario drivers (idle session, N concurrent sessions, large transcript) land
-with M1's interactive mode and will call this primitive.
+`idle.py` next to this file drives the idle-session scenario over this
+primitive. The N-session and large-transcript scenarios come later.
 """
 
 import sys

@@ -44,7 +44,7 @@ bench/boot/run.sh
 bench/boot/pty_probe.py
 bench/boot/pty_probe.py --cold
 
-# Layer 1: memory of one idle REPL session.
+# Layer 1: memory of an idle REPL session, over 10 launches.
 bench/memory/idle.py
 
 # Layer 1: PSS and USS of running agent processes.
@@ -56,7 +56,23 @@ bench/turn/run.sh
 
 The boot benchmark needs `hyperfine`. On Arch Linux, install it with
 `pacman -S hyperfine`. The PTY probe and the memory benchmarks work only on
-Linux. The probe gives each run a private data home with a synthetic auth
-store, so a run needs no login and makes no network call. Cold mode evicts
-the binary from the page cache with `posix_fadvise`; shared libraries stay
-warm. A true cold start needs a fresh boot.
+Linux. `bench/harness.py` holds the shared probe machinery.
+
+Method notes:
+
+- The probe gives each run a private data home and HOME with a synthetic
+  auth store. A run needs no login and makes no network call.
+- The probe records its own spawn floor, measured through the identical
+  PTY path with `printf`. The floor sits inside every sample.
+- Cold mode evicts the binary from the page cache with `posix_fadvise`
+  and verifies the eviction with `mincore`. Shared libraries and
+  metadata caches stay warm, so the cold number tracks the binary read
+  and moves with binary size. A true cold start needs a fresh boot.
+- The memory driver samples N launches. Anonymous memory is the
+  headline: it is the harness's own heap and it is stable. PSS and USS
+  also count clean mapped binary text, which moves with page-cache
+  state; reports keep them because cross-agent comparisons use PSS.
+- The turn suite reports `transport_floor` next to the turn benches.
+  Harness-added latency per turn is `turn_text` minus
+  `transport_floor`. Session files land under the cargo target
+  directory, so appends hit a real filesystem.

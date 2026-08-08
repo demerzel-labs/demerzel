@@ -4,13 +4,16 @@ of these files. It records the CPU, RAM, kernel, filesystem, and
 toolchain of the machine that produced the numbers.
 """
 
-import json
 import os
 import subprocess
 import sys
 import time
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import harness
+
+REPO_ROOT = harness.REPO_ROOT
 
 
 def run(cmd: list[str]) -> str:
@@ -65,13 +68,11 @@ def main() -> int:
         "filesystem": run(["findmnt", "-no", "FSTYPE", "--target", REPO_ROOT]),
         "rustc": run(["rustc", "--version"]),
         "binary_bytes": os.path.getsize(binary) if os.path.exists(binary) else None,
-        "git_rev": run(["git", "-C", REPO_ROOT, "rev-parse", "--short", "HEAD"]),
+        "git_rev": harness.git_rev(),
+        "git_dirty": harness.git_dirty(),
     }
     out_path = os.path.join(REPO_ROOT, "bench/results", f"machine-{spec['date']}.json")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(spec, f, indent=2)
-        f.write("\n")
+    harness.write_report(out_path, spec)
     print(f"machine spec: {out_path}")
     return 0
 

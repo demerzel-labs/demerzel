@@ -369,6 +369,7 @@ dependencies = [
  "demerzel-mock",
  "demerzel-providers",
  "demerzel-tools",
+ "reqwest",
  "rustyline",
  "serde_json",
  "tempfile",
