@@ -23,9 +23,12 @@ use std::path::{Component, Path, PathBuf};
 
 use demerzel_core::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, BoxFuture, ToolAccess, ToolDefinition,
+    ToolHost,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+pub use demerzel_core::ToolOutput;
 
 pub use bash::BashTool;
 pub use create::CreateTool;
@@ -50,46 +53,6 @@ pub enum ToolError {
     /// The tool ran and failed against the current filesystem state.
     #[error("{0}")]
     Failed(String),
-}
-
-/// The structured result of one tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolOutput {
-    /// Model-facing result text.
-    pub content: String,
-    pub is_error: bool,
-    /// True when the output hit a size limit. The content also carries
-    /// an explicit `[truncated …]` marker.
-    pub truncated: bool,
-    /// One short human-facing line for the status display and the
-    /// session record, e.g. `edit src/lib.rs: 2 ops`. Never parsed
-    /// from `content`.
-    pub summary: Option<String>,
-}
-
-impl ToolOutput {
-    pub fn text(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            is_error: false,
-            truncated: false,
-            summary: None,
-        }
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            content: message.into(),
-            is_error: true,
-            truncated: false,
-            summary: None,
-        }
-    }
-
-    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
-        self.summary = Some(summary.into());
-        self
-    }
 }
 
 /// The contract every tool implements. `run` returns a boxed future so
@@ -235,6 +198,21 @@ impl Registry {
             .iter()
             .find(|tool| tool.name() == name)
             .map(Box::as_ref)
+    }
+}
+
+/// The registry is the loop's tool surface.
+impl ToolHost for Registry {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        Registry::definitions(self)
+    }
+
+    fn decide(&self, policy: &ApprovalPolicy, name: &str, input: &Value) -> ApprovalDecision {
+        Registry::decide(self, policy, name, input)
+    }
+
+    fn run_approved(&self, name: &str, input: Value) -> BoxFuture<'_, ToolOutput> {
+        Registry::run_approved(self, name, input)
     }
 }
 

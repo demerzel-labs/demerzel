@@ -5,24 +5,31 @@ verifiable steps.
 
 ## Status (2026-08-07)
 
-Steps 1-4 of 7 are merged; step 5 is next. The build order below marks
-each step. Workspace state on `main`: 96 tests, `cargo fmt` and
-`cargo clippy --workspace --all-targets -- -D warnings` clean, stub
-binary at 340 KB.
+Steps 1-5 of 7 are done; step 6 is next. The build order below marks
+each step. Workspace state after step 5: 119 tests, `cargo fmt` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean,
+release binary at 6.1 MB.
 
 Notes for the next session:
 
-- Start step 5 with one live smoke call that sends the tool
-  definitions. This confirms that the Codex endpoint accepts the edit
-  tool's `oneOf` input schema. If the endpoint rejects it, flatten the
-  schema before the loop lands.
+- The step-5 smoke call confirmed that the Codex endpoint accepts the
+  edit tool's `oneOf` input schema. No flattening is needed.
+- The provider contract (trait, capabilities, request, events) moved
+  into `demerzel-core`, next to the loop that consumes it.
+  `demerzel-providers` re-exports the contract, so its public API did
+  not change. The workspace tree below shows the move.
+- The bin crate now has a lib target (`RunConfig`, `run_one_shot`).
+  The hermetic loop tests drive the same wiring as `main`.
+- Session ids are hand-rolled ULID-format strings in `demerzel-core`.
+  XDG paths are hand-rolled too. The `ulid` and `etcetera` rows left
+  the dependency table.
+- Step 6 builds the REPL on the step-5 seams: `Engine::user_turn`
+  with a real `Approver`, drop of the turn future on Ctrl-C, and the
+  ready marker for the PTY probe.
 - The bash tool kills its whole process group after every call, so a
   command cannot leave a background server running. This is the
-  accepted M1 posture (PR #11).
-- The loop consumes the step-4 seams: `Registry::dispatch` checks the
-  approval policy itself, `Registry::retain` shapes the tool set, and
-  `ToolOutput.summary` feeds the REPL status line and the session
-  record.
+  accepted M1 posture (PR #11). The alignment review of 2026-08-07
+  lists it as a watch item.
 - `AGENTS.md` holds the pull-request gate and the source rules that
   bind every step.
 
@@ -64,9 +71,9 @@ endpoints and gateways (by demand).
 
 ```text
 crates/
-  demerzel/            # bin: CLI, REPL, wiring
-  demerzel-core/       # domain types, loop, sessions, approval policy
-  demerzel-providers/  # provider trait + openai-codex adapter
+  demerzel/            # bin: CLI, REPL, wiring (lib target: run wiring)
+  demerzel-core/       # domain types, provider contract, loop, sessions, approval policy
+  demerzel-providers/  # openai-codex adapter; re-exports the contract
   demerzel-tools/      # read, edit, create, bash, grep, glob
   demerzel-mock/       # mock OpenAI-compatible server (dev/test/bench only)
 bench/                 # boot + memory runners, PTY probe, criterion harness
@@ -89,7 +96,7 @@ The harness owns its own message model. Adapters translate to and from it.
 - `Usage { input_tokens, output_tokens, cache_read_tokens }`
 - `StopReason`: `EndTurn`, `ToolUse`, `MaxTokens`, `Aborted`
 
-### Provider trait (demerzel-providers)
+### Provider trait (demerzel-core; re-exported by demerzel-providers)
 
 ```text
 trait Provider {
@@ -276,8 +283,6 @@ binary gate. Dev-only crates are exempt.
 | rustyline or reedline | REPL line editing (decide in step 6) |
 | grep-searcher, grep-regex, globset, ignore | in-process search tools |
 | libc (unix only) | bash process-group kill on timeout |
-| ulid | session ids |
-| etcetera or dirs | XDG paths |
 | thiserror, anyhow | errors |
 | axum (dev-only) | mock server |
 | criterion (dev-only) | Layer-2 micro-benchmarks |
@@ -309,7 +314,9 @@ Each step is one PR with its own verify line.
    `demerzel-core` that gives the step-5 loop its seam.
 5. **Loop and sessions.** Turn engine, JSONL store, resume, one-shot mode.
    *Verify: hermetic loop tests, prefix-stability test, resume test.*
-   **Next.**
+   **Done — PR #14.** Also landed: the provider-contract move into
+   `demerzel-core`, the `ToolHost` seam, and a live one-shot dogfood
+   run against the Codex endpoint.
 6. **REPL and CLI.** Flags, credential resolution, streaming render,
    approval prompts, ready marker. *Verify: a real dogfood session in this
    repo against the Codex endpoint; Ctrl-C behavior.*

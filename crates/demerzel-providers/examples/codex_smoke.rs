@@ -1,5 +1,7 @@
 //! Live smoke call against the real Codex endpoint with the imported
-//! Codex CLI credentials. Part of the M1 step-2 verify line.
+//! Codex CLI credentials. Part of the M1 step-2 verify line. The call
+//! sends the full tool set, so it also confirms that the endpoint
+//! accepts every tool input schema (step-5 verify).
 //!
 //! Run: `cargo run -p demerzel-providers --example codex_smoke -- [model] [prompt...]`
 
@@ -8,6 +10,7 @@ use std::future::poll_fn;
 use demerzel_core::{ContentBlock, Message, Role};
 use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
 use demerzel_providers::{Provider, Request, StreamEvent};
+use demerzel_tools::Registry;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             role: Role::User,
             content: vec![ContentBlock::Text { text: prompt }],
         }],
-        tools: Vec::new(),
+        tools: Registry::full(std::env::current_dir()?).definitions(),
         max_output_tokens: None,
     };
 

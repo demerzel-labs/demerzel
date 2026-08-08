@@ -14,10 +14,10 @@ humantime = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 
 [dev-dependencies]
 demerzel-mock = { workspace = true }
+demerzel-tools = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
