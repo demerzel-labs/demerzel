@@ -130,10 +130,16 @@ fn open_session(
         let (mut session, replay) = Session::resume(&path)?;
         // A hash collision in the project directory name is the only
         // way another project's file lands here; refuse to mix them.
+        // Both sides compare canonical, so a relative or symlinked
+        // spelling of the same project still matches.
+        let canonical = config
+            .project_dir
+            .canonicalize()
+            .unwrap_or_else(|_| config.project_dir.clone());
         let same_project = replay
             .meta
             .as_ref()
-            .is_none_or(|meta| meta.cwd == config.project_dir.display().to_string());
+            .is_none_or(|meta| meta.cwd == canonical.display().to_string());
         if same_project {
             session.append_meta(&SessionMeta::now(
                 &config.project_dir,

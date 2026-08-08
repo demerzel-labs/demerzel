@@ -43,11 +43,13 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
-    /// Metadata for a run starting now.
+    /// Metadata for a run starting now. The stored `cwd` is canonical,
+    /// so one project has one spelling across resumes.
     pub fn now(cwd: &Path, provider: &str, model: &str) -> Self {
+        let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         Self {
             schema: SCHEMA_VERSION,
-            cwd: cwd.display().to_string(),
+            cwd: canonical.display().to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
             created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
@@ -101,11 +103,14 @@ enum RecordRef<'a> {
 /// of failing, so a newer file still resumes.
 const KNOWN_TYPES: [&str; 4] = ["meta", "message", "approval", "usage"];
 
-/// The record type alone, for the replay fast path.
+/// The record type alone, for the replay fast path. `Cow` keeps the
+/// peek borrow-free for plain identifiers and still reads a type
+/// value that carries JSON escapes, so an unknown type always skips
+/// instead of failing.
 #[derive(Deserialize)]
 struct RecordTag<'a> {
     #[serde(borrow, rename = "type")]
-    kind: Option<&'a str>,
+    kind: Option<std::borrow::Cow<'a, str>>,
 }
 
 /// History rebuilt from a session file.
@@ -298,19 +303,37 @@ impl Session {
 }
 
 /// Cut an unterminated final line, the leftover of a crash mid-append.
+/// Reads backward in blocks from the file end, so a long session never
+/// loads whole into memory.
 fn truncate_torn_tail(path: &Path) -> io::Result<()> {
-    let bytes = std::fs::read(path)?;
-    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    const BLOCK: u64 = 8192;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
         return Ok(());
     }
-    let keep = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |position| position + 1);
-    OpenOptions::new()
-        .write(true)
-        .open(path)?
-        .set_len(keep as u64)
+    let mut byte = [0u8; 1];
+    file.seek(SeekFrom::Start(len - 1))?;
+    file.read_exact(&mut byte)?;
+    if byte[0] == b'\n' {
+        return Ok(());
+    }
+    let mut end = len - 1;
+    let mut buf = vec![0u8; BLOCK as usize];
+    loop {
+        let start = end.saturating_sub(BLOCK);
+        let read_len = (end - start) as usize;
+        if read_len == 0 {
+            return file.set_len(0);
+        }
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buf[..read_len])?;
+        if let Some(position) = buf[..read_len].iter().rposition(|b| *b == b'\n') {
+            return file.set_len(start + position as u64 + 1);
+        }
+        end = start;
+    }
 }
 
 /// Rebuild history from a session file. Unknown record types are
@@ -344,7 +367,7 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
         let Some(kind) = tag.kind else {
             return Err(bad("bad session record", "no type field".to_string()));
         };
-        if !KNOWN_TYPES.contains(&kind) {
+        if !KNOWN_TYPES.contains(&kind.as_ref()) {
             continue;
         }
         let record: SessionRecord = serde_json::from_str(trimmed)
@@ -576,7 +599,7 @@ mod tests {
         // A crash mid-append leaves a record without its newline.
         use std::io::Write as _;
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        write!(file, "{{\"type\":\"message\",\"role\":\"assis").unwrap();
+        write!(file, "{{\"type\":\"message\",\"TORN_FRAGMENT").unwrap();
         drop(file);
 
         // Replay ignores the torn tail.
@@ -591,7 +614,67 @@ mod tests {
         let replayed = replay(&path).unwrap();
         assert_eq!(replayed.messages.len(), 2);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("assis\""));
+        assert!(!text.contains("TORN_FRAGMENT"));
+    }
+
+    #[test]
+    fn a_torn_tail_longer_than_one_scan_block_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::at(dir.path());
+        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        session
+            .append_message(&text_message(Role::User, "kept"))
+            .unwrap();
+        let path = session.path().to_path_buf();
+        drop(session);
+        use std::io::Write as _;
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        // A torn record larger than the 8 KiB backward-scan block.
+        write!(
+            file,
+            "{{\"type\":\"message\",\"x\":\"{}",
+            "y".repeat(40_000)
+        )
+        .unwrap();
+        drop(file);
+
+        let (_, replayed) = Session::resume(&path).unwrap();
+        assert_eq!(replayed.messages.len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains("yyyy"));
+    }
+
+    #[test]
+    fn append_matches_the_owned_record_serialization_for_every_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::at(dir.path());
+        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        let records = [
+            SessionRecord::Meta(SessionMeta::now(dir.path(), "p2", "m2")),
+            SessionRecord::Message(text_message(Role::Assistant, "hi")),
+            SessionRecord::Approval {
+                tool: "bash".into(),
+                mode: ApprovalMode::Auto,
+                decision: ApprovalDecision::Allow,
+                tool_use_id: Some("call_3".into()),
+                approved: None,
+            },
+            SessionRecord::Usage(Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+            }),
+        ];
+        for record in &records {
+            session.append(record).unwrap();
+        }
+        let text = std::fs::read_to_string(session.path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // Line 0 is the create-time meta; the appended records follow.
+        for (line, record) in lines[1..].iter().zip(&records) {
+            assert_eq!(*line, serde_json::to_string(record).unwrap());
+        }
     }
 
     #[test]

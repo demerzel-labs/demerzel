@@ -32,6 +32,11 @@ pub struct Capabilities {
 /// prompt assembly can keep the prefix stable. Build one with
 /// [`Request::new`]; the struct is non-exhaustive so later fields
 /// (cache breakpoints, per-request reasoning effort) stay additive.
+///
+/// `messages` can hold two same-role messages in a row — a repaired or
+/// limit-cut turn produces that shape. An adapter whose wire format
+/// requires strict role alternation merges consecutive same-role
+/// messages when it builds the request body.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Request {
