@@ -91,6 +91,18 @@ per-call timeout, output truncation with markers, structured results. Approval
 modes gate writes and command execution; policy lives in the harness, never in
 the prompt (prompt-prefix stability, see efficiency checklist).
 
+Decisions from the alignment review of 2026-08-07:
+
+- Write tools stay inside the project root. The confinement is a
+  consistency guardrail, not a sandbox: bash in `auto` mode can write
+  anywhere. Do not present it as a security boundary. Add a config
+  override when a real session needs one.
+- The bash process group ends with each call, so a command cannot
+  leave a server running. This is the accepted posture until the
+  background-task decision (see open questions).
+- Tool execution is sequential in M1. Frontier models use parallel
+  tool calls heavily; revisit with the Layer-2 numbers.
+
 ### Providers: neutral by construction
 
 The harness defines its own message, tool-call, and usage model; adapters
@@ -322,6 +334,9 @@ under two minutes with each of: ChatGPT subscription, Anthropic key.
 
 ## Open questions
 
+- Background tasks: the bash process group ends with each call, so a
+  session cannot keep a server running. Decide the mechanism in M2 or
+  M3.
 - Prompt/context format details: how skills and AGENTS.md compose into the
   system prompt while keeping the prefix stable.
 - Compaction split: how much of a compacted session becomes memory facts and
