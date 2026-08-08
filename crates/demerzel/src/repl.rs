@@ -55,11 +55,16 @@ impl Reader {
         let (requests, receiver) = std_mpsc::channel::<ReadRequest>();
         let (init_tx, init_rx) = std_mpsc::channel::<Result<(), String>>();
         std::thread::spawn(move || {
-            // PreferTerm prompts on /dev/tty, so stdout stays model
-            // text even when it is a pipe.
-            let config = rustyline::Config::builder()
-                .behavior(rustyline::config::Behavior::PreferTerm)
-                .build();
+            // With a terminal on stdin, prompt on /dev/tty so stdout
+            // stays model text even when it is a pipe. With piped
+            // stdin, read the pipe.
+            use std::io::IsTerminal as _;
+            let behavior = if std::io::stdin().is_terminal() {
+                rustyline::config::Behavior::PreferTerm
+            } else {
+                rustyline::config::Behavior::Stdio
+            };
+            let config = rustyline::Config::builder().behavior(behavior).build();
             let mut editor =
                 match rustyline::Editor::<(), rustyline::history::MemHistory>::with_history(
                     config,
@@ -74,22 +79,14 @@ impl Reader {
                         return;
                     }
                 };
-            // A line whose asker went away mid-read; it answers the
-            // next request instead of vanishing.
-            let mut carried: Option<String> = None;
             while let Ok(request) = receiver.recv() {
                 if request.reply.is_closed() {
                     continue;
                 }
-                let outcome = match carried.take() {
-                    Some(line) => ReadOutcome::Line(line),
-                    None => match editor.readline(&request.prompt) {
-                        Ok(line) => ReadOutcome::Line(line),
-                        Err(rustyline::error::ReadlineError::Interrupted) => {
-                            ReadOutcome::Interrupted
-                        }
-                        Err(_) => ReadOutcome::Closed,
-                    },
+                let outcome = match editor.readline(&request.prompt) {
+                    Ok(line) => ReadOutcome::Line(line),
+                    Err(rustyline::error::ReadlineError::Interrupted) => ReadOutcome::Interrupted,
+                    Err(_) => ReadOutcome::Closed,
                 };
                 if let ReadOutcome::Line(line) = &outcome
                     && request.remember
@@ -97,10 +94,14 @@ impl Reader {
                 {
                     let _ = editor.add_history_entry(line.as_str());
                 }
-                if let Err(unsent) = request.reply.send(outcome)
-                    && let ReadOutcome::Line(line) = unsent
-                {
-                    carried = Some(line);
+                // An answer whose asker went away is discarded: a line
+                // meant for a dead approval prompt must never become
+                // the next model prompt.
+                if request.reply.send(outcome).is_err() {
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr().lock(),
+                        b"[input discarded]\n",
+                    );
                 }
             }
         });
@@ -179,8 +180,7 @@ impl Renderer {
     /// One full status line on stderr, closing any open line first.
     fn status_line(&self, text: &str) {
         self.close_line();
-        self.write_err(text);
-        self.write_err("\n");
+        self.write_err(&format!("{text}\n"));
     }
 
     fn dimmed(&self, text: &str) -> String {
@@ -328,38 +328,35 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     repl(&runtime).await
 }
 
+/// A line is a command only when its first token after `/` is a bare
+/// word, so a prompt that starts with an absolute path reaches the
+/// model.
+fn slash_command(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('/')?;
+    let first = rest.split_whitespace().next().unwrap_or("");
+    let bare_word = !first.is_empty() && first.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+    bare_word.then_some(first)
+}
+
 async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // Install the SIGINT listener before the first prompt, so an
     // external signal cannot kill the process while the terminal is
     // raw.
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
-
-    // `-c` opens its session now, to report what it continues and to
-    // fail fast. A fresh session is created on the first turn, so an
-    // idle boot leaves no file behind.
-    let mut engine: Option<Engine<'_>> = None;
-    if runtime.config().continue_last {
-        let (session, history) = runtime.open_session()?;
-        if !history.is_empty() {
-            eprintln!(
-                "continuing session {} ({} messages)",
-                session.id(),
-                history.len()
-            );
-        }
-        engine = Some(runtime.engine(session, history));
-    }
-
     let reader = Reader::spawn()?;
+
     let mode = match runtime.config().approval {
         ApprovalMode::ReadOnly => "read-only",
         ApprovalMode::Ask => "ask",
         ApprovalMode::Auto => "auto",
     };
-    // The PTY boot probe waits for this marker line.
+    // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
     eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
 
+    // Every session opens on the first submitted prompt — `-c` too —
+    // so an idle boot reads and writes no session file.
+    let mut engine: Option<Engine<'_>> = None;
     loop {
         match reader.read("dmz> ", true).await {
             ReadOutcome::Line(line) => {
@@ -367,8 +364,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(command) = line.strip_prefix('/') {
-                    match command.trim() {
+                if let Some(command) = slash_command(line) {
+                    match command {
                         "exit" | "quit" => break,
                         other => {
                             eprintln!(
@@ -381,6 +378,13 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 }
                 if engine.is_none() {
                     let (session, history) = runtime.open_session()?;
+                    if !history.is_empty() {
+                        eprintln!(
+                            "continuing session {} ({} messages)",
+                            session.id(),
+                            history.len()
+                        );
+                    }
                     engine = Some(runtime.engine(session, history));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
@@ -440,6 +444,16 @@ async fn drain(sigint: &mut Signal) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn slash_commands_require_a_bare_word() {
+        assert_eq!(slash_command("/exit"), Some("exit"));
+        assert_eq!(slash_command("/quit  "), Some("quit"));
+        assert_eq!(slash_command("/help me"), Some("help"));
+        assert_eq!(slash_command("/home/user/x.rs:12 panics, fix it"), None);
+        assert_eq!(slash_command("/Weird"), None);
+        assert_eq!(slash_command("plain prompt"), None);
+    }
 
     #[test]
     fn answers_parse_strictly() {

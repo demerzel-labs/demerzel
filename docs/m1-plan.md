@@ -12,15 +12,22 @@ release binary at 6.9 MB.
 
 Notes for the next session:
 
-- The REPL prints `demerzel ready` as its first stdout line. The
-  step-7 PTY probe waits for that marker; the constant is
-  `demerzel::READY_MARKER`.
+- The REPL prints `demerzel ready` as its first line, on stderr.
+  The step-7 PTY probe reads the merged PTY stream and waits for that
+  marker; the constant is `demerzel::READY_MARKER`.
 - One dedicated thread owns rustyline and stdin. The REPL loop and
   the approval prompts request lines over a channel, so no two
   readers ever hold stdin.
 - Ctrl-C during a turn aborts it by a drop of the turn future.
-  Ctrl-C at a prompt clears or declines the prompt. The session file
-  stays valid across aborts; the next turn repairs a cut tool call.
+  Ctrl-C at the main prompt clears it. Ctrl-C at an approval prompt
+  stops the whole turn, and every unrun call gets an error result.
+  The session file stays valid across aborts; the next turn repairs a
+  cut tool call.
+- The approval prompt takes yes, always, or no. An `always` answer
+  grants the tool name for the rest of the run; the grant does not
+  survive a resume, and per-input grants are an M2 decision.
+- Sessions open on the first submitted prompt, so an idle boot reads
+  and writes no session file.
 - The bin crate holds the run wiring in `Runtime` (build provider,
   registry, store once; open sessions and engines over it). The
   step-7 criterion benchmark can drive `Engine` against the mock
@@ -234,7 +241,8 @@ dmz --version
 ```
 
 The REPL is a plain terminal loop: line editor, streamed tokens, one status
-line per tool call, y/n approval prompts. It prints a ready marker on start;
+line per tool call, approval prompts (yes / always / no). It prints a ready
+marker on start;
 the PTY boot probe waits for that marker. No ratatui in M1.
 
 ### Mock server and tests (demerzel-mock)

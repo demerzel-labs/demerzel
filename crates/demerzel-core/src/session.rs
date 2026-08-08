@@ -76,6 +76,10 @@ pub enum SessionRecord {
         /// The user's answer when the decision was `AskUser`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approved: Option<bool>,
+        /// The literal answer for the audit trail: `allow`,
+        /// `allow_for_session`, `deny`, or `abort`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
     },
     Usage(Usage),
     /// A record type from a newer schema. Replay skips it, so old
@@ -99,6 +103,8 @@ enum RecordRef<'a> {
         tool_use_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         approved: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        answer: Option<&'a str>,
     },
     Usage(&'a Usage),
 }
@@ -229,12 +235,14 @@ impl Session {
                 decision,
                 tool_use_id,
                 approved,
+                answer,
             } => RecordRef::Approval {
                 tool,
                 mode: *mode,
                 decision: *decision,
                 tool_use_id: tool_use_id.as_deref(),
                 approved: *approved,
+                answer: answer.as_deref(),
             },
             SessionRecord::Usage(usage) => RecordRef::Usage(usage),
             // Replay-only marker; there is nothing to write.
@@ -258,6 +266,7 @@ impl Session {
         decision: ApprovalDecision,
         tool_use_id: &str,
         approved: Option<bool>,
+        answer: Option<&str>,
     ) -> io::Result<()> {
         self.append_ref(&RecordRef::Approval {
             tool,
@@ -265,6 +274,7 @@ impl Session {
             decision,
             tool_use_id: Some(tool_use_id),
             approved,
+            answer,
         })
     }
 
@@ -540,6 +550,7 @@ mod tests {
             decision: ApprovalDecision::AskUser,
             tool_use_id: Some("call_9".into()),
             approved: Some(true),
+            answer: Some("allow".into()),
         };
         let value = serde_json::to_value(&approval).unwrap();
         assert_eq!(value["type"], "approval");
@@ -564,6 +575,7 @@ mod tests {
                 ApprovalDecision::AskUser,
                 "call_9",
                 Some(true),
+                Some("allow"),
             )
             .unwrap();
         let text = std::fs::read_to_string(session.path()).unwrap();
@@ -665,6 +677,7 @@ mod tests {
                 decision: ApprovalDecision::Allow,
                 tool_use_id: Some("call_3".into()),
                 approved: None,
+                answer: None,
             },
             SessionRecord::Usage(Usage {
                 input_tokens: 1,

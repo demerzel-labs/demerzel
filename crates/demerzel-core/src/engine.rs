@@ -108,7 +108,8 @@ pub enum ApprovalAnswer {
     /// Run this call.
     Allow,
     /// Run this call, and stop asking for this tool for the rest of
-    /// the session.
+    /// this run. The grant lives in the engine's policy; it does not
+    /// survive a resume.
     AllowForSession,
     /// Refuse this call; the turn continues.
     Deny,
@@ -412,12 +413,20 @@ impl<'a> Engine<'a> {
                         answer,
                         ApprovalAnswer::Allow | ApprovalAnswer::AllowForSession
                     );
+                    let answer_name = match answer {
+                        ApprovalAnswer::Allow => "allow",
+                        ApprovalAnswer::AllowForSession => "allow_for_session",
+                        ApprovalAnswer::Deny => "deny",
+                        ApprovalAnswer::Abort => "abort",
+                    };
+                    let asked = matches!(decision, ApprovalDecision::AskUser);
                     self.session.append_approval(
                         &name,
                         self.policy.mode,
                         decision,
                         &id,
-                        matches!(decision, ApprovalDecision::AskUser).then_some(approved),
+                        asked.then_some(approved),
+                        asked.then_some(answer_name),
                     )?;
                     if answer == ApprovalAnswer::AllowForSession {
                         self.policy.grant(&name);

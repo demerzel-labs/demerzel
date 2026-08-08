@@ -74,8 +74,8 @@ pub enum RunError {
     Auth(ProviderError),
     #[error(transparent)]
     Engine(#[from] EngineError),
-    #[error("session: {0}")]
-    Session(#[from] std::io::Error),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// The long-lived pieces of one run. Build it once; open sessions and
