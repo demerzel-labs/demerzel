@@ -1,60 +1,59 @@
-use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use clap::Parser;
+use demerzel::repl::{self, Renderer};
 use demerzel::{RunConfig, run_one_shot};
-use demerzel_core::{ApprovalMode, EngineEvent, TurnOutcome};
+use demerzel_core::{ApprovalMode, TurnOutcome};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Demerzel: a terminal coding agent.
+#[derive(Debug, Parser)]
+#[command(name = "demerzel", version)]
+struct Cli {
+    /// One-shot prompt. Give no prompt to start the interactive REPL.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "PROMPT"
+    )]
+    prompt: Vec<String>,
 
-const USAGE: &str = "usage: demerzel [--auto | --read-only] [-c] [--] \"prompt\"
-       demerzel --version
+    /// Continue the latest session in this project.
+    #[arg(short = 'c', long = "continue")]
+    continue_last: bool,
 
-One-shot mode runs one prompt and exits. Writes are off by default;
---auto turns them on. -c continues the latest session in this project.
-Use -- before a prompt that starts with a dash.
-The interactive REPL arrives with M1 step 6.";
+    /// Model name to request.
+    #[arg(long, env = "DEMERZEL_MODEL")]
+    model: Option<String>,
+
+    /// Endpoint base URL.
+    #[arg(long, env = "DEMERZEL_BASE_URL")]
+    base_url: Option<String>,
+
+    /// Run the write and execute tools without approval prompts.
+    #[arg(long, conflicts_with = "read_only")]
+    auto: bool,
+
+    /// Advertise only the read tools.
+    #[arg(long)]
+    read_only: bool,
+}
+
+impl Cli {
+    /// The approval mode: flags win; else the REPL asks and one-shot
+    /// stays read-only.
+    fn approval(&self, interactive: bool) -> ApprovalMode {
+        if self.auto {
+            ApprovalMode::Auto
+        } else if self.read_only {
+            ApprovalMode::ReadOnly
+        } else if interactive {
+            ApprovalMode::Ask
+        } else {
+            ApprovalMode::ReadOnly
+        }
+    }
+}
 
 fn main() {
-    let mut approval = ApprovalMode::ReadOnly;
-    let mut continue_last = false;
-    let mut words: Vec<String> = Vec::new();
-    let mut flags_done = false;
-    for arg in std::env::args().skip(1) {
-        if flags_done {
-            words.push(arg);
-            continue;
-        }
-        match arg.as_str() {
-            "--version" | "-V" => {
-                println!("demerzel {VERSION}");
-                return;
-            }
-            "--auto" => approval = ApprovalMode::Auto,
-            "--read-only" => approval = ApprovalMode::ReadOnly,
-            "-c" => continue_last = true,
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return;
-            }
-            "--" => flags_done = true,
-            other if other.starts_with('-') => {
-                eprintln!("unknown flag: {other}\n{USAGE}");
-                std::process::exit(2);
-            }
-            word => {
-                // The prompt starts here; everything after it is
-                // prompt text, dashes included.
-                flags_done = true;
-                words.push(word.to_string());
-            }
-        }
-    }
-    let prompt = words.join(" ");
-    if prompt.is_empty() {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    }
-
+    let cli = Cli::parse();
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -62,67 +61,105 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let interactive = cli.prompt.is_empty();
     let mut config = RunConfig::new(cwd);
-    config.approval = approval;
-    config.continue_last = continue_last;
-    if let Ok(model) = std::env::var("DEMERZEL_MODEL")
-        && !model.is_empty()
-    {
+    config.approval = cli.approval(interactive);
+    config.continue_last = cli.continue_last;
+    if let Some(model) = cli.model.filter(|value| !value.is_empty()) {
         config.model = model;
     }
-    if let Ok(base_url) = std::env::var("DEMERZEL_BASE_URL")
-        && !base_url.is_empty()
-    {
-        config.base_url = Some(base_url);
+    config.base_url = cli.base_url.filter(|value| !value.is_empty());
+
+    if interactive {
+        if let Err(error) = repl::run(&config) {
+            eprintln!("demerzel: {error}");
+            std::process::exit(1);
+        }
+        return;
     }
 
+    let prompt = cli.prompt.join(" ");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("build the tokio runtime");
     let outcome = runtime.block_on(async {
-        let pending_newline = AtomicBool::new(false);
-        let sink = |event: EngineEvent<'_>| match event {
-            EngineEvent::TextDelta(delta) => {
-                print!("{delta}");
-                let _ = std::io::stdout().flush();
-                pending_newline.store(!delta.ends_with('\n'), Ordering::Relaxed);
+        let renderer = Renderer::new(false);
+        let result = {
+            let run = run_one_shot(&config, prompt, &renderer);
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => Some(result),
+                _ = tokio::signal::ctrl_c() => None,
             }
-            EngineEvent::ToolStart { name, .. } => {
-                eprintln!("· {name} …");
-            }
-            EngineEvent::ToolEnd {
-                name,
-                summary,
-                is_error,
-                ..
-            } => {
-                let mark = if is_error { "✗" } else { "·" };
-                eprintln!("{mark} {}", summary.unwrap_or(name));
-            }
-            _ => {}
         };
-        let result = run_one_shot(&config, prompt, &sink).await;
-        if pending_newline.load(Ordering::Relaxed) {
-            println!();
-        }
+        renderer.finish();
         result
     });
 
     match outcome {
-        Ok(TurnOutcome::Completed) => {}
-        Ok(TurnOutcome::MaxTokens) => {
+        None => {
+            eprintln!("demerzel: aborted");
+            std::process::exit(130);
+        }
+        Some(Ok(TurnOutcome::Completed)) => {}
+        Some(Ok(TurnOutcome::MaxTokens)) => {
             eprintln!("demerzel: the model hit the output-token limit");
             std::process::exit(1);
         }
-        Ok(TurnOutcome::CallLimit) => {
+        Some(Ok(TurnOutcome::CallLimit)) => {
             eprintln!("demerzel: the turn hit the model-call limit");
             std::process::exit(1);
         }
-        Ok(_) => {}
-        Err(error) => {
+        Some(Ok(_)) => {}
+        Some(Err(error)) => {
             eprintln!("demerzel: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("demerzel").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn a_bare_invocation_is_the_repl_in_ask_mode() {
+        let cli = parse(&[]);
+        assert!(cli.prompt.is_empty());
+        assert_eq!(cli.approval(true), ApprovalMode::Ask);
+    }
+
+    #[test]
+    fn a_prompt_is_one_shot_and_read_only_by_default() {
+        let cli = parse(&["explain", "this", "error"]);
+        assert_eq!(cli.prompt.join(" "), "explain this error");
+        assert_eq!(cli.approval(false), ApprovalMode::ReadOnly);
+    }
+
+    #[test]
+    fn flags_before_the_prompt_parse_and_flags_after_join_it() {
+        let cli = parse(&["--auto", "-c", "fix", "--the", "bug"]);
+        assert!(cli.auto);
+        assert!(cli.continue_last);
+        assert_eq!(cli.prompt.join(" "), "fix --the bug");
+        assert_eq!(cli.approval(false), ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn auto_and_read_only_conflict() {
+        let error = Cli::try_parse_from(["demerzel", "--auto", "--read-only", "x"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn model_and_base_url_flags_parse() {
+        let cli = parse(&["--model", "gpt-x", "--base-url", "http://localhost:1", "hi"]);
+        assert_eq!(cli.model.as_deref(), Some("gpt-x"));
+        assert_eq!(cli.base_url.as_deref(), Some("http://localhost:1"));
     }
 }
