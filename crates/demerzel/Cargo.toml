@@ -21,6 +21,11 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "signal"] }
 
 [dev-dependencies]
+criterion = { workspace = true }
 demerzel-mock = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+[[bench]]
+name = "turn"
+harness = false

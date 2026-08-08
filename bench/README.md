@@ -24,8 +24,8 @@ data for each number goes into `results/`. The "Benchmark program" section of
 
 | Layer | Measures | Method | Status |
 |---|---|---|---|
-| 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner and the PSS sampler are here. The PTY scenarios come with the M1 interactive mode. |
-| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | Comes with M1 |
+| 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
+| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark is here. iai-callgrind arrives with CI in M5. |
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
 | 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | Comes with M4 |
 
@@ -34,13 +34,29 @@ data for each number goes into `results/`. The "Benchmark program" section of
 ```bash
 cargo build --release
 
-# Layer 1: boot time (pure binary start; the PTY probe comes with M1)
+# Machine spec. Each published number references one of these files.
+bench/machine.py
+
+# Layer 1: boot time, pure binary start.
 bench/boot/run.sh
 
-# Layer 1: memory. Give the PIDs of running agent processes.
+# Layer 1: time to interactive, warm and cold.
+bench/boot/pty_probe.py
+bench/boot/pty_probe.py --cold
+
+# Layer 1: memory of one idle REPL session.
+bench/memory/idle.py
+
+# Layer 1: PSS and USS of running agent processes.
 bench/memory/pss.py <pid> [pid...]
+
+# Layer 2: harness-added latency per turn, against the mock server.
+bench/turn/run.sh
 ```
 
 The boot benchmark needs `hyperfine`. On Arch Linux, install it with
-`pacman -S hyperfine`. The memory benchmark works only on Linux, because it
-reads `/proc/<pid>/smaps_rollup`.
+`pacman -S hyperfine`. The PTY probe and the memory benchmarks work only on
+Linux. The probe gives each run a private data home with a synthetic auth
+store, so a run needs no login and makes no network call. Cold mode evicts
+the binary from the page cache with `posix_fadvise`; shared libraries stay
+warm. A true cold start needs a fresh boot.

@@ -5,33 +5,36 @@ verifiable steps.
 
 ## Status (2026-08-08)
 
-Steps 1-6 of 7 are done; step 7 is next. The build order below marks
-each step. Workspace state after step 6: 141 tests, `cargo fmt` and
+All 7 steps are done. The exit criteria hold. Workspace state after
+step 7: 140 tests, `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean,
-release binary at 6.9 MB.
+release binary at 7.0 MB.
+
+First bench numbers (2026-08-08, Ryzen 9 5900X; raw data and the
+machine spec sit in `bench/results/`):
+
+- Boot (`--version`): 1.2 ms mean.
+- Time to interactive (PTY probe): 1.8 ms warm, 6.5 ms cold.
+- Idle REPL memory: 3.8 MiB PSS, 3.7 MiB USS.
+- Turn latency against the mock: 141 µs text only, 342 µs with one
+  read dispatch.
 
 Notes for the next session:
 
-- The REPL prints `demerzel ready` as its first line, on stderr.
-  The step-7 PTY probe reads the merged PTY stream and waits for that
-  marker; the constant is `demerzel::READY_MARKER`.
-- One dedicated thread owns rustyline and stdin. The REPL loop and
-  the approval prompts request lines over a channel, so no two
-  readers ever hold stdin.
-- Ctrl-C during a turn aborts it by a drop of the turn future.
-  Ctrl-C at the main prompt clears it. Ctrl-C at an approval prompt
-  stops the whole turn, and every unrun call gets an error result.
-  The session file stays valid across aborts; the next turn repairs a
-  cut tool call.
-- The approval prompt takes yes, always, or no. An `always` answer
-  grants the tool name for the rest of the run; the grant does not
-  survive a resume, and per-input grants are an M2 decision.
-- Sessions open on the first submitted prompt, so an idle boot reads
-  and writes no session file.
-- The bin crate holds the run wiring in `Runtime` (build provider,
-  registry, store once; open sessions and engines over it). The
-  step-7 criterion benchmark can drive `Engine` against the mock
-  server through the same seams the tests use.
+- M2 is next: TUI, `anthropic` adapter, `dmz login`, layered config,
+  `doctor`, slash commands. Read [`plan.md`](plan.md) for the scope
+  and write an M2 plan first.
+- The PTY probe and the idle-memory driver give each run a private
+  `XDG_DATA_HOME` with a synthetic auth store. A bench run never
+  reads the real login and never touches the network.
+- The mock server has a looping mode (`MockServer::start_looping`)
+  for unbounded benchmark runs. That mode records no requests.
+- The criterion bench (`crates/demerzel/benches/turn.rs`) builds the
+  engine per iteration outside the timed span. The number includes
+  the localhost round-trip to the mock and the session appends.
+- The REPL prints `demerzel ready` as its first line, on stderr; the
+  constant is `demerzel::READY_MARKER`. The PTY probe waits for it
+  on the merged stream.
 - The bash tool kills its whole process group after every call, so a
   command cannot leave a background server running. This is the
   accepted M1 posture (PR #11). The background-task decision is an
@@ -334,6 +337,9 @@ Each step is one PR with its own verify line.
 7. **Bench pass.** PTY probe, first hyperfine and PSS numbers, criterion
    turn benchmark. *Verify: raw JSON and machine spec committed to
    `bench/results/`.*
+   **Done — PR #16.** Also landed: cold and warm probe modes, the
+   idle-session memory driver, the mock server's looping mode, and
+   the machine-spec recorder.
 
 ## Decisions to make during M1
 

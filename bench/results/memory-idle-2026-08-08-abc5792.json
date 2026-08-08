@@ -1,0 +1,10 @@
+{
+  "benchmark": "memory-idle-repl",
+  "bin": "target/release/demerzel",
+  "git_rev": "abc5792",
+  "date": "2026-08-08",
+  "settle_s": 1.0,
+  "pss_kb": 3786,
+  "uss_kb": 3760,
+  "rss_kb": 6168
+}

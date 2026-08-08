@@ -101,6 +101,9 @@ struct ServerState {
     responses: Mutex<VecDeque<MockResponse>>,
     token_responses: Mutex<VecDeque<Value>>,
     received: Mutex<Vec<Received>>,
+    /// Cycle the response script forever and record nothing. The
+    /// Layer-2 benchmarks run unbounded iteration counts.
+    cycle: bool,
 }
 
 /// A running mock server. Dropping the handle stops the server task.
@@ -113,10 +116,26 @@ pub struct MockServer {
 impl MockServer {
     /// Start the server on an ephemeral local port.
     pub async fn start(responses: Vec<MockResponse>, token_responses: Vec<Value>) -> Self {
+        Self::start_inner(responses, token_responses, false).await
+    }
+
+    /// Start the server with a response script that cycles forever.
+    /// This mode records no requests, so an unbounded benchmark run
+    /// holds no growing state.
+    pub async fn start_looping(responses: Vec<MockResponse>) -> Self {
+        Self::start_inner(responses, Vec::new(), true).await
+    }
+
+    async fn start_inner(
+        responses: Vec<MockResponse>,
+        token_responses: Vec<Value>,
+        cycle: bool,
+    ) -> Self {
         let state = Arc::new(ServerState {
             responses: Mutex::new(responses.into()),
             token_responses: Mutex::new(token_responses.into()),
             received: Mutex::new(Vec::new()),
+            cycle,
         });
         let app = Router::new()
             .route("/responses", post(handle_responses))
@@ -169,9 +188,20 @@ async fn handle_responses(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    record(&state, "/responses", &headers, body);
-    let next = state.responses.lock().unwrap().pop_front();
+    if !state.cycle {
+        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        record(&state, "/responses", &headers, body);
+    }
+    let next = {
+        let mut responses = state.responses.lock().unwrap();
+        let reply = responses.pop_front();
+        if state.cycle
+            && let Some(reply) = &reply
+        {
+            responses.push_back(reply.clone());
+        }
+        reply
+    };
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock script exhausted").into_response();
     };

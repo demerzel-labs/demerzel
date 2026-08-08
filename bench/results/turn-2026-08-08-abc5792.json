@@ -1,0 +1,25 @@
+{
+  "benchmark": "turn-latency-vs-mock",
+  "date": "2026-08-08",
+  "git_rev": "abc5792",
+  "benches": {
+    "turn_text": {
+      "mean_ns": 140807,
+      "median_ns": 140690,
+      "stddev_ns": 11203,
+      "mean_ci95_ns": [
+        138616,
+        142992
+      ]
+    },
+    "turn_read_tool": {
+      "mean_ns": 341762,
+      "median_ns": 339803,
+      "stddev_ns": 37577,
+      "mean_ci95_ns": [
+        334604,
+        349296
+      ]
+    }
+  }
+}
