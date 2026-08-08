@@ -3,29 +3,35 @@
 This plan turns the M1 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps.
 
-## Status (2026-08-07)
+## Status (2026-08-08)
 
-Steps 1-5 of 7 are done; step 6 is next. The build order below marks
-each step. Workspace state after step 5: 119 tests, `cargo fmt` and
+Steps 1-6 of 7 are done; step 7 is next. The build order below marks
+each step. Workspace state after step 6: 141 tests, `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean,
-release binary at 6.1 MB.
+release binary at 6.9 MB.
 
 Notes for the next session:
 
-- The step-5 smoke call confirmed that the Codex endpoint accepts the
-  edit tool's `oneOf` input schema. No flattening is needed.
-- The provider contract (trait, capabilities, request, events) moved
-  into `demerzel-core`, next to the loop that consumes it.
-  `demerzel-providers` re-exports the contract, so its public API did
-  not change. The workspace tree below shows the move.
-- The bin crate now has a lib target (`RunConfig`, `run_one_shot`).
-  The hermetic loop tests drive the same wiring as `main`.
-- Session ids are hand-rolled ULID-format strings in `demerzel-core`.
-  XDG paths are hand-rolled too. The `ulid` and `etcetera` rows left
-  the dependency table.
-- Step 6 builds the REPL on the step-5 seams: `Engine::user_turn`
-  with a real `Approver`, drop of the turn future on Ctrl-C, and the
-  ready marker for the PTY probe.
+- The REPL prints `demerzel ready` as its first line, on stderr.
+  The step-7 PTY probe reads the merged PTY stream and waits for that
+  marker; the constant is `demerzel::READY_MARKER`.
+- One dedicated thread owns rustyline and stdin. The REPL loop and
+  the approval prompts request lines over a channel, so no two
+  readers ever hold stdin.
+- Ctrl-C during a turn aborts it by a drop of the turn future.
+  Ctrl-C at the main prompt clears it. Ctrl-C at an approval prompt
+  stops the whole turn, and every unrun call gets an error result.
+  The session file stays valid across aborts; the next turn repairs a
+  cut tool call.
+- The approval prompt takes yes, always, or no. An `always` answer
+  grants the tool name for the rest of the run; the grant does not
+  survive a resume, and per-input grants are an M2 decision.
+- Sessions open on the first submitted prompt, so an idle boot reads
+  and writes no session file.
+- The bin crate holds the run wiring in `Runtime` (build provider,
+  registry, store once; open sessions and engines over it). The
+  step-7 criterion benchmark can drive `Engine` against the mock
+  server through the same seams the tests use.
 - The bash tool kills its whole process group after every call, so a
   command cannot leave a background server running. This is the
   accepted M1 posture (PR #11). The background-task decision is an
@@ -235,7 +241,8 @@ dmz --version
 ```
 
 The REPL is a plain terminal loop: line editor, streamed tokens, one status
-line per tool call, y/n approval prompts. It prints a ready marker on start;
+line per tool call, approval prompts (yes / always / no). It prints a ready
+marker on start;
 the PTY boot probe waits for that marker. No ratatui in M1.
 
 ### Mock server and tests (demerzel-mock)
@@ -321,6 +328,9 @@ Each step is one PR with its own verify line.
 6. **REPL and CLI.** Flags, credential resolution, streaming render,
    approval prompts, ready marker. *Verify: a real dogfood session in this
    repo against the Codex endpoint; Ctrl-C behavior.*
+   **Done — PR #15.** Also landed: the `Runtime` wiring seam, the
+   clap flag surface with `--model` and `--base-url`, and the
+   line-editor decision below.
 7. **Bench pass.** PTY probe, first hyperfine and PSS numbers, criterion
    turn benchmark. *Verify: raw JSON and machine spec committed to
    `bench/results/`.*
@@ -342,7 +352,12 @@ Each step is one PR with its own verify line.
   new tag and the renumbered lines. This supersedes the step-3 per-line
   tags, which could not address a duplicated line without a second
   round trip.
-- rustyline vs reedline. Decide in step 6 by binary-size cost.
+- rustyline vs reedline — resolved in step 6 by measurement. Cost over
+  the 6.1 MB step-5 binary: reedline 0.49 adds 506 KB, rustyline 18
+  with default features adds 352 KB, rustyline 18 without default
+  features adds 308 KB. Demerzel uses rustyline without default
+  features and in-memory history. File-backed history can come with
+  layered config (M2).
 - tokio runtime flavor. Start with `current_thread`; move to multi-thread
   only if a bench shows a need.
 - Sequential vs parallel tool execution. Start sequential; revisit with

@@ -11,14 +11,16 @@ name = "demerzel"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
 demerzel-core = { workspace = true }
 demerzel-providers = { workspace = true }
 demerzel-tools = { workspace = true }
+rustyline = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal"] }
 
 [dev-dependencies]
 demerzel-mock = { workspace = true }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

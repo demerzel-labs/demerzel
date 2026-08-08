@@ -101,10 +101,26 @@ where
     }
 }
 
+/// The user's answer to one approval question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ApprovalAnswer {
+    /// Run this call.
+    Allow,
+    /// Run this call, and stop asking for this tool for the rest of
+    /// this run. The grant lives in the engine's policy; it does not
+    /// survive a resume.
+    AllowForSession,
+    /// Refuse this call; the turn continues.
+    Deny,
+    /// Stop the turn. The refused call and every later call in the
+    /// batch get error results, and no model call follows.
+    Abort,
+}
+
 /// Answers the approval question for one `AskUser` tool call.
 pub trait Approver: Send {
-    /// Return true to run the call.
-    fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, bool>;
+    fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer>;
 
     /// The model-facing message for a declined call.
     fn deny_message(&self, tool: &str) -> String {
@@ -117,8 +133,12 @@ pub trait Approver: Send {
 pub struct NoPrompt;
 
 impl Approver for NoPrompt {
-    fn approve<'a>(&'a mut self, _tool: &'a str, _input: &'a Value) -> BoxFuture<'a, bool> {
-        Box::pin(std::future::ready(false))
+    fn approve<'a>(
+        &'a mut self,
+        _tool: &'a str,
+        _input: &'a Value,
+    ) -> BoxFuture<'a, ApprovalAnswer> {
+        Box::pin(std::future::ready(ApprovalAnswer::Deny))
     }
 
     fn deny_message(&self, tool: &str) -> String {
@@ -136,6 +156,9 @@ pub enum TurnOutcome {
     MaxTokens,
     /// The loop hit `max_model_calls` for this user turn.
     CallLimit,
+    /// The user stopped the turn at an approval prompt. The session
+    /// stays valid; every unrun call carries an error result.
+    Aborted,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -254,7 +277,7 @@ impl<'a> Engine<'a> {
 
             match stop {
                 StopReason::ToolUse => {
-                    let results = self.run_tools(&message, sink, approver).await?;
+                    let (results, aborted) = self.run_tools(&message, sink, approver).await?;
                     if results.is_empty() {
                         return Err(EngineError::Provider(ProviderError::Protocol(
                             "the model stopped for tool use without a tool call".to_string(),
@@ -264,6 +287,9 @@ impl<'a> Engine<'a> {
                         role: Role::User,
                         content: results,
                     })?;
+                    if aborted {
+                        return Ok(TurnOutcome::Aborted);
+                    }
                 }
                 StopReason::EndTurn | StopReason::Aborted => return Ok(TurnOutcome::Completed),
                 StopReason::MaxTokens => return Ok(TurnOutcome::MaxTokens),
@@ -333,12 +359,16 @@ impl<'a> Engine<'a> {
     /// decision goes into the session record with its call id. A name
     /// the host does not hold skips the policy: `run_approved` returns
     /// the unknown-tool error and nothing runs.
+    ///
+    /// Returns the result blocks and whether the user stopped the
+    /// turn. On an abort, the refused call and every later call get
+    /// error results, so nothing dangles.
     async fn run_tools(
         &mut self,
         message: &Message,
         sink: &dyn EventSink,
         approver: &mut dyn Approver,
-    ) -> Result<Vec<ContentBlock>, EngineError> {
+    ) -> Result<(Vec<ContentBlock>, bool), EngineError> {
         let calls: Vec<(String, String, Value)> = message
             .content
             .iter()
@@ -351,7 +381,16 @@ impl<'a> Engine<'a> {
             .collect();
 
         let mut results = Vec::with_capacity(calls.len());
+        let mut aborted = false;
         for (id, name, input) in calls {
+            if aborted {
+                results.push(ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: format!("the user stopped the turn; the {name} call did not run"),
+                    is_error: true,
+                });
+                continue;
+            }
             sink.event(EngineEvent::ToolRun {
                 id: &id,
                 name: &name,
@@ -365,23 +404,43 @@ impl<'a> Engine<'a> {
                         access,
                         input: &input,
                     });
-                    let approved = match decision {
-                        ApprovalDecision::Allow => true,
-                        ApprovalDecision::Deny => false,
+                    let answer = match decision {
+                        ApprovalDecision::Allow => ApprovalAnswer::Allow,
+                        ApprovalDecision::Deny => ApprovalAnswer::Deny,
                         ApprovalDecision::AskUser => approver.approve(&name, &input).await,
                     };
+                    let approved = matches!(
+                        answer,
+                        ApprovalAnswer::Allow | ApprovalAnswer::AllowForSession
+                    );
+                    let answer_name = match answer {
+                        ApprovalAnswer::Allow => "allow",
+                        ApprovalAnswer::AllowForSession => "allow_for_session",
+                        ApprovalAnswer::Deny => "deny",
+                        ApprovalAnswer::Abort => "abort",
+                    };
+                    let asked = matches!(decision, ApprovalDecision::AskUser);
                     self.session.append_approval(
                         &name,
                         self.policy.mode,
                         decision,
                         &id,
-                        matches!(decision, ApprovalDecision::AskUser).then_some(approved),
+                        asked.then_some(approved),
+                        asked.then_some(answer_name),
                     )?;
+                    if answer == ApprovalAnswer::AllowForSession {
+                        self.policy.grant(&name);
+                    }
                     if approved {
                         self.tools.run_approved(&name, input).await
                     } else if decision == ApprovalDecision::Deny {
                         ToolOutput::error(format!(
                             "the approval mode refuses the {name} tool in this session"
+                        ))
+                    } else if answer == ApprovalAnswer::Abort {
+                        aborted = true;
+                        ToolOutput::error(format!(
+                            "the user stopped the turn; the {name} call did not run"
                         ))
                     } else {
                         ToolOutput::error(approver.deny_message(&name))
@@ -400,7 +459,7 @@ impl<'a> Engine<'a> {
                 is_error: output.is_error,
             });
         }
-        Ok(results)
+        Ok((results, aborted))
     }
 }
 
@@ -601,8 +660,26 @@ mod tests {
     struct ApproveAll;
 
     impl Approver for ApproveAll {
-        fn approve<'a>(&'a mut self, _tool: &'a str, _input: &'a Value) -> BoxFuture<'a, bool> {
-            Box::pin(std::future::ready(true))
+        fn approve<'a>(
+            &'a mut self,
+            _tool: &'a str,
+            _input: &'a Value,
+        ) -> BoxFuture<'a, ApprovalAnswer> {
+            Box::pin(std::future::ready(ApprovalAnswer::Allow))
+        }
+    }
+
+    /// Answers from a script, so a test can grant or abort.
+    struct ScriptedApprover(VecDeque<ApprovalAnswer>);
+
+    impl Approver for ScriptedApprover {
+        fn approve<'a>(
+            &'a mut self,
+            _tool: &'a str,
+            _input: &'a Value,
+        ) -> BoxFuture<'a, ApprovalAnswer> {
+            let answer = self.0.pop_front().expect("approver script exhausted");
+            Box::pin(std::future::ready(answer))
         }
     }
 
@@ -1019,6 +1096,87 @@ mod tests {
             .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
             .collect();
         assert_eq!(repairs.len(), 1);
+    }
+
+    #[test]
+    fn allow_for_session_grants_the_tool_and_skips_later_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            tool_call("call_1", "write", json!({"n": 1})),
+            tool_call("call_2", "write", json!({"n": 2})),
+            text_done("done"),
+        ]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
+
+        // One scripted answer: the second call must not ask again.
+        let mut approver = ScriptedApprover(VecDeque::from([ApprovalAnswer::AllowForSession]));
+        let sink = noop_sink();
+        let outcome = block_on(engine.user_turn("go".into(), &sink, &mut approver)).unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
+
+        // Both calls ran; the second decided Allow from the grant.
+        for index in [2, 4] {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &engine.history()[index].content[0]
+            else {
+                panic!("expected a tool result");
+            };
+            assert!(!is_error, "call at message {index} failed: {content}");
+        }
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        assert!(raw.contains(r#""decision":"ask_user""#));
+        assert!(raw.contains(r#""decision":"allow""#));
+    }
+
+    #[test]
+    fn an_abort_answer_stops_the_turn_and_answers_every_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamEvent::ToolCallStart {
+                id: "call_1".into(),
+                name: "write".into(),
+            },
+            StreamEvent::ToolCallEnd {
+                id: "call_1".into(),
+                input: json!({"n": 1}),
+            },
+            StreamEvent::ToolCallStart {
+                id: "call_2".into(),
+                name: "write".into(),
+            },
+            StreamEvent::ToolCallEnd {
+                id: "call_2".into(),
+                input: json!({"n": 2}),
+            },
+            StreamEvent::Done(StopReason::ToolUse),
+        ]]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
+
+        let mut approver = ScriptedApprover(VecDeque::from([ApprovalAnswer::Abort]));
+        let sink = noop_sink();
+        let outcome = block_on(engine.user_turn("go".into(), &sink, &mut approver)).unwrap();
+        assert_eq!(outcome, TurnOutcome::Aborted);
+
+        // One model call only; both calls got error results.
+        assert_eq!(provider.requests().len(), 1);
+        let results = &engine.history()[2].content;
+        assert_eq!(results.len(), 2);
+        for block in results {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = block
+            else {
+                panic!("expected a tool result");
+            };
+            assert!(is_error);
+            assert!(content.contains("stopped the turn"));
+        }
+        // The session replays to the same well-formed history.
+        let replayed = replay(engine.session().path()).unwrap();
+        assert_eq!(replayed.messages, engine.history());
     }
 
     #[test]

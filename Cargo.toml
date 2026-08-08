@@ -21,6 +21,7 @@ demerzel-providers = { path = "crates/demerzel-providers" }
 demerzel-tools = { path = "crates/demerzel-tools" }
 axum = "0.8"
 base64 = "0.22"
+clap = { version = "4.6", features = ["derive", "env"] }
 futures-core = "0.3"
 globset = "0.4"
 grep-regex = "0.1"
@@ -29,6 +30,7 @@ humantime = "2"
 ignore = "0.4"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rustyline = { version = "18", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

@@ -14,8 +14,8 @@ mod tool;
 
 pub use approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, ToolAccess};
 pub use engine::{
-    Approver, DEFAULT_SYSTEM_PROMPT, Engine, EngineConfig, EngineError, EngineEvent, EventSink,
-    NoPrompt, TurnOutcome,
+    ApprovalAnswer, Approver, DEFAULT_SYSTEM_PROMPT, Engine, EngineConfig, EngineError,
+    EngineEvent, EventSink, NoPrompt, TurnOutcome,
 };
 pub use message::{ContentBlock, Message, Role, SealedPayload, StopReason, Usage};
 pub use provider::{Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
