@@ -8,7 +8,7 @@ verifiable steps.
 All 7 steps are done. The exit criteria hold. Workspace state after
 step 7: 140 tests, `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean,
-release binary at 7.0 MB.
+release binary at 6.9 MB.
 
 First bench numbers (2026-08-08, Ryzen 9 5900X; raw data and the
 machine spec sit in `bench/results/`):

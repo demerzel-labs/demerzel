@@ -56,7 +56,8 @@ bench/turn/run.sh
 
 The boot benchmark needs `hyperfine`. On Arch Linux, install it with
 `pacman -S hyperfine`. The PTY probe and the memory benchmarks work only on
-Linux. `bench/harness.py` holds the shared probe machinery.
+Linux and need Python 3.13 or newer. `bench/harness.py` holds the shared
+probe machinery.
 
 Method notes:
 

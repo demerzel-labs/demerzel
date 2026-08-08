@@ -59,9 +59,10 @@ def git_rev() -> str:
 
 
 def git_dirty() -> bool:
-    """True when tracked files differ from HEAD. Untracked files (the
-    result files themselves) do not count."""
-    return bool(_git("status", "--porcelain", "-uno"))
+    """True when tracked files outside `bench/results/` differ from
+    HEAD. Result files do not produce numbers, so they do not count;
+    untracked files do not count either."""
+    return bool(_git("status", "--porcelain", "-uno", "--", ".", ":(exclude)bench/results"))
 
 
 def base_report(benchmark: str, bin_path: str) -> dict:
@@ -144,13 +145,18 @@ def _read_until(master: int, marker: bytes, timeout_s: float) -> tuple[str, byte
 
 def spawn_ready(
     bin_path: str, env: dict[str, str], argv: list[str] | None = None
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, bytes]:
     """Spawn `bin_path` in a PTY and wait for the ready marker on the
-    merged stream. Returns (pid, master_fd, elapsed_ns)."""
+    merged stream. Returns (pid, master_fd, elapsed_ns, seen_bytes)."""
     master, slave = os.openpty()
     dup2 = [(os.POSIX_SPAWN_DUP2, slave, fd) for fd in (0, 1, 2)]
     start = time.perf_counter_ns()
-    pid = os.posix_spawn(bin_path, argv or [bin_path], env, file_actions=dup2, setsid=True)
+    try:
+        pid = os.posix_spawn(bin_path, argv or [bin_path], env, file_actions=dup2, setsid=True)
+    except OSError:
+        os.close(master)
+        os.close(slave)
+        raise
     os.close(slave)
     status, buf = _read_until(master, READY_MARKER, READY_TIMEOUT_S)
     elapsed_ns = time.perf_counter_ns() - start
@@ -159,7 +165,7 @@ def spawn_ready(
         raise RuntimeError(
             f"{status} before the ready marker; output: {buf.decode(errors='replace')!r}"
         )
-    return pid, master, elapsed_ns
+    return pid, master, elapsed_ns, buf
 
 
 def _wait_exit(pid: int, timeout_s: float) -> bool:
@@ -172,10 +178,11 @@ def _wait_exit(pid: int, timeout_s: float) -> bool:
     return False
 
 
-def shutdown(pid: int, master: int, wait_prompt: bool = True) -> None:
+def shutdown(pid: int, master: int, seen: bytes = b"", wait_prompt: bool = True) -> None:
     """End the child: wait for the input prompt, send Ctrl-D, then
-    kill the process group on timeout."""
-    if wait_prompt:
+    kill the process group on timeout. `seen` is output already read;
+    when it holds the prompt, the wait is skipped."""
+    if wait_prompt and PROMPT_MARKER not in seen:
         _read_until(master, PROMPT_MARKER, PROMPT_TIMEOUT_S)
     try:
         os.write(master, b"\x04")
@@ -195,9 +202,12 @@ def spawn_floor_ms(env: dict[str, str], runs: int = 10) -> dict:
     spawn of `printf` that emits the ready marker and exits."""
     samples = []
     for _ in range(runs):
-        pid, master, elapsed_ns = spawn_ready(FLOOR_BIN, env, FLOOR_ARGV)
+        pid, master, elapsed_ns, _ = spawn_ready(FLOOR_BIN, env, FLOOR_ARGV)
         if not _wait_exit(pid, EXIT_TIMEOUT_S):
-            os.killpg(pid, signal.SIGKILL)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             os.waitpid(pid, 0)
         os.close(master)
         samples.append(elapsed_ns / 1e6)

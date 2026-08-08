@@ -53,6 +53,8 @@ for est_path in sorted(glob.glob(f"{target}/criterion/*/new/estimates.json")):
         with open(sample_path) as f:
             entry["samples"] = json.load(f)
     report["benches"][name] = entry
+if not report["benches"]:
+    sys.exit(f"no criterion estimates under {target}/criterion")
 harness.write_report(out, report)
 EOF
 echo "raw data: $OUT"

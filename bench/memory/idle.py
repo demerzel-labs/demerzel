@@ -26,12 +26,12 @@ METRICS = ("anonymous_kb", "private_dirty_kb", "pss_kb", "uss_kb", "rss_kb")
 
 
 def sample(bin_path: str, env: dict[str, str], settle_s: float) -> dict[str, int]:
-    pid, master, _ = harness.spawn_ready(bin_path, env)
+    pid, master, _, seen = harness.spawn_ready(bin_path, env)
     try:
         time.sleep(settle_s)
         fields = pss.rollup(pid)
     finally:
-        harness.shutdown(pid, master)
+        harness.shutdown(pid, master, seen)
     return {
         "anonymous_kb": fields.get("Anonymous", 0),
         "private_dirty_kb": fields.get("Private_Dirty", 0),

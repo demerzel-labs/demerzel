@@ -33,8 +33,8 @@ import harness
 def measure_once(bin_path: str, env: dict[str, str], cold: bool) -> float:
     if cold:
         harness.evict_verified(bin_path)
-    pid, master, elapsed_ns = harness.spawn_ready(bin_path, env)
-    harness.shutdown(pid, master)
+    pid, master, elapsed_ns, seen = harness.spawn_ready(bin_path, env)
+    harness.shutdown(pid, master, seen)
     return elapsed_ns / 1e6
 
 
@@ -64,8 +64,10 @@ def main() -> int:
         harness.write_auth_fixture(data_home)
         env = harness.bench_env(data_home)
         floor = harness.spawn_floor_ms(env)
+        # Warmup runs use the same mode as the measured runs, so the
+        # first cold sample is not the only unwarmed one.
         for _ in range(args.warmup):
-            measure_once(args.bin, env, cold=False)
+            measure_once(args.bin, env, cold=args.cold)
         samples = [measure_once(args.bin, env, cold=args.cold) for _ in range(args.runs)]
 
     report = harness.base_report("pty-time-to-interactive", args.bin)
