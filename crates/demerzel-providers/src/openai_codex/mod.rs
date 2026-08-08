@@ -85,8 +85,11 @@ impl Provider for OpenAiCodex {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
+        // Build the wire body eagerly and drop the request, so one
+        // copy of the history — not two — lives across the round trip.
+        let body = build_body(&request, self.config.reasoning.as_ref());
+        drop(request);
         Box::pin(async move {
-            let body = build_body(&request, self.config.reasoning.as_ref());
             let url = format!("{}/responses", self.config.base_url);
             let mut refreshed = false;
             let mut attempt: u32 = 0;
@@ -278,7 +281,14 @@ fn spawn_event_stream(mut response: reqwest::Response) -> EventStream {
         let mut parser = SseParser::new();
         let mut state = StreamState::default();
         loop {
-            match response.chunk().await {
+            // A dropped receiver means the turn was aborted: stop
+            // reading and release the connection instead of waiting
+            // for the next chunk that may never come.
+            let chunk = tokio::select! {
+                chunk = response.chunk() => chunk,
+                () = tx.closed() => return,
+            };
+            match chunk {
                 Ok(Some(bytes)) => {
                     for payload in parser.push(&bytes) {
                         for event in map_payload(&payload, &mut state) {

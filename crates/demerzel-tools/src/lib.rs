@@ -2,9 +2,10 @@
 //!
 //! [`Tool`] is the contract: name, description, access class, JSON-
 //! Schema input, and one async `run`. [`Registry`] produces the
-//! [`ToolDefinition`] list for the request and dispatches calls through
-//! the approval policy. Tool failures return to the model as
-//! [`ToolOutput`] with `is_error: true`; they never panic the harness.
+//! [`ToolDefinition`] list for the request, reports each tool's access
+//! class for the engine's policy check, and runs approved calls. Tool
+//! failures return to the model as [`ToolOutput`] with
+//! `is_error: true`; they never panic the harness.
 //!
 //! Cancellation contract: dropping the future returned by `run`
 //! cancels the call. Every tool must leave the filesystem and the
@@ -21,11 +22,11 @@ mod snapshot;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use demerzel_core::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, BoxFuture, ToolAccess, ToolDefinition,
-};
+use demerzel_core::{BoxFuture, ToolAccess, ToolDefinition, ToolHost};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+pub use demerzel_core::ToolOutput;
 
 pub use bash::BashTool;
 pub use create::CreateTool;
@@ -50,46 +51,6 @@ pub enum ToolError {
     /// The tool ran and failed against the current filesystem state.
     #[error("{0}")]
     Failed(String),
-}
-
-/// The structured result of one tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolOutput {
-    /// Model-facing result text.
-    pub content: String,
-    pub is_error: bool,
-    /// True when the output hit a size limit. The content also carries
-    /// an explicit `[truncated …]` marker.
-    pub truncated: bool,
-    /// One short human-facing line for the status display and the
-    /// session record, e.g. `edit src/lib.rs: 2 ops`. Never parsed
-    /// from `content`.
-    pub summary: Option<String>,
-}
-
-impl ToolOutput {
-    pub fn text(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            is_error: false,
-            truncated: false,
-            summary: None,
-        }
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            content: message.into(),
-            is_error: true,
-            truncated: false,
-            summary: None,
-        }
-    }
-
-    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
-        self.summary = Some(summary.into());
-        self
-    }
 }
 
 /// The contract every tool implements. `run` returns a boxed future so
@@ -171,44 +132,11 @@ impl Registry {
             .collect()
     }
 
-    /// The declared access class of the named tool.
+    /// The declared access class of the named tool. `None` for a name
+    /// the registry does not hold; the engine then skips the policy
+    /// and `run_approved` produces the unknown-tool error.
     pub fn access(&self, name: &str) -> Option<ToolAccess> {
         self.find(name).map(Tool::access)
-    }
-
-    /// The approval decision for one call. Unknown tools come back
-    /// `Allow`: they never run, and `run_approved` produces the
-    /// unknown-tool error the model needs.
-    pub fn decide(&self, policy: &ApprovalPolicy, name: &str, input: &Value) -> ApprovalDecision {
-        match self.find(name) {
-            Some(tool) => policy.decide(&ApprovalRequest {
-                tool: name,
-                access: tool.access(),
-                input,
-            }),
-            None => ApprovalDecision::Allow,
-        }
-    }
-
-    /// Check the policy, then run. `Deny` and `AskUser` become error
-    /// results without running the tool — right for non-interactive
-    /// runs. An interactive caller uses [`Registry::decide`], prompts
-    /// the user, then calls [`Registry::run_approved`].
-    pub fn dispatch(
-        &self,
-        policy: &ApprovalPolicy,
-        name: &str,
-        input: Value,
-    ) -> BoxFuture<'_, ToolOutput> {
-        match self.decide(policy, name, &input) {
-            ApprovalDecision::Allow => self.run_approved(name, input),
-            ApprovalDecision::AskUser => Box::pin(std::future::ready(ToolOutput::error(format!(
-                "the {name} tool needs user approval and this run has no approval prompt"
-            )))),
-            ApprovalDecision::Deny => Box::pin(std::future::ready(ToolOutput::error(format!(
-                "the approval mode refuses the {name} tool in this session"
-            )))),
-        }
     }
 
     /// Run one approved call. The caller owns the approval check;
@@ -235,6 +163,22 @@ impl Registry {
             .iter()
             .find(|tool| tool.name() == name)
             .map(Box::as_ref)
+    }
+}
+
+/// The registry is the loop's tool surface. The engine applies the
+/// approval policy itself from the access class reported here.
+impl ToolHost for Registry {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        Registry::definitions(self)
+    }
+
+    fn access(&self, name: &str) -> Option<ToolAccess> {
+        Registry::access(self, name)
+    }
+
+    fn run_approved(&self, name: &str, input: Value) -> BoxFuture<'_, ToolOutput> {
+        Registry::run_approved(self, name, input)
     }
 }
 
@@ -399,17 +343,12 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::run_now;
     use super::*;
-    use demerzel_core::ApprovalMode;
     use serde_json::json;
 
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "hello\nworld\n").unwrap();
         dir
-    }
-
-    fn auto() -> ApprovalPolicy {
-        ApprovalPolicy::new(ApprovalMode::Auto)
     }
 
     #[test]
@@ -449,59 +388,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_runs_an_allowed_tool_end_to_end() {
+    fn run_approved_runs_a_tool_end_to_end() {
         let dir = fixture();
         let registry = Registry::full(dir.path());
-        let output = run_now(registry.dispatch(&auto(), "read", json!({"path": "hello.txt"})));
+        let output = run_now(registry.run_approved("read", json!({"path": "hello.txt"})));
         assert!(!output.is_error);
         assert!(output.content.contains("1:hello"));
         assert!(output.summary.is_some());
     }
 
     #[test]
-    fn dispatch_refuses_denied_and_unprompted_calls_without_running() {
+    fn run_approved_reports_unknown_tools_with_the_available_set() {
         let dir = fixture();
         let registry = Registry::full(dir.path());
-        let read_only = ApprovalPolicy::new(ApprovalMode::ReadOnly);
-        let denied =
-            run_now(registry.dispatch(&read_only, "bash", json!({"command": "echo x > leak.txt"})));
-        assert!(denied.is_error);
-        assert!(denied.content.contains("refuses the bash tool"));
-        assert!(!dir.path().join("leak.txt").exists());
-
-        let ask = ApprovalPolicy::new(ApprovalMode::Ask);
-        let unprompted =
-            run_now(registry.dispatch(&ask, "bash", json!({"command": "echo x > leak.txt"})));
-        assert!(unprompted.is_error);
-        assert!(unprompted.content.contains("needs user approval"));
-        assert!(!dir.path().join("leak.txt").exists());
-    }
-
-    #[test]
-    fn decide_matches_the_policy_matrix() {
-        let dir = fixture();
-        let registry = Registry::full(dir.path());
-        let ask = ApprovalPolicy::new(ApprovalMode::Ask);
-        let input = json!({});
-        assert_eq!(
-            registry.decide(&ask, "read", &input),
-            ApprovalDecision::Allow
-        );
-        assert_eq!(
-            registry.decide(&ask, "edit", &input),
-            ApprovalDecision::AskUser
-        );
-        assert_eq!(
-            registry.decide(&ask, "nope", &input),
-            ApprovalDecision::Allow
-        );
-    }
-
-    #[test]
-    fn dispatch_reports_unknown_tools_with_the_available_set() {
-        let dir = fixture();
-        let registry = Registry::full(dir.path());
-        let output = run_now(registry.dispatch(&auto(), "write", json!({})));
+        let output = run_now(registry.run_approved("write", json!({})));
         assert!(output.is_error);
         assert!(output.content.contains("unknown tool: write"));
         assert!(
@@ -512,20 +412,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_turns_tool_failures_into_error_results() {
+    fn run_approved_turns_tool_failures_into_error_results() {
         let dir = fixture();
         let registry = Registry::full(dir.path());
-        let output = run_now(registry.dispatch(&auto(), "read", json!({"path": "missing.txt"})));
+        let output = run_now(registry.run_approved("read", json!({"path": "missing.txt"})));
         assert!(output.is_error);
         assert!(output.content.contains("cannot read"));
         assert!(output.content.contains("missing.txt"));
     }
 
     #[test]
-    fn dispatch_rejects_inputs_that_miss_the_schema() {
+    fn run_approved_rejects_inputs_that_miss_the_schema() {
         let dir = fixture();
         let registry = Registry::full(dir.path());
-        let output = run_now(registry.dispatch(&auto(), "read", json!({"file": "hello.txt"})));
+        let output = run_now(registry.run_approved("read", json!({"file": "hello.txt"})));
         assert!(output.is_error);
         assert!(output.content.contains("invalid input"));
     }

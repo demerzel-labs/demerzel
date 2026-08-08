@@ -6,12 +6,15 @@
 //! assert on serialization and headers. Never part of the shipped binary.
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
@@ -38,6 +41,8 @@ impl SseEvent {
 pub struct MockResponse {
     pub status: u16,
     pub events: Vec<SseEvent>,
+    /// Send the events, then hold the connection open forever.
+    pub stall: bool,
 }
 
 impl MockResponse {
@@ -46,6 +51,16 @@ impl MockResponse {
         Self {
             status: 200,
             events: events.into_iter().map(SseEvent::new).collect(),
+            stall: false,
+        }
+    }
+
+    /// A streaming reply that sends its events and never completes.
+    /// Abort tests use it to cut a turn mid-stream.
+    pub fn stream_then_stall(events: Vec<Value>) -> Self {
+        Self {
+            stall: true,
+            ..Self::stream(events)
         }
     }
 
@@ -54,6 +69,21 @@ impl MockResponse {
         Self {
             status,
             events: Vec::new(),
+            stall: false,
+        }
+    }
+}
+
+/// Body that yields one chunk and then stays pending forever.
+struct StallBody(Option<Bytes>);
+
+impl futures_core::Stream for StallBody {
+    type Item = Result<Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.0.take() {
+            Some(bytes) => Poll::Ready(Some(Ok(bytes))),
+            None => Poll::Pending,
         }
     }
 }
@@ -160,10 +190,15 @@ async fn handle_responses(
         sse.push_str(&event.data.to_string());
         sse.push_str("\n\n");
     }
+    let body = if reply.stall {
+        Body::from_stream(StallBody(Some(Bytes::from(sse))))
+    } else {
+        Body::from(sse)
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
-        .body(Body::from(sse))
+        .body(body)
         .expect("build sse response")
 }
 

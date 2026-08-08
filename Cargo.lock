@@ -174,13 +174,27 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 [[package]]
 name = "demerzel"
 version = "0.1.0"
+dependencies = [
+ "demerzel-core",
+ "demerzel-mock",
+ "demerzel-providers",
+ "demerzel-tools",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "demerzel-core"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
+ "humantime",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -188,6 +202,7 @@ name = "demerzel-mock"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-core",
  "serde",
  "serde_json",
  "tokio",
@@ -200,13 +215,13 @@ dependencies = [
  "base64",
  "demerzel-core",
  "demerzel-mock",
+ "demerzel-tools",
  "futures-core",
  "humantime",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tokio",
 ]
 

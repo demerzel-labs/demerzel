@@ -18,6 +18,7 @@ repository = "https://github.com/demerzel-labs/demerzel"
 demerzel-core = { path = "crates/demerzel-core" }
 demerzel-mock = { path = "crates/demerzel-mock" }
 demerzel-providers = { path = "crates/demerzel-providers" }
+demerzel-tools = { path = "crates/demerzel-tools" }
 axum = "0.8"
 base64 = "0.22"
 futures-core = "0.3"

@@ -45,13 +45,11 @@ fn provider_for(mock: &MockServer, store_path: PathBuf) -> OpenAiCodex {
 }
 
 fn request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> Request {
-    Request {
-        model: "gpt-test".to_string(),
-        system_prompt: "You are dmz.".to_string(),
-        messages,
-        tools,
-        max_output_tokens: None,
-    }
+    let mut request = Request::new("gpt-test");
+    request.system_prompt = "You are dmz.".to_string();
+    request.messages = messages;
+    request.tools = tools;
+    request
 }
 
 fn completed(usage: Value) -> Value {
