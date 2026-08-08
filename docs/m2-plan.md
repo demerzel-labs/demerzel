@@ -1,0 +1,293 @@
+# M2 Implementation Plan — Interface and Second Provider
+
+This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
+verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
+
+## Status (2026-08-08)
+
+M1 is complete (PR #16). This plan is step 1 of the build order below.
+
+## Goal
+
+After M2, Demerzel runs interactive sessions in a full-screen TUI. A
+second adapter speaks the Anthropic Messages API with an API key.
+`dmz login` replaces the Codex CLI import for the ChatGPT subscription.
+Configuration comes from layered files and flags. The plain REPL from
+M1 stays as the fallback interface.
+
+## Exit criteria
+
+M2 is done when all of these hold:
+
+1. A TUI session in this repo reaches parity with the REPL: streamed
+   text and reasoning, tool status lines, edit previews, approval
+   prompts, resume, and the Ctrl-C rules at every point.
+2. A live multi-turn session with tools completes against the Anthropic
+   API with an API-key credential.
+3. `dmz login` completes the PKCE flow against the real endpoint. The
+   stored credentials drive a session without the Codex CLI import.
+4. The prompt-cache hit rate is measured on a replayed session for both
+   providers. The raw data sits in `bench/results/`.
+5. Config precedence tests pass: flags beat environment, environment
+   beats project file, project file beats user file, user file beats
+   defaults.
+6. Hermetic adapter tests pass against the mock server for both
+   providers. No network, no model.
+7. `cargo fmt`, `cargo clippy`, and `cargo test` are clean. The Layer-1
+   benches stay inside the M4 gates after the TUI lands.
+
+## Scope
+
+In: ratatui TUI (streaming render, edit previews, approval prompts,
+status bar, scrollback), `anthropic` adapter with prompt caching and
+sealed thinking, API-key credentials, `dmz login` (PKCE for the ChatGPT
+subscription; key entry for Anthropic), layered TOML config, slash
+commands (`/help`, `/model`, `/new` plus the M1 `/exit`), `doctor`,
+file-backed REPL history, cache-hit measurement.
+
+Out (deferred to the milestone in parentheses): skills, hooks, MCP,
+subagents, competitor-config discovery, theming, memory, personality
+(M3), per-role model routing and fallback chains (M3, with subagents),
+compaction (M4), `openai-compat` adapter (by demand), background-task
+mechanism (decision revisited at the end of M2; see the open question
+in [`plan.md`](plan.md)).
+
+## Workspace after M2
+
+```text
+crates/
+  demerzel/            # bin: CLI, REPL, wiring, config resolution
+  demerzel-core/       # domain types, provider contract, loop, sessions, policy
+  demerzel-providers/  # openai-codex + anthropic adapters
+  demerzel-tools/      # read, edit, create, bash, grep, glob
+  demerzel-tui/        # ratatui interface (new)
+  demerzel-mock/       # mock server: /responses + /v1/messages routes
+bench/                 # + render-throughput bench, cache-hit measurement
+```
+
+## Design
+
+### Layered config (demerzel bin)
+
+TOML, three layers plus defaults. Highest wins:
+
+1. Command-line flags, then their environment variables.
+2. Project file: `.demerzel/config.toml` at the project root.
+3. User file: `$XDG_CONFIG_HOME/demerzel/config.toml`.
+4. Built-in defaults.
+
+M2 keys, all optional:
+
+```toml
+provider = "openai-codex"        # or "anthropic"
+model = "gpt-5.6-sol"
+approval = "ask"                 # read-only | ask | auto
+history_file = true              # file-backed REPL/TUI input history
+
+[providers.openai-codex]
+base_url = "https://chatgpt.com/backend-api/codex"
+model = "gpt-5.6-sol"
+
+[providers.anthropic]
+base_url = "https://api.anthropic.com"
+model = "claude-sonnet-5"
+```
+
+Rules:
+
+- Resolution happens once at boot into the existing `RunConfig`. The
+  engine and the tools never read config files.
+- Unknown keys warn on stderr and do not stop the run. This keeps old
+  binaries usable on newer config files.
+- A `[providers.<id>]` table sets per-provider endpoint and model. The
+  top-level `provider` key picks the active one. Role tables come in
+  M3; the shape above stays valid when they land.
+- No secrets in config files. Credentials live in the auth store only.
+  `doctor` warns when it finds a key-shaped value in a config file.
+
+### `doctor` (demerzel bin)
+
+`dmz doctor` reports presence, not values:
+
+- Which config files exist, and which layer set each active key.
+- Which provider credentials exist in the auth store, with expiry
+  state for OAuth tokens. Never the token text.
+- Tool preconditions: bash resolves, the project root is writable,
+  the session directory is writable.
+- Exit code 0 when a session can start; 1 otherwise.
+
+### `anthropic` adapter (demerzel-providers)
+
+Native Messages API with SSE streaming. The M1 provider contract fits
+it by design; the adapter is translation, not architecture.
+
+- POST `{base_url}/v1/messages` with `stream: true`. Auth header:
+  `x-api-key`. Version header pinned per the API reference.
+- Credential order: `ANTHROPIC_API_KEY` environment variable, then the
+  `anthropic` section of the auth store.
+- Content mapping: `Text`, `ToolUse`, `ToolResult` map one-to-one.
+  Thinking blocks map to `Reasoning { summary, sealed }`; the
+  signature travels in `sealed` and returns on later turns for
+  same-provider continuity, exactly like the Codex sealed payloads.
+- Prompt caching: `cache_control` breakpoints at fixed positions — the
+  end of the system prompt, the end of the tool definitions, and the
+  latest history tail. Positions are fixed so the prefix stays stable.
+  `Usage.cache_read_tokens` maps from `cache_read_input_tokens`.
+- Capabilities: streaming, tool calls, parallel tool calls declared
+  false in M2 (execution stays sequential), usage in stream, cache
+  control, sealed reasoning.
+- Retries mirror the codex adapter: backoff on 429, on 5xx, and on
+  network errors; fail fast on other 4xx. On 401 there is no refresh —
+  the error tells the user to check the key.
+- The parser ignores unknown events and fields.
+
+The mock server gains a `/v1/messages` route that replays scripted
+Messages-API SSE transcripts, plus fixture builders next to the codex
+ones.
+
+### `dmz login` (demerzel bin)
+
+Two forms, one command:
+
+- `dmz login` — PKCE authorization-code flow for the ChatGPT
+  subscription. The Codex CLI login flow is the wire-contract
+  reference, and `CLIENT_ID` is already in the codebase. Steps:
+  1. Start a loopback listener on `127.0.0.1` with an ephemeral port.
+  2. Open the browser to the authorization URL with an S256 challenge.
+     When the browser does not open, print the URL.
+  3. Receive the code on the loopback listener, exchange it for
+     tokens, and write them to the dmz auth store with mode 0600.
+  4. When no browser and no loopback are available, accept a pasted
+     redirect URL on stdin as the fallback.
+- `dmz login anthropic` — prompt for an API key with echo off, verify
+  it with one cheap API call, and store it with mode 0600.
+
+The loopback listener handles one request with a hand-rolled HTTP
+reply. The flow needs no HTTP-server dependency, the same call the
+M1 plan made for hand-rolled SSE parsing.
+
+### TUI (demerzel-tui)
+
+ratatui + crossterm, alternate screen, a new crate as planned in
+[`plan.md`](plan.md). The bin crate picks the interface: TUI when
+stdout is a terminal, REPL under `--plain`, one-shot with a prompt
+argument.
+
+Layout:
+
+- Transcript pane: streamed text, dim reasoning summaries, one status
+  line per tool call, edit previews rendered as diffs from the edit
+  tool input (the `ToolRun` engine event already carries the full
+  input).
+- Input line at the bottom with history. The same reader-ownership
+  rule as the REPL: one owner for input events, requests over a
+  channel.
+- Status bar: model, approval mode, session id, token usage.
+- Approval prompt: inline yes / always / no with the M1 grant
+  semantics. Ctrl-C rules carry over unchanged from the REPL
+  (documented in [`m1-plan.md`](m1-plan.md)).
+
+Contracts:
+
+- The TUI prints the `demerzel ready` marker on stderr before it
+  enters the alternate screen. The PTY probe keeps working and gains
+  a TUI scenario.
+- The renderer consumes the existing `EngineEvent` stream. The engine
+  does not change for the TUI.
+- Theming is M3. The M2 palette is the terminal's own colors.
+
+### Slash commands (demerzel bin)
+
+One registry serves the REPL and the TUI. M2 commands: `/help`,
+`/model <name>` (switches the session model), `/new` (starts a fresh
+session), `/exit` and `/quit` from M1. The registry maps a name to a
+handler; M3 file-based custom commands extend the same table. Unknown
+commands keep the M1 error shape.
+
+### Cache-hit measurement (bench)
+
+A Layer-4 slice, pulled forward because it is the M2 exit criterion:
+
+- Replay a recorded session against each live provider twice. Report
+  `cache_read_tokens / input_tokens` per turn and per session.
+- Commit the raw JSON to `bench/results/` with the provenance
+  envelope.
+- Add a render-throughput bench for the TUI over the mock stream
+  (Layer 2).
+
+## Dependencies
+
+Each new dependency must pass a `cargo-bloat` check against the
+< 25 MB binary gate. Dev-only crates are exempt.
+
+| Crate | Purpose |
+|---|---|
+| ratatui (no default features where possible) | TUI |
+| crossterm | terminal backend, input events |
+| toml | config files |
+| sha2 | PKCE S256 challenge |
+| getrandom | PKCE verifier bytes |
+
+Not added: an HTTP-server crate (the loopback listener is hand-rolled),
+a browser-opener crate (`xdg-open`/`open` via `std::process::Command`,
+with the URL printed as fallback).
+
+## Build order
+
+Each step is one PR with its own verify line.
+
+1. **M2 plan.** This document. *Verify: review.*
+2. **Layered config and `doctor`.** TOML resolution into `RunConfig`,
+   precedence tests, `doctor`, file-backed history. *Verify: config
+   precedence tests; `doctor` against a machine with and without
+   credentials.*
+3. **`anthropic` adapter.** Messages API streaming, tool calls,
+   thinking round-trip, cache breakpoints, API-key path, mock route,
+   conformance tests. *Verify: hermetic adapter tests; one live smoke
+   call with a real key.*
+4. **`dmz login`.** PKCE flow, loopback listener, pasted-URL fallback,
+   `dmz login anthropic`. *Verify: a real login on this machine drives
+   a session without the Codex CLI file.*
+5. **TUI foundation.** `demerzel-tui` crate, event loop, streaming
+   render, input line, ready marker, `--plain` fallback. *Verify: a
+   scripted PTY session against the mock; boot and idle benches stay
+   inside the gates.*
+6. **TUI interaction.** Edit previews, approval prompts, slash-command
+   registry shared with the REPL, status bar. *Verify: a real dogfood
+   session in this repo through the TUI; Ctrl-C at every point.*
+7. **Measurement pass.** Cache-hit rate on replayed sessions for both
+   providers, render-throughput bench, results committed. *Verify: raw
+   JSON in `bench/results/`; exit criteria checked off.*
+
+## Decisions to make during M2
+
+- Anthropic default model. Placeholder above is `claude-sonnet-5`;
+  fix the exact model id in step 3 from the live API.
+- Per-input approval grants (deferred from M1). Decide in step 6
+  whether `always` stays name-scoped or gains per-input granularity
+  for bash.
+- File-backed history default. The key exists in step 2; decide the
+  default (on or off) after dogfood.
+- The REPL's long-term place once the TUI reaches parity. The working
+  assumption: `--plain` stays supported as the low-dependency path.
+- Background tasks: revisit the open question at the end of M2 with
+  TUI and config in hand; the mechanism itself is expected in M3.
+
+## Risks
+
+- **TUI regresses the Layer-1 numbers.** ratatui and crossterm add
+  code and startup work. Mitigation: the step-5 verify line runs the
+  boot and idle benches; lazy TUI construction; `cargo-bloat` check.
+- **Messages-API contract drift.** Thinking-block and cache semantics
+  change with model generations. Mitigation: capability flags, pinned
+  version header, recorded fixtures, parser ignores unknown fields.
+- **PKCE against a backend not built for third parties.** Same risk
+  class as the Codex endpoint in M1. Mitigation: the Codex CLI login
+  as the reference, the pasted-URL fallback, recorded fixtures for the
+  token exchange.
+- **Config sprawl.** Every key added in M2 is contract surface.
+  Mitigation: the minimal key set above; unknown-key warnings instead
+  of errors keep later additions non-breaking.
+- **Two interfaces drift apart.** REPL and TUI must keep the same
+  semantics. Mitigation: both consume the same `EngineEvent` stream
+  and the same command registry; the parity dogfood in step 6.

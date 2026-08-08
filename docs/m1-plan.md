@@ -5,7 +5,9 @@ verifiable steps.
 
 ## Status (2026-08-08)
 
-All 7 steps are done. The exit criteria hold. Workspace state after
+All 7 steps are done and merged; M1 is complete. The exit criteria
+hold. [`m2-plan.md`](m2-plan.md) carries the current milestone.
+Workspace state after
 step 7: 140 tests, `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean,
 release binary at 6.9 MB.
