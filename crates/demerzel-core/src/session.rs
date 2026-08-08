@@ -78,6 +78,10 @@ pub enum SessionRecord {
         approved: Option<bool>,
     },
     Usage(Usage),
+    /// A record type from a newer schema. Replay skips it, so old
+    /// binaries read new files. The harness never writes this variant.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Borrowed mirror of [`SessionRecord`], so appends serialize without
@@ -99,14 +103,9 @@ enum RecordRef<'a> {
     Usage(&'a Usage),
 }
 
-/// Record types this version knows. Replay skips unknown types instead
-/// of failing, so a newer file still resumes.
-const KNOWN_TYPES: [&str; 4] = ["meta", "message", "approval", "usage"];
-
-/// The record type alone, for the replay fast path. `Cow` keeps the
-/// peek borrow-free for plain identifiers and still reads a type
-/// value that carries JSON escapes, so an unknown type always skips
-/// instead of failing.
+/// The record type alone. Only the replay error path uses it, to name
+/// the record type in the message; the happy path parses each line
+/// once.
 #[derive(Deserialize)]
 struct RecordTag<'a> {
     #[serde(borrow, rename = "type")]
@@ -238,6 +237,8 @@ impl Session {
                 approved: *approved,
             },
             SessionRecord::Usage(usage) => RecordRef::Usage(usage),
+            // Replay-only marker; there is nothing to write.
+            SessionRecord::Unknown => return Ok(()),
         };
         self.append_ref(&record)
     }
@@ -362,16 +363,20 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
         let bad = |what: &str, detail: String| {
             io::Error::other(format!("{}:{number}: {what}: {detail}", path.display()))
         };
-        let tag: RecordTag<'_> = serde_json::from_str(trimmed)
-            .map_err(|error| bad("bad session record", error.to_string()))?;
-        let Some(kind) = tag.kind else {
-            return Err(bad("bad session record", "no type field".to_string()));
+        let record: SessionRecord = match serde_json::from_str(trimmed) {
+            Ok(record) => record,
+            Err(error) => {
+                // Name the record type in the error when the line can
+                // still identify itself.
+                let kind = serde_json::from_str::<RecordTag<'_>>(trimmed)
+                    .ok()
+                    .and_then(|tag| tag.kind);
+                return Err(match kind {
+                    Some(kind) => bad(&format!("bad {kind} record"), error.to_string()),
+                    None => bad("bad session record", error.to_string()),
+                });
+            }
         };
-        if !KNOWN_TYPES.contains(&kind.as_ref()) {
-            continue;
-        }
-        let record: SessionRecord = serde_json::from_str(trimmed)
-            .map_err(|error| bad(&format!("bad {kind} record"), error.to_string()))?;
         match record {
             SessionRecord::Meta(meta) => {
                 if meta.schema > SCHEMA_VERSION {
@@ -387,6 +392,7 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
             }
             SessionRecord::Message(message) => out.messages.push(message),
             SessionRecord::Approval { .. } | SessionRecord::Usage(_) => {}
+            SessionRecord::Unknown => {}
         }
     }
     Ok(out)
@@ -709,7 +715,7 @@ mod tests {
 
         std::fs::write(&path, "{\"role\":\"user\"}\n").unwrap();
         let error = replay(&path).unwrap_err();
-        assert!(error.to_string().contains("no type field"));
+        assert!(error.to_string().contains("bad session record"));
     }
 
     #[test]

@@ -66,21 +66,37 @@ pub struct ApprovalRequest<'a> {
     pub input: &'a serde_json::Value,
 }
 
-/// The approval policy for one session. In M1 it holds only the mode;
-/// per-tool overrides and session-scoped grants land here as fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The approval policy for one session: the mode, plus the tools the
+/// user granted for the rest of the session. Per-tool overrides and
+/// path rules land here as later fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPolicy {
     pub mode: ApprovalMode,
+    /// Tools the user answered "allow for this session" for. A granted
+    /// tool skips later ask prompts; it never overrides a `Deny`.
+    grants: std::collections::BTreeSet<String>,
 }
 
 impl ApprovalPolicy {
     pub fn new(mode: ApprovalMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            grants: std::collections::BTreeSet::new(),
+        }
     }
 
     /// Decide one tool call before dispatch.
     pub fn decide(&self, request: &ApprovalRequest<'_>) -> ApprovalDecision {
-        self.mode.decide(request.access)
+        let decision = self.mode.decide(request.access);
+        if decision == ApprovalDecision::AskUser && self.grants.contains(request.tool) {
+            return ApprovalDecision::Allow;
+        }
+        decision
+    }
+
+    /// Grant the tool for the rest of the session.
+    pub fn grant(&mut self, tool: &str) {
+        self.grants.insert(tool.to_string());
     }
 }
 

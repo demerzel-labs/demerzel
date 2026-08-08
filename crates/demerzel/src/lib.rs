@@ -82,8 +82,13 @@ pub enum RunError {
 /// engines over it.
 pub struct Runtime {
     config: RunConfig,
+    engine_config: EngineConfig,
     provider: OpenAiCodex,
+    /// The full tool set, and the read-only subset. The engine picks
+    /// one per session, so a mode change is an engine rebuild, not a
+    /// runtime rebuild.
     registry: Registry,
+    read_only_registry: Registry,
     store: SessionStore,
 }
 
@@ -94,18 +99,18 @@ impl Runtime {
             None => SessionStore::open_default()?,
         };
 
-        let mut registry = Registry::full(&config.project_dir);
-        if config.approval == ApprovalMode::ReadOnly {
-            // A read-only session drops the write tools instead of
-            // advertising and refusing them.
-            registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
-        }
+        let registry = Registry::full(&config.project_dir);
+        let mut read_only_registry = Registry::full(&config.project_dir);
+        read_only_registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
 
-        let auth = match &config.auth {
+        let mut auth = match &config.auth {
             Some(paths) => AuthStore::open(paths.store.clone(), paths.codex_cli.clone())
                 .map_err(RunError::Auth)?,
             None => AuthStore::open_default().map_err(RunError::Auth)?,
         };
+        // Resolve credentials now, so a missing login fails here with
+        // a clear message instead of inside the first turn.
+        auth.ensure().map_err(RunError::Auth)?;
         let mut codex_config = CodexConfig::default();
         if let Some(base_url) = &config.base_url {
             codex_config.base_url = base_url.clone();
@@ -113,9 +118,11 @@ impl Runtime {
         let provider = OpenAiCodex::new(codex_config, auth);
 
         Ok(Self {
+            engine_config: EngineConfig::new(config.model.clone()),
             config,
             provider,
             registry,
+            read_only_registry,
             store,
         })
     }
@@ -163,28 +170,44 @@ impl Runtime {
         Ok((session, Vec::new()))
     }
 
-    /// Build the turn engine over an open session.
+    /// Build the turn engine over an open session. A read-only run
+    /// advertises only the read tools.
     pub fn engine(&self, session: Session, history: Vec<Message>) -> Engine<'_> {
+        let registry = if self.config.approval == ApprovalMode::ReadOnly {
+            &self.read_only_registry
+        } else {
+            &self.registry
+        };
         Engine::with_history(
             &self.provider,
-            &self.registry,
+            registry,
             ApprovalPolicy::new(self.config.approval),
-            EngineConfig::new(self.config.model.clone()),
+            self.engine_config.clone(),
             session,
             history,
         )
     }
+
+    /// Run one prompt to completion. Display events go to `sink`; the
+    /// returned outcome says how the turn ended.
+    pub async fn one_shot(
+        &self,
+        prompt: String,
+        sink: &dyn EventSink,
+    ) -> Result<TurnOutcome, RunError> {
+        let (session, history) = self.open_session()?;
+        let mut engine = self.engine(session, history);
+        Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
+    }
 }
 
-/// Run one prompt to completion and exit. Display events go to `sink`;
-/// the returned outcome says how the turn ended.
+/// Build a runtime and run one prompt. A repeated caller builds one
+/// [`Runtime`] and calls [`Runtime::one_shot`], so the HTTP connection
+/// pool persists between calls.
 pub async fn run_one_shot(
     config: &RunConfig,
     prompt: String,
     sink: &dyn EventSink,
 ) -> Result<TurnOutcome, RunError> {
-    let runtime = Runtime::new(config.clone())?;
-    let (session, history) = runtime.open_session()?;
-    let mut engine = runtime.engine(session, history);
-    Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
+    Runtime::new(config.clone())?.one_shot(prompt, sink).await
 }
