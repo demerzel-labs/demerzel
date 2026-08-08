@@ -9,6 +9,6 @@
   "filesystem": "btrfs",
   "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
   "binary_bytes": 6924224,
-  "git_rev": "1f24828",
+  "git_rev": "2a541ae",
   "git_dirty": false
 }

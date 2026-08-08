@@ -14,7 +14,7 @@ First bench numbers (2026-08-08, Ryzen 9 5900X; raw data and the
 machine spec sit in `bench/results/`):
 
 - Boot (`--version`): 1.0 ms mean over 50 runs.
-- Time to interactive (PTY probe, median of 50): 1.2 ms warm, 4.4 ms
+- Time to interactive (PTY probe, median of 50): 1.2 ms warm, 4.5 ms
   cold with verified page-cache eviction. The probe's own spawn
   floor, 0.55 ms, sits inside both numbers.
 - Idle REPL memory (median of 10 launches): 516 KiB anonymous — the
