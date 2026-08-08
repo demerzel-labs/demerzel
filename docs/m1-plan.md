@@ -28,8 +28,8 @@ Notes for the next session:
   ready marker for the PTY probe.
 - The bash tool kills its whole process group after every call, so a
   command cannot leave a background server running. This is the
-  accepted M1 posture (PR #11). The alignment review of 2026-08-07
-  lists it as a watch item.
+  accepted M1 posture (PR #11). The background-task decision is an
+  open question in [`plan.md`](plan.md).
 - `AGENTS.md` holds the pull-request gate and the source rules that
   bind every step.
 
