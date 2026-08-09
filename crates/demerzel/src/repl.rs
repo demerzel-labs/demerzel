@@ -453,6 +453,9 @@ async fn run_turn(engine: &mut Engine<'_>, text: String, reader: &Reader, sigint
         Some(Ok(TurnOutcome::CallLimit)) => {
             eprintln!("demerzel: the turn hit the model-call limit");
         }
+        Some(Ok(TurnOutcome::Refused)) => {
+            eprintln!("demerzel: the model refused the request");
+        }
         Some(Ok(_)) => {}
         Some(Err(error)) => eprintln!("demerzel: {error}"),
     }

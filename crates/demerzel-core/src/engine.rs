@@ -154,6 +154,8 @@ pub enum TurnOutcome {
     Completed,
     /// The model hit the output-token limit.
     MaxTokens,
+    /// The model or its safety layer declined the request.
+    Refused,
     /// The loop hit `max_model_calls` for this user turn.
     CallLimit,
     /// The user stopped the turn at an approval prompt. The session
@@ -293,6 +295,7 @@ impl<'a> Engine<'a> {
                 }
                 StopReason::EndTurn | StopReason::Aborted => return Ok(TurnOutcome::Completed),
                 StopReason::MaxTokens => return Ok(TurnOutcome::MaxTokens),
+                StopReason::Refusal => return Ok(TurnOutcome::Refused),
             }
         }
     }

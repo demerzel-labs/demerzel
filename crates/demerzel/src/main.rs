@@ -143,6 +143,10 @@ fn main() {
             eprintln!("demerzel: the turn hit the model-call limit");
             std::process::exit(1);
         }
+        Some(Ok(TurnOutcome::Refused)) => {
+            eprintln!("demerzel: the model refused the request");
+            std::process::exit(1);
+        }
         Some(Ok(TurnOutcome::Aborted)) => {
             eprintln!("demerzel: stopped at an approval prompt");
             std::process::exit(1);

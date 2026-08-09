@@ -69,6 +69,10 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+    /// The model or its safety layer declined the request. The turn
+    /// produced no usable answer; the harness must not report it as
+    /// completed.
+    Refusal,
     Aborted,
 }
 
