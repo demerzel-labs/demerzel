@@ -6,7 +6,8 @@ verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 ## Status (2026-08-08)
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
-config and `doctor`) is in review.
+config and `doctor`, PR #18) and the platform statement (PR #19) are
+merged. Step 3 (the `anthropic` adapter) is in review.
 
 ## Goal
 
@@ -275,12 +276,24 @@ Each step is one PR with its own verify line.
 
 ## Decisions to make during M2
 
-- Anthropic default model. Placeholder above is `claude-sonnet-5`;
-  fix the exact model id in step 3 from the live API.
-- Cross-provider model keys (step-2 review). A top-level `model`
-  names one provider's model id, so a provider switch can pair it
-  with the wrong adapter. Decide the rule in step 3, and give each
-  provider its own default model there.
+- Anthropic default model — decided in step 3. The live `/v1/models`
+  list confirms `claude-sonnet-5` as a served id; it is the adapter's
+  default. Adaptive thinking with summarized display is the default
+  request shape.
+- Cross-provider model keys — decided in step 3. Two rules:
+  1. Each adapter exports its own default model. When no layer sets a
+     model, the active provider's default applies.
+  2. A top-level `model` key applies when its layer names the active
+     provider or names no provider. When its layer names a different
+     provider, the resolver skips the key. So a provider switch cannot
+     pair one provider's model id with the other adapter. Pin models
+     in `[providers.<id>]` tables to scope them explicitly.
+- Trust-rule edge (step-2 review) — revisited in step 3, kept as is.
+  A project `provider` key picks among the endpoints the user file
+  defines. The user wrote those endpoints and stored those
+  credentials, so the pick is the same class of choice as a model
+  name. Endpoints and credentials still come only from flags, the
+  environment, and the user file.
 - Per-input approval grants (deferred from M1). Decide in step 6
   whether `always` stays name-scoped or gains per-input granularity
   for bash.
