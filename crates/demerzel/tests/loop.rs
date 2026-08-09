@@ -380,6 +380,60 @@ async fn one_shot_read_only_drops_write_tools_and_streams_text() {
 }
 
 #[tokio::test]
+async fn one_shot_dispatches_to_the_anthropic_provider() {
+    let mock = MockServer::start(
+        vec![demerzel_mock::anthropic::text_turn("claude here")],
+        Vec::new(),
+    )
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    // The key sits in the store; nothing else writes that file.
+    let store_path = data.path().join("auth.json");
+    std::fs::write(
+        &store_path,
+        json!({"version": 2, "anthropic": {"api_key": "sk-store-key"}}).to_string(),
+    )
+    .unwrap();
+
+    let mut config = RunConfig::new(project.path().to_path_buf());
+    config.provider = "anthropic".into();
+    config.model = "claude-test".into();
+    config.data_root = Some(data.path().join("store"));
+    config.base_url = Some(mock.url());
+    config.auth = Some(AuthPaths {
+        store: store_path,
+        codex_cli: None,
+    });
+
+    let text = Mutex::new(String::new());
+    let sink = |event: EngineEvent<'_>| {
+        if let EngineEvent::TextDelta(delta) = event {
+            text.lock().unwrap().push_str(delta);
+        }
+    };
+    let outcome = run_one_shot(&config, "hello".into(), &sink).await.unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(*text.lock().unwrap(), "claude here");
+    let received = mock.received();
+    assert_eq!(received[0].path, "/v1/messages");
+    // The environment wins over the store when a developer machine
+    // exports the variable; both prove the credential order.
+    let expected = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "sk-store-key".to_string());
+    assert_eq!(received[0].api_key.as_deref(), Some(expected.as_str()));
+    assert_eq!(received[0].body["model"], "claude-test");
+    // The session records the anthropic provider id.
+    let store = SessionStore::at(data.path().join("store"));
+    let path = store.latest(project.path()).unwrap().unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains(r#""provider":"anthropic""#), "{raw}");
+}
+
+#[tokio::test]
 async fn one_shot_continue_resumes_the_latest_session() {
     let bed = Bed::start(vec![text_turn("first"), text_turn("second")]).await;
     let mut config = RunConfig::new(bed.project.path().to_path_buf());

@@ -42,7 +42,8 @@ impl Bed {
             .env("XDG_DATA_HOME", &self.data)
             .env_remove("DEMERZEL_PROVIDER")
             .env_remove("DEMERZEL_MODEL")
-            .env_remove("DEMERZEL_BASE_URL");
+            .env_remove("DEMERZEL_BASE_URL")
+            .env_remove("ANTHROPIC_API_KEY");
         command
     }
 
@@ -284,11 +285,66 @@ fn doctor_counts_a_bad_config_file_as_a_problem() {
 fn an_unknown_provider_stops_the_run_with_a_clear_error() {
     let bed = Bed::new();
     bed.write_store();
+    bed.write_project_config("provider = \"nope\"");
+    let output = bed.command().arg("hi").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(err.contains("unknown provider `nope`"), "{err}");
+}
+
+#[test]
+fn the_anthropic_provider_without_a_key_stops_the_run() {
+    let bed = Bed::new();
     bed.write_project_config("provider = \"anthropic\"");
     let output = bed.command().arg("hi").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let err = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(err.contains("unknown provider `anthropic`"), "{err}");
+    assert!(err.contains("ANTHROPIC_API_KEY"), "{err}");
+}
+
+#[test]
+fn doctor_reports_anthropic_credentials_per_source() {
+    // No key anywhere: a note under the default provider, a problem
+    // when anthropic is active.
+    let bed = Bed::new();
+    bed.write_store();
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("anthropic: none"), "{out}");
+
+    let (out, code) = bed.doctor(&["--provider", "anthropic"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("anthropic: none"), "{out}");
+    // The default model followed the provider switch.
+    assert!(out.contains("model = claude-sonnet-5 (default)"), "{out}");
+    // Missing codex credentials are not the active provider's problem.
+    let bed = Bed::new();
+    let key = bed.data.join("demerzel");
+    std::fs::create_dir_all(&key).unwrap();
+    std::fs::write(
+        key.join("auth.json"),
+        r#"{"version": 2, "anthropic": {"api_key": "sk-store-secret"}}"#,
+    )
+    .unwrap();
+    let (out, code) = bed.doctor(&["--provider", "anthropic"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("anthropic: in the dmz store"), "{out}");
+    assert!(!out.contains("sk-store-secret"), "{out}");
+
+    // The environment wins over the store.
+    let output = bed
+        .command()
+        .env("ANTHROPIC_API_KEY", "sk-env-secret")
+        .args(["--provider", "anthropic", "doctor"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{out}");
+    assert!(
+        out.contains("anthropic: from the environment (ANTHROPIC_API_KEY)"),
+        "{out}"
+    );
+    assert!(!out.contains("sk-env-secret"), "{out}");
 }
 
 #[test]
