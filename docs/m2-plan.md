@@ -7,7 +7,10 @@ verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
 config and `doctor`, PR #18) and the platform statement (PR #19) are
-merged. Step 3 (the `anthropic` adapter) is in review.
+merged. Step 3 (the `anthropic` adapter) is in review. Live manual
+sessions from the step-3 build meet exit criterion 2: a multi-turn
+tool session, a Ctrl-C abort, and a `--continue` resume that replayed
+the full history all completed against the Anthropic API.
 
 ## Goal
 
@@ -268,8 +271,10 @@ Each step is one PR with its own verify line.
    scripted PTY session against the mock; boot and idle benches stay
    inside the gates.*
 6. **TUI interaction.** Edit previews, approval prompts, slash-command
-   registry shared with the REPL, status bar. *Verify: a real dogfood
-   session in this repo through the TUI; Ctrl-C at every point.*
+   registry shared with the REPL, status bar. The status bar names a
+   resumed session at boot; the REPL announces it only at the first
+   prompt. *Verify: a real dogfood session in this repo through the
+   TUI; Ctrl-C at every point.*
 7. **Measurement pass.** Cache-hit rate on replayed sessions for both
    providers, render-throughput bench, results committed. *Verify: raw
    JSON in `bench/results/`; exit criteria checked off.*
@@ -301,7 +306,9 @@ Each step is one PR with its own verify line.
   switch; they are the user's own input, outside the trust rule.
 - Per-input approval grants (deferred from M1). Decide in step 6
   whether `always` stays name-scoped or gains per-input granularity
-  for bash.
+  for bash. A step-3 dogfood review flagged the name-scoped grant as
+  the largest injection surface: one `always` on bash approves every
+  later bash command in the session.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

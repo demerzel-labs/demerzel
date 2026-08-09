@@ -115,7 +115,13 @@ translate. No adapter is privileged.
 
 - **M1: `openai-codex`** — the Responses API against the ChatGPT-subscription
   Codex endpoint, with OAuth credentials. No API key. The open-source Codex
-  CLI client is the contract reference.
+  CLI client is the contract reference. Known risk: the endpoint is
+  subscription-gated, not a public API. OpenAI permits forks of the Codex
+  CLI but does not say whether third-party clients may use the ChatGPT
+  OAuth path
+  ([openai/codex#8338](https://github.com/openai/codex/discussions/8338)).
+  OpenAI can close the path at any time. The `anthropic` adapter and the
+  later `openai-compat` adapter keep the harness usable if that happens.
 - **M2: `anthropic`** — native Messages API with prompt-cache control, and
   the first API-key credential path (Anthropic supports no subscription
   OAuth for third-party tools). The provider trait is written in M1 with
