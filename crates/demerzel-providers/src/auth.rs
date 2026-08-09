@@ -1,14 +1,21 @@
-//! Credential store for the openai-codex adapter.
+//! The dmz credential store: one JSON file with mode 0600, one section
+//! per provider. File version 2 adds the `anthropic` section; a version-1
+//! file still parses, its `anthropic` section is simply absent.
 //!
-//! M1 implements no login flow. The store imports the Codex CLI login
-//! from `~/.codex/auth.json` into dmz's own file and refreshes tokens
-//! with the standard OAuth refresh flow. It writes updates to its own
-//! store only, never to the Codex CLI file.
+//! The `openai_codex` section carries the OAuth machinery from M1. There
+//! is no login flow yet: the store imports the Codex CLI login from
+//! `~/.codex/auth.json` into dmz's own file and refreshes tokens with
+//! the standard OAuth refresh flow. It writes updates to its own store
+//! only, never to the Codex CLI file.
 //!
 //! Refresh strategy (M1 decision): when the Codex CLI file holds a newer
 //! `last_refresh` than our store, re-import it instead of spending our
 //! refresh token. This keeps the two programs from invalidating each
 //! other while the Codex CLI stays in daily use.
+//!
+//! The `anthropic` section holds an API key. `dmz login anthropic`
+//! (M2 step 4) writes it; until then the `ANTHROPIC_API_KEY` variable
+//! is the usual source and the store section stays empty.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -41,11 +48,22 @@ pub struct CodexCredentials {
     pub last_refresh: Option<String>,
 }
 
+/// Credentials for the anthropic adapter: one API key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnthropicCredentials {
+    pub api_key: String,
+}
+
+/// The store file version this build writes.
+const STORE_VERSION: u32 = 2;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     openai_codex: Option<CodexCredentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anthropic: Option<AnthropicCredentials>,
 }
 
 /// Where a session's credentials would come from. `doctor` reports
@@ -55,6 +73,8 @@ struct StoreFile {
 pub enum CredentialSource {
     /// The dmz store already holds credentials.
     Store,
+    /// An environment variable holds the credential.
+    Env,
     /// The store is empty; the first run imports the Codex CLI login.
     CodexCliImport,
     /// The Codex CLI file exists but does not parse; a session fails
@@ -64,10 +84,11 @@ pub enum CredentialSource {
 
 impl CredentialSource {
     /// One report line for `doctor`. The wording lives here because
-    /// only this adapter names the Codex CLI.
+    /// only this module names the Codex CLI.
     pub fn describe(self) -> &'static str {
         match self {
             CredentialSource::Store => "in the dmz store",
+            CredentialSource::Env => "from the environment",
             CredentialSource::CodexCliImport => "ready to import from the Codex CLI",
             CredentialSource::CodexCliInvalid => "the Codex CLI auth file does not parse",
         }
@@ -77,7 +98,7 @@ impl CredentialSource {
     pub fn usable(self) -> bool {
         matches!(
             self,
-            CredentialSource::Store | CredentialSource::CodexCliImport
+            CredentialSource::Store | CredentialSource::Env | CredentialSource::CodexCliImport
         )
     }
 }
@@ -99,25 +120,24 @@ pub struct AuthStore {
     codex_cli_path: Option<PathBuf>,
     token_url: String,
     creds: Option<CodexCredentials>,
+    anthropic: Option<AnthropicCredentials>,
 }
 
 impl AuthStore {
     /// Open the store at `path`. `codex_cli_path` is the Codex CLI
     /// `auth.json` used for import; pass `None` to turn import off.
     pub fn open(path: PathBuf, codex_cli_path: Option<PathBuf>) -> Result<Self, ProviderError> {
-        let creds = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let file: StoreFile = serde_json::from_str(&text)
-                    .map_err(|e| ProviderError::Auth(format!("bad auth store {path:?}: {e}")))?;
-                file.openai_codex
-            }
-            Err(_) => None,
+        let file = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<StoreFile>(&text)
+                .map_err(|e| ProviderError::Auth(format!("bad auth store {path:?}: {e}")))?,
+            Err(_) => StoreFile::default(),
         };
         Ok(Self {
             path,
             codex_cli_path,
             token_url: DEFAULT_TOKEN_URL.to_string(),
-            creds,
+            creds: file.openai_codex,
+            anthropic: file.anthropic,
         })
     }
 
@@ -141,6 +161,29 @@ impl AuthStore {
 
     pub fn credentials(&self) -> Option<&CodexCredentials> {
         self.creds.as_ref()
+    }
+
+    /// The stored Anthropic API key, when the store holds one.
+    pub fn anthropic_api_key(&self) -> Option<&str> {
+        self.anthropic.as_ref().map(|creds| creds.api_key.as_str())
+    }
+
+    /// Report where an anthropic session would find its key. The
+    /// environment wins over the store; `env_key_set` says whether
+    /// `ANTHROPIC_API_KEY` holds a non-empty value. `None` means the
+    /// session cannot authenticate.
+    pub fn probe_anthropic(&self, env_key_set: bool) -> Option<CredentialProbe> {
+        let source = if env_key_set {
+            CredentialSource::Env
+        } else if self.anthropic.is_some() {
+            CredentialSource::Store
+        } else {
+            return None;
+        };
+        Some(CredentialProbe {
+            source,
+            expires: None,
+        })
     }
 
     /// Return credentials, importing from the Codex CLI on first use.
@@ -291,8 +334,9 @@ impl AuthStore {
 
     fn save(&self) -> Result<(), ProviderError> {
         let file = StoreFile {
-            version: 1,
+            version: STORE_VERSION,
             openai_codex: self.creds.clone(),
+            anthropic: self.anthropic.clone(),
         };
         let text = serde_json::to_string_pretty(&file)
             .map_err(|e| ProviderError::Auth(format!("serialize auth store: {e}")))?;
@@ -504,6 +548,68 @@ mod tests {
             .unwrap()
             .as_secs();
         assert_eq!(seconds, 4_102_444_800);
+    }
+
+    #[test]
+    fn the_anthropic_probe_prefers_the_environment_over_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({"version": 2, "anthropic": {"api_key": "sk-test"}}).to_string(),
+        )
+        .unwrap();
+        let store = AuthStore::open(path, None).unwrap();
+        assert_eq!(store.anthropic_api_key(), Some("sk-test"));
+
+        let probe = store.probe_anthropic(false).unwrap();
+        assert_eq!(probe.source, CredentialSource::Store);
+        let probe = store.probe_anthropic(true).unwrap();
+        assert_eq!(probe.source, CredentialSource::Env);
+
+        let empty = AuthStore::open(dir.path().join("other.json"), None).unwrap();
+        assert!(empty.probe_anthropic(false).is_none());
+        assert_eq!(
+            empty.probe_anthropic(true).unwrap().source,
+            CredentialSource::Env
+        );
+    }
+
+    #[test]
+    fn a_codex_save_preserves_the_anthropic_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({"version": 2, "anthropic": {"api_key": "sk-keep"}}).to_string(),
+        )
+        .unwrap();
+        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
+        let mut store = AuthStore::open(path.clone(), Some(source)).unwrap();
+        store.ensure().unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
+        assert_eq!(saved["openai_codex"]["access_token"], "access-1");
+    }
+
+    #[test]
+    fn a_version_1_file_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 1,
+                "openai_codex": {"access_token": "a", "refresh_token": "r"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let store = AuthStore::open(path, None).unwrap();
+        assert_eq!(store.credentials().unwrap().access_token, "a");
+        assert!(store.anthropic_api_key().is_none());
     }
 
     #[test]

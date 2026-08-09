@@ -1,8 +1,87 @@
-//! Minimal server-sent-events parser.
+//! Minimal server-sent-events parser and the shared stream pump.
 //!
-//! The adapter needs only the `data:` payloads. Event names are not
+//! The adapters need only the `data:` payloads. Event names are not
 //! parsed; the payload's own `type` field is authoritative. The parser
 //! accepts LF and CRLF framing and arbitrary chunk boundaries.
+//!
+//! [`spawn_event_stream`] pumps one HTTP response through a
+//! [`PayloadMapper`] into an [`EventStream`]. Each adapter supplies the
+//! mapper; the reader task, abort handling, and channel plumbing stay
+//! in one place.
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures_core::Stream;
+
+use crate::{EventStream, ProviderError, StreamEvent};
+
+/// Adapter-specific mapping from SSE payloads to neutral events.
+pub(crate) trait PayloadMapper: Send + 'static {
+    /// Map one `data:` payload. Unknown payloads map to nothing.
+    fn map(&mut self, payload: &str) -> Vec<Result<StreamEvent, ProviderError>>;
+
+    /// True once the wire protocol said the response is complete.
+    fn terminal(&self) -> bool;
+
+    /// The error for a stream that ends before the terminal event.
+    fn eof_error(&self) -> ProviderError;
+}
+
+struct ChannelStream(tokio::sync::mpsc::Receiver<Result<StreamEvent, ProviderError>>);
+
+impl Stream for ChannelStream {
+    type Item = Result<StreamEvent, ProviderError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx)
+    }
+}
+
+/// Read the response body on a task and map it into an event stream.
+pub(crate) fn spawn_event_stream(
+    mut response: reqwest::Response,
+    mut mapper: impl PayloadMapper,
+) -> EventStream {
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut parser = SseParser::new();
+        loop {
+            // A dropped receiver means the turn was aborted: stop
+            // reading and release the connection instead of waiting
+            // for the next chunk that may never come.
+            let chunk = tokio::select! {
+                chunk = response.chunk() => chunk,
+                () = tx.closed() => return,
+            };
+            match chunk {
+                Ok(Some(bytes)) => {
+                    for payload in parser.push(&bytes) {
+                        for event in mapper.map(&payload) {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                        if mapper.terminal() {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(ProviderError::Network(error.to_string())))
+                        .await;
+                    return;
+                }
+            }
+        }
+        if !mapper.terminal() {
+            let _ = tx.send(Err(mapper.eof_error())).await;
+        }
+    });
+    Box::pin(ChannelStream(rx))
+}
 
 #[derive(Debug, Default)]
 pub struct SseParser {

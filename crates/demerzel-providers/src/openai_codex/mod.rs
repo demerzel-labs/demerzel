@@ -5,27 +5,26 @@
 //! The backend is not a public API, so the parser ignores unknown
 //! events and fields instead of failing on them.
 
-pub mod auth;
-mod sse;
-
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
-use futures_core::Stream;
 use serde_json::{Value, json};
 
+pub use crate::auth;
+pub use crate::auth::{AuthStore, CodexCredentials, CredentialProbe, CredentialSource};
+use crate::retry::{backoff, retry_after};
+use crate::sse::{PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
-pub use auth::{AuthStore, CodexCredentials, CredentialProbe, CredentialSource};
-use sse::SseParser;
 
 /// Stable adapter id. Sealed payloads carry this id.
 pub const PROVIDER_ID: &str = "openai-codex";
 
 /// Default Codex backend base URL.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
+/// Default model until per-role model routing arrives (M3).
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -153,24 +152,9 @@ impl Provider for OpenAiCodex {
                     }
                 }
             };
-            Ok(spawn_event_stream(response))
+            Ok(spawn_event_stream(response, StreamState::default()))
         })
     }
-}
-
-fn backoff(base: Duration, attempt: u32) -> Duration {
-    base * 2u32.saturating_pow(attempt.saturating_sub(1))
-}
-
-fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    response
-        .headers()
-        .get("retry-after")?
-        .to_str()
-        .ok()?
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
 }
 
 /// Build the Responses API request body from the neutral request.
@@ -257,16 +241,6 @@ fn build_body(request: &Request, reasoning: Option<&Value>) -> Value {
     body
 }
 
-struct ChannelStream(tokio::sync::mpsc::Receiver<Result<StreamEvent, ProviderError>>);
-
-impl Stream for ChannelStream {
-    type Item = Result<StreamEvent, ProviderError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.poll_recv(cx)
-    }
-}
-
 #[derive(Default)]
 struct StreamState {
     saw_tool_call: bool,
@@ -275,50 +249,18 @@ struct StreamState {
     call_ids: HashMap<String, String>,
 }
 
-fn spawn_event_stream(mut response: reqwest::Response) -> EventStream {
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        let mut parser = SseParser::new();
-        let mut state = StreamState::default();
-        loop {
-            // A dropped receiver means the turn was aborted: stop
-            // reading and release the connection instead of waiting
-            // for the next chunk that may never come.
-            let chunk = tokio::select! {
-                chunk = response.chunk() => chunk,
-                () = tx.closed() => return,
-            };
-            match chunk {
-                Ok(Some(bytes)) => {
-                    for payload in parser.push(&bytes) {
-                        for event in map_payload(&payload, &mut state) {
-                            if tx.send(event).await.is_err() {
-                                return;
-                            }
-                        }
-                        if state.terminal {
-                            return;
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = tx
-                        .send(Err(ProviderError::Network(error.to_string())))
-                        .await;
-                    return;
-                }
-            }
-        }
-        if !state.terminal {
-            let _ = tx
-                .send(Err(ProviderError::Protocol(
-                    "stream ended before response.completed".to_string(),
-                )))
-                .await;
-        }
-    });
-    Box::pin(ChannelStream(rx))
+impl PayloadMapper for StreamState {
+    fn map(&mut self, payload: &str) -> Vec<Result<StreamEvent, ProviderError>> {
+        map_payload(payload, self)
+    }
+
+    fn terminal(&self) -> bool {
+        self.terminal
+    }
+
+    fn eof_error(&self) -> ProviderError {
+        ProviderError::Protocol("stream ended before response.completed".to_string())
+    }
 }
 
 /// Map one SSE payload to neutral events. Unknown payload types map to
