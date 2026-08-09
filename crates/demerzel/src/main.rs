@@ -1,6 +1,9 @@
+use std::path::{Path, PathBuf};
+
 use clap::{Parser, Subcommand};
+use demerzel::config::{self, Flags, Origin};
 use demerzel::repl::{self, Renderer};
-use demerzel::{RunConfig, Runtime};
+use demerzel::{RunConfig, Runtime, doctor};
 use demerzel_core::{ApprovalMode, TurnOutcome};
 
 /// Demerzel: a terminal coding agent.
@@ -19,12 +22,16 @@ struct Cli {
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
 
-    /// Model name to request.
-    #[arg(long, env = "DEMERZEL_MODEL")]
+    /// Provider id. DEMERZEL_PROVIDER sets it too.
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Model name to request. DEMERZEL_MODEL sets it too.
+    #[arg(long)]
     model: Option<String>,
 
-    /// Endpoint base URL.
-    #[arg(long, env = "DEMERZEL_BASE_URL")]
+    /// Endpoint base URL. DEMERZEL_BASE_URL sets it too.
+    #[arg(long)]
     base_url: Option<String>,
 
     /// Run the write and execute tools without approval prompts.
@@ -39,38 +46,32 @@ struct Cli {
 /// Reserved subcommand names, so their meaning cannot change later.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Check providers, credentials, and tools. Arrives in M2.
+    /// Check config, credentials, and tools.
     Doctor,
-    /// Log in with the ChatGPT subscription. Arrives in M2.
+    /// Log in with the ChatGPT subscription. Arrives later in M2.
     Login,
 }
 
 impl Cli {
-    /// The approval mode: flags win; else the REPL asks and one-shot
-    /// stays read-only.
-    fn approval(&self, interactive: bool) -> ApprovalMode {
-        if self.auto {
-            ApprovalMode::Auto
-        } else if self.read_only {
-            ApprovalMode::ReadOnly
-        } else if interactive {
-            ApprovalMode::Ask
-        } else {
-            ApprovalMode::ReadOnly
+    /// The flag layer of the config resolution.
+    fn flags(&self) -> Flags {
+        Flags {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            approval: if self.auto {
+                Some(ApprovalMode::Auto)
+            } else if self.read_only {
+                Some(ApprovalMode::ReadOnly)
+            } else {
+                None
+            },
         }
     }
 }
 
 fn main() {
     let cli = Cli::parse();
-    if let Some(command) = &cli.command {
-        let name = match command {
-            Command::Doctor => "doctor",
-            Command::Login => "login",
-        };
-        eprintln!("demerzel: `{name}` arrives in M2");
-        std::process::exit(1);
-    }
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -78,21 +79,28 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let interactive = cli.prompt.is_none();
-    let mut config = RunConfig::new(cwd);
-    config.approval = cli.approval(interactive);
-    config.continue_last = cli.continue_last;
-    if let Some(model) = cli.model.filter(|value| !value.is_empty()) {
-        config.model = model;
+    match &cli.command {
+        Some(Command::Doctor) => std::process::exit(doctor::run(&cwd, &cli.flags())),
+        Some(Command::Login) => {
+            eprintln!("demerzel: `login` arrives later in M2");
+            std::process::exit(1);
+        }
+        None => {}
     }
-    config.base_url = cli.base_url.filter(|value| !value.is_empty());
+    let config = match run_config(&cli, cwd) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("demerzel: {message}");
+            std::process::exit(1);
+        }
+    };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("build the tokio runtime");
 
-    if interactive {
+    if cli.prompt.is_none() {
         if let Err(error) = runtime.block_on(repl::run(&config)) {
             eprintln!("demerzel: {error}");
             std::process::exit(1);
@@ -145,6 +153,58 @@ fn main() {
     }
 }
 
+/// Resolve flags, environment, and config files into the run config.
+fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
+    let locations = config::Locations::locate(&cwd);
+    let user = load_layer(locations.user.as_deref())?;
+    let project = load_layer(Some(&locations.project))?;
+    let settings = config::resolve(
+        &cli.flags(),
+        &|name| std::env::var(name).ok(),
+        project.as_ref(),
+        user.as_ref(),
+    );
+
+    // A cloned repository must not silently redirect requests — and
+    // the credentials on them — to its own endpoint.
+    if settings.base_url.origin == Origin::Project
+        && let Some(url) = &settings.base_url.value
+    {
+        eprintln!("demerzel: the project config file sets base_url = {url}");
+    }
+
+    let interactive = cli.prompt.is_none();
+    let mut config = RunConfig::new(cwd);
+    config.approval = settings.approval_mode(interactive);
+    config.provider = settings.provider.value;
+    config.model = settings.model.value;
+    config.base_url = settings.base_url.value;
+    config.continue_last = cli.continue_last;
+    if settings.history_file.value {
+        config.history_path = demerzel_core::paths::data_dir()
+            .ok()
+            .map(|dir| dir.join("history"));
+    }
+    Ok(config)
+}
+
+/// Load one config layer, printing its unknown-key warnings.
+fn load_layer(path: Option<&Path>) -> Result<Option<config::Layer>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    match config::load(path) {
+        Ok(None) => Ok(None),
+        Ok(Some((layer, warnings))) => {
+            for warning in warnings {
+                eprintln!("demerzel: {}: {warning}", path.display());
+            }
+            Ok(Some(layer))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,17 +214,22 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_invocation_is_the_repl_in_ask_mode() {
+    fn a_bare_invocation_is_the_repl_with_no_approval_flag() {
         let cli = parse(&[]);
         assert!(cli.prompt.is_none());
-        assert_eq!(cli.approval(true), ApprovalMode::Ask);
+        assert_eq!(cli.flags().approval, None);
     }
 
     #[test]
-    fn a_quoted_prompt_is_one_shot_and_read_only_by_default() {
-        let cli = parse(&["explain this error"]);
-        assert_eq!(cli.prompt.as_deref(), Some("explain this error"));
-        assert_eq!(cli.approval(false), ApprovalMode::ReadOnly);
+    fn approval_flags_map_to_modes() {
+        assert_eq!(
+            parse(&["--auto"]).flags().approval,
+            Some(ApprovalMode::Auto)
+        );
+        assert_eq!(
+            parse(&["--read-only"]).flags().approval,
+            Some(ApprovalMode::ReadOnly)
+        );
     }
 
     #[test]
@@ -207,9 +272,19 @@ mod tests {
     }
 
     #[test]
-    fn model_and_base_url_flags_parse() {
-        let cli = parse(&["--model", "gpt-x", "--base-url", "http://localhost:1", "hi"]);
-        assert_eq!(cli.model.as_deref(), Some("gpt-x"));
-        assert_eq!(cli.base_url.as_deref(), Some("http://localhost:1"));
+    fn provider_model_and_base_url_flags_parse() {
+        let cli = parse(&[
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-x",
+            "--base-url",
+            "http://localhost:1",
+            "hi",
+        ]);
+        let flags = cli.flags();
+        assert_eq!(flags.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(flags.model.as_deref(), Some("gpt-x"));
+        assert_eq!(flags.base_url.as_deref(), Some("http://localhost:1"));
     }
 }

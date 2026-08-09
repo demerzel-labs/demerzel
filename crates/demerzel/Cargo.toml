@@ -15,10 +15,12 @@ clap = { workspace = true }
 demerzel-core = { workspace = true }
 demerzel-providers = { workspace = true }
 demerzel-tools = { workspace = true }
-rustyline = { workspace = true }
+humantime = { workspace = true }
+rustyline = { workspace = true, features = ["with-file-history"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+toml = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

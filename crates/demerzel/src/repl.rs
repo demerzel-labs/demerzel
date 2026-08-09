@@ -50,8 +50,9 @@ struct Reader {
 
 impl Reader {
     /// Start the reader thread. Fails when the line editor cannot
-    /// start, instead of exiting silently later.
-    fn spawn() -> std::io::Result<Self> {
+    /// start, instead of exiting silently later. `history` is the
+    /// input-history file; `None` keeps history in memory only.
+    fn spawn(history: Option<std::path::PathBuf>) -> std::io::Result<Self> {
         let (requests, receiver) = std_mpsc::channel::<ReadRequest>();
         let (init_tx, init_rx) = std_mpsc::channel::<Result<(), String>>();
         std::thread::spawn(move || {
@@ -66,9 +67,9 @@ impl Reader {
             };
             let config = rustyline::Config::builder().behavior(behavior).build();
             let mut editor =
-                match rustyline::Editor::<(), rustyline::history::MemHistory>::with_history(
+                match rustyline::Editor::<(), rustyline::history::FileHistory>::with_history(
                     config,
-                    rustyline::history::MemHistory::new(),
+                    rustyline::history::FileHistory::new(),
                 ) {
                     Ok(editor) => {
                         let _ = init_tx.send(Ok(()));
@@ -79,6 +80,14 @@ impl Reader {
                         return;
                     }
                 };
+            // History is best effort: a missing file is the first
+            // run, and a write error must not stop the session.
+            if let Some(path) = &history {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = editor.load_history(path);
+            }
             while let Ok(request) = receiver.recv() {
                 if request.reply.is_closed() {
                     continue;
@@ -93,6 +102,11 @@ impl Reader {
                     && !line.trim().is_empty()
                 {
                     let _ = editor.add_history_entry(line.as_str());
+                    if let Some(path) = &history
+                        && editor.append_history(path).is_err()
+                    {
+                        let _ = editor.save_history(path);
+                    }
                 }
                 // An answer whose asker went away is discarded: a line
                 // meant for a dead approval prompt must never become
@@ -343,7 +357,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // external signal cannot kill the process while the terminal is
     // raw.
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
-    let reader = Reader::spawn()?;
+    let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
     let mode = match runtime.config().approval {
         ApprovalMode::ReadOnly => "read-only",

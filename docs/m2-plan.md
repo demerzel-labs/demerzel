@@ -5,7 +5,8 @@ verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
 ## Status (2026-08-08)
 
-M1 is complete (PR #16). This plan is step 1 of the build order below.
+M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
+config and `doctor`) is in review.
 
 ## Goal
 
@@ -267,7 +268,8 @@ Each step is one PR with its own verify line.
   whether `always` stays name-scoped or gains per-input granularity
   for bash.
 - File-backed history default. The key exists in step 2; decide the
-  default (on or off) after dogfood.
+  default (on or off) after dogfood. Step 2 ships with `on` until
+  then.
 - The REPL's long-term place once the TUI reaches parity. The working
   assumption: `--plain` stays supported as the low-dependency path.
 - Background tasks: revisit the open question at the end of M2 with

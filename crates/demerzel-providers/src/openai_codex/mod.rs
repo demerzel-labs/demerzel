@@ -18,7 +18,7 @@ use futures_core::Stream;
 use serde_json::{Value, json};
 
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
-pub use auth::{AuthStore, CodexCredentials};
+pub use auth::{AuthStore, CodexCredentials, CredentialProbe, CredentialSource};
 use sse::SseParser;
 
 /// Stable adapter id. Sealed payloads carry this id.

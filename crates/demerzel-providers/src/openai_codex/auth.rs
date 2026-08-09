@@ -25,6 +25,10 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Default token refresh endpoint.
 pub const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
+/// The message for a run with no credentials. `doctor` prints it too.
+pub const NO_CREDENTIALS_HELP: &str =
+    "no credentials: log in with the Codex CLI (`codex login`); `dmz login` arrives in M2";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodexCredentials {
     pub access_token: String,
@@ -43,6 +47,25 @@ struct StoreFile {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     openai_codex: Option<CodexCredentials>,
+}
+
+/// Where a session's credentials would come from. `doctor` reports
+/// it; [`AuthStore::probe`] fills it without writing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// The dmz store already holds credentials.
+    Store,
+    /// The store is empty; the first run imports the Codex CLI login.
+    CodexCliImport,
+}
+
+/// The result of a read-only credential check.
+#[derive(Debug)]
+pub struct CredentialProbe {
+    pub source: CredentialSource,
+    /// The `exp` claim of the access token, when the token parses as
+    /// a JWT.
+    pub expires: Option<SystemTime>,
 }
 
 /// The dmz credential store, one JSON file with mode 0600.
@@ -101,12 +124,30 @@ impl AuthStore {
         if self.creds.is_none() {
             self.import_from_codex_cli()?;
         }
-        self.creds.as_ref().ok_or_else(|| {
-            ProviderError::Auth(
-                "no credentials: log in with the Codex CLI (`codex login`); \
-                 `dmz login` arrives in M2"
-                    .to_string(),
-            )
+        self.creds
+            .as_ref()
+            .ok_or_else(|| ProviderError::Auth(NO_CREDENTIALS_HELP.to_string()))
+    }
+
+    /// Report where [`AuthStore::ensure`] would find credentials.
+    /// Reads only; it never writes the store. `None` means a session
+    /// cannot authenticate.
+    pub fn probe(&self) -> Option<CredentialProbe> {
+        if let Some(creds) = &self.creds {
+            return Some(CredentialProbe {
+                source: CredentialSource::Store,
+                expires: jwt_expiry(&creds.access_token),
+            });
+        }
+        let source = self.codex_cli_path.as_ref()?;
+        let text = std::fs::read_to_string(source).ok()?;
+        let file: Value = serde_json::from_str(&text).ok()?;
+        let access = file["tokens"]["access_token"].as_str()?;
+        // The import needs both tokens, so the probe does too.
+        file["tokens"]["refresh_token"].as_str()?;
+        Some(CredentialProbe {
+            source: CredentialSource::CodexCliImport,
+            expires: jwt_expiry(access),
         })
     }
 
@@ -242,6 +283,17 @@ fn parse_rfc3339(stamp: &str) -> Option<SystemTime> {
     humantime::parse_rfc3339(stamp).ok()
 }
 
+/// Read the `exp` claim out of a JWT.
+fn jwt_expiry(jwt: &str) -> Option<SystemTime> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let seconds = claims["exp"].as_u64()?;
+    Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+}
+
 /// Read the ChatGPT account id claim out of an id-token JWT.
 fn jwt_account_id(jwt: &str) -> Option<String> {
     let payload = jwt.split('.').nth(1)?;
@@ -337,6 +389,41 @@ mod tests {
 
         store.creds.as_mut().unwrap().last_refresh = Some("2026-08-03T00:00:00Z".into());
         assert!(!store.codex_cli_file_is_newer());
+    }
+
+    #[test]
+    fn probe_reports_the_source_without_writing_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
+        let store_path = dir.path().join("auth.json");
+
+        // Import available: the probe sees it and writes nothing.
+        let store = AuthStore::open(store_path.clone(), Some(source)).unwrap();
+        let probe = store.probe().unwrap();
+        assert_eq!(probe.source, CredentialSource::CodexCliImport);
+        assert!(!store_path.exists());
+
+        // Filled store: the probe reads it directly.
+        let mut store = AuthStore::open(store_path.clone(), None).unwrap();
+        store.creds = Some(CodexCredentials {
+            access_token: fake_jwt(json!({"exp": 4102444800u64})),
+            refresh_token: "refresh".into(),
+            id_token: None,
+            account_id: None,
+            last_refresh: None,
+        });
+        let probe = store.probe().unwrap();
+        assert_eq!(probe.source, CredentialSource::Store);
+        let expires = probe.expires.unwrap();
+        let seconds = expires
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(seconds, 4102444800);
+
+        // Neither: no credentials.
+        let empty = AuthStore::open(dir.path().join("other.json"), None).unwrap();
+        assert!(empty.probe().is_none());
     }
 
     #[test]

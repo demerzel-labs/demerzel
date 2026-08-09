@@ -4,6 +4,8 @@
 //! [`Runtime`] holds the long-lived pieces; the REPL and one-shot mode
 //! build engines over it.
 
+pub mod config;
+pub mod doctor;
 pub mod repl;
 
 use std::path::PathBuf;
@@ -38,6 +40,8 @@ pub struct AuthPaths {
 pub struct RunConfig {
     /// The project directory tools and sessions are scoped to.
     pub project_dir: PathBuf,
+    /// The active provider id. M2 builds ship `openai-codex`.
+    pub provider: String,
     pub model: String,
     pub approval: ApprovalMode,
     /// Continue the latest session in this project.
@@ -48,6 +52,9 @@ pub struct RunConfig {
     pub base_url: Option<String>,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
+    /// Input-history file for the REPL; `None` keeps history in
+    /// memory only.
+    pub history_path: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -56,12 +63,14 @@ impl RunConfig {
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,
+            provider: config::DEFAULT_PROVIDER.to_string(),
             model: DEFAULT_MODEL.to_string(),
             approval: ApprovalMode::ReadOnly,
             continue_last: false,
             data_root: None,
             base_url: None,
             auth: None,
+            history_path: None,
         }
     }
 }
@@ -72,6 +81,8 @@ impl RunConfig {
 pub enum RunError {
     #[error("{0}")]
     Auth(ProviderError),
+    #[error("{0}")]
+    Config(String),
     #[error(transparent)]
     Engine(#[from] EngineError),
     #[error("{0}")]
@@ -94,6 +105,13 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(config: RunConfig) -> Result<Self, RunError> {
+        if config.provider != config::DEFAULT_PROVIDER {
+            return Err(RunError::Config(format!(
+                "unknown provider `{}` — this build has one provider: `{}`",
+                config.provider,
+                config::DEFAULT_PROVIDER
+            )));
+        }
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
             None => SessionStore::open_default()?,
