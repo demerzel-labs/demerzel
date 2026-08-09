@@ -285,15 +285,20 @@ Each step is one PR with its own verify line.
      model, the active provider's default applies.
   2. A top-level `model` key applies when its layer names the active
      provider or names no provider. When its layer names a different
-     provider, the resolver skips the key. So a provider switch cannot
-     pair one provider's model id with the other adapter. Pin models
-     in `[providers.<id>]` tables to scope them explicitly.
+     provider, the resolver skips the key: an explicit pair stays
+     paired. A bare `model` key follows the active provider by
+     design, and the `--model` flag and `DEMERZEL_MODEL` always win;
+     a mismatch there fails at the API with a clear unknown-model
+     error. Pin models in `[providers.<id>]` tables to scope them
+     explicitly.
 - Trust-rule edge (step-2 review) — revisited in step 3, kept as is.
   A project `provider` key picks among the endpoints the user file
   defines. The user wrote those endpoints and stored those
   credentials, so the pick is the same class of choice as a model
   name. Endpoints and credentials still come only from flags, the
-  environment, and the user file.
+  environment, and the user file. The `--base-url` flag and
+  `DEMERZEL_BASE_URL` stay provider-agnostic and follow a provider
+  switch; they are the user's own input, outside the trust rule.
 - Per-input approval grants (deferred from M1). Decide in step 6
   whether `always` stays name-scoped or gains per-input granularity
   for bash.
