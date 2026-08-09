@@ -18,3 +18,15 @@ pub(crate) fn retry_after(response: &reqwest::Response) -> Option<Duration> {
         .ok()
         .map(Duration::from_secs)
 }
+
+/// The wait before the next attempt: the server's `retry-after` when
+/// it sent one, else exponential backoff. The cap keeps a bad header
+/// from parking a turn for hours; the sleep stays abortable either
+/// way.
+pub(crate) fn retry_delay(response: &reqwest::Response, base: Duration, attempt: u32) -> Duration {
+    const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+    match retry_after(response) {
+        Some(delay) => delay.min(MAX_RETRY_AFTER),
+        None => backoff(base, attempt),
+    }
+}

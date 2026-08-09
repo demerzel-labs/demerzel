@@ -10,7 +10,8 @@ use demerzel_core::{
     Session, SessionStore, TurnOutcome, replay,
 };
 use demerzel_mock::{MockResponse, MockServer};
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
+use demerzel_providers::auth::AuthStore;
+use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
 use demerzel_tools::{Registry, file_tag};
 use serde_json::{Value, json};
 
@@ -418,13 +419,12 @@ async fn one_shot_dispatches_to_the_anthropic_provider() {
     assert_eq!(*text.lock().unwrap(), "claude here");
     let received = mock.received();
     assert_eq!(received[0].path, "/v1/messages");
-    // The environment wins over the store when a developer machine
-    // exports the variable; both prove the credential order.
-    let expected = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "sk-store-key".to_string());
-    assert_eq!(received[0].api_key.as_deref(), Some(expected.as_str()));
+    // The credential order (environment over store) is covered by
+    // `credential_order_prefers_the_environment_over_the_store` in
+    // tests/doctor.rs, through the real binary with a controlled
+    // environment. In process, the ambient environment can supply the
+    // key, so this test only asserts a key was sent.
+    assert!(received[0].api_key.is_some());
     assert_eq!(received[0].body["model"], "claude-test");
     // The session records the anthropic provider id.
     let store = SessionStore::at(data.path().join("store"));

@@ -393,6 +393,73 @@ async fn an_empty_tool_input_parses_as_an_empty_object() {
 }
 
 #[tokio::test]
+async fn a_refusal_does_not_end_the_turn_as_completed() {
+    let mut events = vec![fixtures::message_start()];
+    events.extend(fixtures::message_end("refusal"));
+    let mock = MockServer::start(vec![MockResponse::stream(events)], vec![]).await;
+    let provider = provider_for(&mock);
+
+    let stream = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+    let events: Vec<StreamEvent> = collect(stream)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Done(StopReason::Refusal))
+    ));
+}
+
+#[tokio::test]
+async fn a_thinking_block_without_a_signature_does_not_seal() {
+    let events = vec![
+        fixtures::message_start(),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "plan"},
+        }),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 3},
+        }),
+        json!({"type": "message_stop"}),
+    ];
+    let mock = MockServer::start(vec![MockResponse::stream(events)], vec![]).await;
+    let provider = provider_for(&mock);
+
+    let stream = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+    let events: Vec<StreamEvent> = collect(stream)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+
+    // A sealed block without a signature would poison the session:
+    // the API rejects it on replay. The summary alone comes back.
+    let StreamEvent::ReasoningDone { summary, sealed } = &events[1] else {
+        panic!("expected ReasoningDone, got {events:?}");
+    };
+    assert_eq!(summary, "plan");
+    assert!(sealed.is_none());
+}
+
+#[tokio::test]
 async fn retries_a_server_error_with_backoff() {
     let mock = MockServer::start(
         vec![MockResponse::error(529), fixtures::text_turn("ok")],

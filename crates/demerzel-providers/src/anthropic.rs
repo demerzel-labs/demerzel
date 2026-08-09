@@ -12,7 +12,7 @@ use std::time::Duration;
 use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
-use crate::retry::{backoff, retry_after};
+use crate::retry::{backoff, retry_after, retry_delay};
 use crate::sse::{PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -141,7 +141,8 @@ impl Provider for Anthropic {
                                     ProviderError::Server(format!("status {status}"))
                                 });
                             }
-                            tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                            let delay = retry_delay(&response, self.config.base_delay, attempt);
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
                         let text = response.text().await.unwrap_or_default();
@@ -185,7 +186,13 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
                     .expect("built here")
                     .extend(blocks);
             }
-            _ => messages.push(json!({"role": role, "content": blocks})),
+            _ => {
+                // Move the blocks in; `json!` would deep-copy them.
+                let mut message = serde_json::Map::with_capacity(2);
+                message.insert("role".to_string(), Value::String(role.to_string()));
+                message.insert("content".to_string(), Value::Array(blocks));
+                messages.push(Value::Object(message));
+            }
         }
     }
     if let Some(last) = messages
@@ -354,7 +361,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                         index,
                         Block::Thinking {
                             thinking: block["thinking"].as_str().unwrap_or("").to_string(),
-                            signature: String::new(),
+                            signature: block["signature"].as_str().unwrap_or("").to_string(),
                         },
                     );
                     Vec::new()
@@ -389,18 +396,28 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                 return Vec::new();
             };
             let delta = &value["delta"];
+            // Deltas apply only to a block the adapter tracks; a delta
+            // on an unknown block type maps to nothing, like the block
+            // itself.
             match delta["type"].as_str().unwrap_or("") {
-                "text_delta" => delta["text"]
-                    .as_str()
-                    .map(|text| vec![Ok(StreamEvent::TextDelta(text.to_string()))])
-                    .unwrap_or_default(),
+                "text_delta" => {
+                    let Some(Block::Text) = state.blocks.get(&index) else {
+                        return Vec::new();
+                    };
+                    delta["text"]
+                        .as_str()
+                        .map(|text| vec![Ok(StreamEvent::TextDelta(text.to_string()))])
+                        .unwrap_or_default()
+                }
                 "thinking_delta" => {
+                    let Some(Block::Thinking { thinking, .. }) = state.blocks.get_mut(&index)
+                    else {
+                        return Vec::new();
+                    };
                     let Some(fragment) = delta["thinking"].as_str() else {
                         return Vec::new();
                     };
-                    if let Some(Block::Thinking { thinking, .. }) = state.blocks.get_mut(&index) {
-                        thinking.push_str(fragment);
-                    }
+                    thinking.push_str(fragment);
                     vec![Ok(StreamEvent::ReasoningDelta(fragment.to_string()))]
                 }
                 "signature_delta" => {
@@ -445,17 +462,22 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                     thinking,
                     signature,
                 }) => {
-                    let data = json!({
-                        "type": "thinking",
-                        "thinking": thinking,
-                        "signature": signature,
+                    // A block without a signature must not seal: the
+                    // API rejects a replayed thinking block with a
+                    // missing signature, and a sealed one would sit in
+                    // the session file and fail every later turn. The
+                    // summary still reaches the user.
+                    let sealed = (!signature.is_empty()).then(|| SealedPayload {
+                        provider: PROVIDER_ID.to_string(),
+                        data: json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        }),
                     });
                     vec![Ok(StreamEvent::ReasoningDone {
                         summary: thinking,
-                        sealed: Some(SealedPayload {
-                            provider: PROVIDER_ID.to_string(),
-                            data,
-                        }),
+                        sealed,
                     })]
                 }
                 Some(Block::Redacted { data }) => vec![Ok(StreamEvent::ReasoningDone {
@@ -472,9 +494,13 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             if let Some(stop) = value["delta"]["stop_reason"].as_str() {
                 state.stop = Some(match stop {
                     "tool_use" => StopReason::ToolUse,
-                    "max_tokens" => StopReason::MaxTokens,
-                    // `end_turn`, `stop_sequence`, `refusal`, and any
-                    // future value end the turn.
+                    // The context window is a token limit too; both
+                    // tell the user the turn ran out of room.
+                    "max_tokens" | "model_context_window_exceeded" => StopReason::MaxTokens,
+                    "refusal" => StopReason::Refusal,
+                    // `end_turn`, `stop_sequence`, and any future value
+                    // end the turn. `pause_turn` lands here too: it
+                    // needs server-side tools, which M2 does not send.
                     _ => StopReason::EndTurn,
                 });
             }

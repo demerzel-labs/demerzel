@@ -11,9 +11,8 @@ use std::time::Duration;
 use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
-pub use crate::auth;
-pub use crate::auth::{AuthStore, CodexCredentials, CredentialProbe, CredentialSource};
-use crate::retry::{backoff, retry_after};
+use crate::auth::AuthStore;
+use crate::retry::{backoff, retry_after, retry_delay};
 use crate::sse::{PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -142,7 +141,8 @@ impl Provider for OpenAiCodex {
                                     ProviderError::Server(format!("status {status}"))
                                 });
                             }
-                            tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                            let delay = retry_delay(&response, self.config.base_delay, attempt);
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
                         let text = response.text().await.unwrap_or_default();

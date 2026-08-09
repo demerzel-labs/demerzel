@@ -86,6 +86,10 @@ pub(crate) fn spawn_event_stream(
 #[derive(Debug, Default)]
 pub struct SseParser {
     buf: Vec<u8>,
+    /// No complete record delimiter ends before this index. The next
+    /// scan starts here, so total parsing cost stays linear in bytes
+    /// received instead of rescanning the buffer per record.
+    scan_from: usize,
 }
 
 impl SseParser {
@@ -98,20 +102,32 @@ impl SseParser {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some((record_end, delim_len)) = find_record_end(&self.buf) {
-            let record: Vec<u8> = self.buf.drain(..record_end + delim_len).collect();
-            if let Some(data) = parse_record(&record[..record_end]) {
+        let mut start = 0;
+        let mut scan = self.scan_from;
+        while let Some((record_end, delim_len)) = find_record_end(&self.buf[start..], scan - start)
+        {
+            let record_end = start + record_end;
+            if let Some(data) = parse_record(&self.buf[start..record_end]) {
                 out.push(data);
             }
+            start = record_end + delim_len;
+            scan = start;
         }
+        // Keep the unconsumed tail in one drain. The next scan backs
+        // off three bytes: a delimiter can straddle the chunk
+        // boundary, and its longest form is four bytes.
+        self.buf.drain(..start);
+        self.scan_from = self.buf.len().saturating_sub(3);
         out
     }
 }
 
-/// Find the earliest record delimiter: `\n\n` or `\r\n\r\n`.
-fn find_record_end(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = find_subslice(buf, b"\n\n");
-    let crlf = find_subslice(buf, b"\r\n\r\n");
+/// Find the earliest record delimiter: `\n\n` or `\r\n\r\n`. The
+/// caller guarantees no delimiter starts before `from`, so the search
+/// skips that prefix.
+fn find_record_end(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    let lf = find_subslice(&buf[from..], b"\n\n").map(|at| at + from);
+    let crlf = find_subslice(&buf[from..], b"\r\n\r\n").map(|at| at + from);
     match (lf, crlf) {
         (Some(a), Some(b)) if b < a => Some((b, 4)),
         (Some(a), _) => Some((a, 2)),
@@ -173,5 +189,30 @@ mod tests {
     fn ignores_records_without_data() {
         let mut parser = SseParser::new();
         assert!(parser.push(b": keep-alive\n\n").is_empty());
+    }
+
+    #[test]
+    fn a_delimiter_split_across_chunks_still_ends_the_record() {
+        // Every split point of the four-byte CRLF delimiter.
+        for split in 1..4 {
+            let full = b"data: x\r\n\r\ndata: y\r\n\r\n".to_vec();
+            let cut = 7 + split;
+            let mut parser = SseParser::new();
+            assert!(parser.push(&full[..cut]).is_empty(), "split {split}");
+            assert_eq!(parser.push(&full[cut..]), vec!["x", "y"], "split {split}");
+        }
+    }
+
+    #[test]
+    fn many_records_in_one_chunk_parse_in_order() {
+        let mut chunk = Vec::new();
+        for index in 0..500 {
+            chunk.extend_from_slice(format!("data: {index}\n\n").as_bytes());
+        }
+        let mut parser = SseParser::new();
+        let out = parser.push(&chunk);
+        assert_eq!(out.len(), 500);
+        assert_eq!(out[0], "0");
+        assert_eq!(out[499], "499");
     }
 }
