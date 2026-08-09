@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use demerzel_core::{ApprovalMode, SessionStore};
-use demerzel_providers::openai_codex::AuthStore;
-use demerzel_providers::openai_codex::auth::NO_CREDENTIALS_HELP;
+use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP};
+use demerzel_providers::{anthropic, openai_codex};
 
 use crate::config::{self, Flags, Layer, Locations, Origin, mode_name};
 
@@ -65,17 +65,17 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         .as_deref()
         .unwrap_or("provider default");
     print_setting(out, "base_url", base_url, settings.base_url.origin)?;
-    if settings.provider.value != config::DEFAULT_PROVIDER {
+    if !demerzel_providers::PROVIDER_IDS.contains(&settings.provider.value.as_str()) {
         problems += 1;
         writeln!(
             out,
-            "  problem: provider `{}` is not in this build; `{}` is",
+            "  problem: provider `{}` is not in this build; the build has: {}",
             settings.provider.value,
-            config::DEFAULT_PROVIDER
+            demerzel_providers::PROVIDER_IDS.join(", ")
         )?;
     }
 
-    report_credentials(&mut problems, out)?;
+    report_credentials(&settings.provider.value, &mut problems, out)?;
     // A read-only session never writes the project root, so a
     // non-writable root is only a note there.
     let read_only = settings.approval.value == Some(ApprovalMode::ReadOnly);
@@ -151,7 +151,14 @@ fn report_file(
     }
 }
 
-fn report_credentials(problems: &mut u32, out: &mut dyn Write) -> std::io::Result<()> {
+/// Report every provider's credentials. Missing credentials count as
+/// a problem only for the active provider: the other provider's state
+/// is information, not a blocker.
+fn report_credentials(
+    active_provider: &str,
+    problems: &mut u32,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
     writeln!(out, "credentials")?;
     let store = match AuthStore::open_default() {
         Ok(store) => store,
@@ -161,6 +168,8 @@ fn report_credentials(problems: &mut u32, out: &mut dyn Write) -> std::io::Resul
             return Ok(());
         }
     };
+
+    let codex_active = active_provider == openai_codex::PROVIDER_ID;
     match store.probe() {
         Some(probe) if probe.source.usable() => {
             let expiry = match probe.expires {
@@ -175,13 +184,40 @@ fn report_credentials(problems: &mut u32, out: &mut dyn Write) -> std::io::Resul
             };
             writeln!(out, "  openai-codex: {}{expiry}", probe.source.describe())?;
         }
-        Some(probe) => {
+        Some(probe) if codex_active => {
             *problems += 1;
             writeln!(out, "  problem: openai-codex: {}", probe.source.describe())?;
         }
+        Some(probe) => {
+            writeln!(out, "  openai-codex: {}", probe.source.describe())?;
+        }
         None => {
-            *problems += 1;
+            if codex_active {
+                *problems += 1;
+            }
             writeln!(out, "  openai-codex: none — {NO_CREDENTIALS_HELP}")?;
+        }
+    }
+
+    let env_key = std::env::var(anthropic::ENV_API_KEY).ok();
+    match store.probe_anthropic(env_key.as_deref()) {
+        Some(probe) => {
+            let detail = if probe.source == CredentialSource::Env {
+                format!(" ({})", anthropic::ENV_API_KEY)
+            } else {
+                String::new()
+            };
+            writeln!(out, "  anthropic: {}{detail}", probe.source.describe())?;
+        }
+        None => {
+            if active_provider == anthropic::PROVIDER_ID {
+                *problems += 1;
+            }
+            writeln!(
+                out,
+                "  anthropic: none — {}",
+                anthropic::NO_CREDENTIALS_HELP
+            )?;
         }
     }
     Ok(())

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Message, Role, SealedPayload, StopReason};
 use demerzel_mock::{MockResponse, MockServer};
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
+use demerzel_providers::auth::AuthStore;
+use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
 use demerzel_providers::{
     EventStream, Provider, ProviderError, Request, StreamEvent, ToolDefinition,
 };

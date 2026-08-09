@@ -6,7 +6,11 @@ verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 ## Status (2026-08-08)
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
-config and `doctor`) is in review.
+config and `doctor`, PR #18) and the platform statement (PR #19) are
+merged. Step 3 (the `anthropic` adapter) is in review. Live manual
+sessions from the step-3 build meet exit criterion 2: a multi-turn
+tool session, a Ctrl-C abort, and a `--continue` resume that replayed
+the full history all completed against the Anthropic API.
 
 ## Goal
 
@@ -267,23 +271,44 @@ Each step is one PR with its own verify line.
    scripted PTY session against the mock; boot and idle benches stay
    inside the gates.*
 6. **TUI interaction.** Edit previews, approval prompts, slash-command
-   registry shared with the REPL, status bar. *Verify: a real dogfood
-   session in this repo through the TUI; Ctrl-C at every point.*
+   registry shared with the REPL, status bar. The status bar names a
+   resumed session at boot; the REPL announces it only at the first
+   prompt. *Verify: a real dogfood session in this repo through the
+   TUI; Ctrl-C at every point.*
 7. **Measurement pass.** Cache-hit rate on replayed sessions for both
    providers, render-throughput bench, results committed. *Verify: raw
    JSON in `bench/results/`; exit criteria checked off.*
 
 ## Decisions to make during M2
 
-- Anthropic default model. Placeholder above is `claude-sonnet-5`;
-  fix the exact model id in step 3 from the live API.
-- Cross-provider model keys (step-2 review). A top-level `model`
-  names one provider's model id, so a provider switch can pair it
-  with the wrong adapter. Decide the rule in step 3, and give each
-  provider its own default model there.
+- Anthropic default model — decided in step 3. The live `/v1/models`
+  list confirms `claude-sonnet-5` as a served id; it is the adapter's
+  default. Adaptive thinking with summarized display is the default
+  request shape.
+- Cross-provider model keys — decided in step 3. Two rules:
+  1. Each adapter exports its own default model. When no layer sets a
+     model, the active provider's default applies.
+  2. A top-level `model` key applies when its layer names the active
+     provider or names no provider. When its layer names a different
+     provider, the resolver skips the key: an explicit pair stays
+     paired. A bare `model` key follows the active provider by
+     design, and the `--model` flag and `DEMERZEL_MODEL` always win;
+     a mismatch there fails at the API with a clear unknown-model
+     error. Pin models in `[providers.<id>]` tables to scope them
+     explicitly.
+- Trust-rule edge (step-2 review) — revisited in step 3, kept as is.
+  A project `provider` key picks among the endpoints the user file
+  defines. The user wrote those endpoints and stored those
+  credentials, so the pick is the same class of choice as a model
+  name. Endpoints and credentials still come only from flags, the
+  environment, and the user file. The `--base-url` flag and
+  `DEMERZEL_BASE_URL` stay provider-agnostic and follow a provider
+  switch; they are the user's own input, outside the trust rule.
 - Per-input approval grants (deferred from M1). Decide in step 6
   whether `always` stays name-scoped or gains per-input granularity
-  for bash.
+  for bash. A step-3 dogfood review flagged the name-scoped grant as
+  the largest injection surface: one `always` on bash approves every
+  later bash command in the session.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

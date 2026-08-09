@@ -448,10 +448,15 @@ async fn run_turn(engine: &mut Engine<'_>, text: String, reader: &Reader, sigint
         Some(Ok(TurnOutcome::Completed)) => {}
         Some(Ok(TurnOutcome::Aborted)) => eprintln!("[turn stopped]"),
         Some(Ok(TurnOutcome::MaxTokens)) => {
-            eprintln!("demerzel: the model hit the output-token limit");
+            eprintln!(
+                "demerzel: the model hit a token limit — the output cap or the context window"
+            );
         }
         Some(Ok(TurnOutcome::CallLimit)) => {
             eprintln!("demerzel: the turn hit the model-call limit");
+        }
+        Some(Ok(TurnOutcome::Refused)) => {
+            eprintln!("demerzel: the model refused the request");
         }
         Some(Ok(_)) => {}
         Some(Err(error)) => eprintln!("demerzel: {error}"),

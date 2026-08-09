@@ -8,7 +8,8 @@
 use std::future::poll_fn;
 
 use demerzel_core::{ContentBlock, Message, Role};
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
+use demerzel_providers::auth::AuthStore;
+use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
 use demerzel_providers::{Provider, Request, StreamEvent};
 use demerzel_tools::Registry;
 

@@ -1,10 +1,13 @@
-//! Mock Codex endpoint for hermetic tests and Layer-2 benchmarks.
+//! Mock model endpoint for hermetic tests and Layer-2 benchmarks.
 //!
-//! The server implements `POST /responses` and replays a scripted list of
-//! responses in request order. It also implements `POST /oauth/token` for
-//! the credential-refresh path. It records every request so tests can
-//! assert on serialization and headers. Never part of the shipped binary.
+//! The server implements `POST /responses` (Codex) and
+//! `POST /v1/messages` (Anthropic); both replay one scripted list of
+//! responses in request order. It also implements `POST /oauth/token`
+//! for the credential-refresh path. It records every request so tests
+//! can assert on serialization and headers. Never part of the shipped
+//! binary.
 
+pub mod anthropic;
 pub mod codex;
 
 use std::collections::VecDeque;
@@ -38,13 +41,15 @@ impl SseEvent {
     }
 }
 
-/// One scripted reply for `POST /responses`.
+/// One scripted reply for the model routes.
 #[derive(Debug, Clone)]
 pub struct MockResponse {
     pub status: u16,
     pub events: Vec<SseEvent>,
     /// Send the events, then hold the connection open forever.
     pub stall: bool,
+    /// A `retry-after` header value, in seconds.
+    pub retry_after: Option<u64>,
 }
 
 impl MockResponse {
@@ -54,6 +59,7 @@ impl MockResponse {
             status: 200,
             events: events.into_iter().map(SseEvent::new).collect(),
             stall: false,
+            retry_after: None,
         }
     }
 
@@ -72,6 +78,15 @@ impl MockResponse {
             status,
             events: Vec::new(),
             stall: false,
+            retry_after: None,
+        }
+    }
+
+    /// An error reply that carries a `retry-after` header.
+    pub fn error_with_retry_after(status: u16, seconds: u64) -> Self {
+        Self {
+            retry_after: Some(seconds),
+            ..Self::error(status)
         }
     }
 }
@@ -96,6 +111,8 @@ pub struct Received {
     pub path: String,
     pub authorization: Option<String>,
     pub account_id: Option<String>,
+    pub api_key: Option<String>,
+    pub anthropic_version: Option<String>,
     pub body: Value,
 }
 
@@ -143,6 +160,7 @@ impl MockServer {
         });
         let app = Router::new()
             .route("/responses", post(handle_responses))
+            .route("/v1/messages", post(handle_messages))
             .route("/oauth/token", post(handle_token))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -183,6 +201,8 @@ fn record(state: &ServerState, path: &str, headers: &HeaderMap, body: Value) {
         path: path.to_string(),
         authorization: header("authorization"),
         account_id: header("chatgpt-account-id"),
+        api_key: header("x-api-key"),
+        anthropic_version: header("anthropic-version"),
         body,
     });
 }
@@ -192,9 +212,22 @@ async fn handle_responses(
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    scripted_reply(&state, "/responses", &headers, body)
+}
+
+async fn handle_messages(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    scripted_reply(&state, "/v1/messages", &headers, body)
+}
+
+/// Replay the next scripted reply, whichever model route asked.
+fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: String) -> Response {
     if !state.cycle {
         let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        record(&state, "/responses", &headers, body);
+        record(state, path, headers, body);
     }
     let next = {
         let mut responses = state.responses.lock().unwrap();
@@ -212,11 +245,18 @@ async fn handle_responses(
     if reply.status != 200 {
         let status =
             StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        return (
+        let mut response = (
             status,
             json!({"error": {"message": "scripted error"}}).to_string(),
         )
             .into_response();
+        if let Some(seconds) = reply.retry_after {
+            response.headers_mut().insert(
+                "retry-after",
+                seconds.to_string().parse().expect("digits are a header"),
+            );
+        }
+        return response;
     }
     let mut sse = String::new();
     for event in &reply.events {

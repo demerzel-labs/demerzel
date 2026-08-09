@@ -10,7 +10,8 @@ use demerzel_core::{
     Session, SessionStore, TurnOutcome, replay,
 };
 use demerzel_mock::{MockResponse, MockServer};
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
+use demerzel_providers::auth::AuthStore;
+use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
 use demerzel_tools::{Registry, file_tag};
 use serde_json::{Value, json};
 
@@ -377,6 +378,59 @@ async fn one_shot_read_only_drops_write_tools_and_streams_text() {
     // The session landed under the injected data root.
     let store = SessionStore::at(bed.data.path().join("store"));
     assert!(store.latest(bed.project.path()).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn one_shot_dispatches_to_the_anthropic_provider() {
+    let mock = MockServer::start(
+        vec![demerzel_mock::anthropic::text_turn("claude here")],
+        Vec::new(),
+    )
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    // The key sits in the store; nothing else writes that file.
+    let store_path = data.path().join("auth.json");
+    std::fs::write(
+        &store_path,
+        json!({"version": 2, "anthropic": {"api_key": "sk-store-key"}}).to_string(),
+    )
+    .unwrap();
+
+    let mut config = RunConfig::new(project.path().to_path_buf());
+    config.provider = "anthropic".into();
+    config.model = "claude-test".into();
+    config.data_root = Some(data.path().join("store"));
+    config.base_url = Some(mock.url());
+    config.auth = Some(AuthPaths {
+        store: store_path,
+        codex_cli: None,
+    });
+
+    let text = Mutex::new(String::new());
+    let sink = |event: EngineEvent<'_>| {
+        if let EngineEvent::TextDelta(delta) = event {
+            text.lock().unwrap().push_str(delta);
+        }
+    };
+    let outcome = run_one_shot(&config, "hello".into(), &sink).await.unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(*text.lock().unwrap(), "claude here");
+    let received = mock.received();
+    assert_eq!(received[0].path, "/v1/messages");
+    // The credential order (environment over store) is covered by
+    // `credential_order_prefers_the_environment_over_the_store` in
+    // tests/doctor.rs, through the real binary with a controlled
+    // environment. In process, the ambient environment can supply the
+    // key, so this test only asserts a key was sent.
+    assert!(received[0].api_key.is_some());
+    assert_eq!(received[0].body["model"], "claude-test");
+    // The session records the anthropic provider id.
+    let store = SessionStore::at(data.path().join("store"));
+    let path = store.latest(project.path()).unwrap().unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains(r#""provider":"anthropic""#), "{raw}");
 }
 
 #[tokio::test]

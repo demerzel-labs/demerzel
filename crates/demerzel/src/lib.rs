@@ -15,11 +15,10 @@ use demerzel_core::{
     ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
 };
 use demerzel_providers::Provider;
-use demerzel_providers::openai_codex::{AuthStore, CodexConfig, OpenAiCodex};
+use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
+use demerzel_providers::auth::AuthStore;
+use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
-
-/// Default model until per-role model routing arrives (M2 config).
-pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// First line the REPL prints. The PTY boot probe waits for it.
 pub const READY_MARKER: &str = "demerzel ready";
@@ -40,7 +39,8 @@ pub struct AuthPaths {
 pub struct RunConfig {
     /// The project directory tools and sessions are scoped to.
     pub project_dir: PathBuf,
-    /// The active provider id. M2 builds ship `openai-codex`.
+    /// The active provider id. M2 builds ship `openai-codex` and
+    /// `anthropic`.
     pub provider: String,
     pub model: String,
     pub approval: ApprovalMode,
@@ -64,7 +64,7 @@ impl RunConfig {
         Self {
             project_dir,
             provider: config::DEFAULT_PROVIDER.to_string(),
-            model: DEFAULT_MODEL.to_string(),
+            model: openai_codex::DEFAULT_MODEL.to_string(),
             approval: ApprovalMode::ReadOnly,
             continue_last: false,
             data_root: None,
@@ -94,7 +94,7 @@ pub enum RunError {
 pub struct Runtime {
     config: RunConfig,
     engine_config: EngineConfig,
-    provider: OpenAiCodex,
+    provider: Box<dyn Provider>,
     /// The full tool set, and the read-only subset. The engine picks
     /// one per session, so a mode change is an engine rebuild, not a
     /// runtime rebuild.
@@ -105,13 +105,6 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(config: RunConfig) -> Result<Self, RunError> {
-        if config.provider != config::DEFAULT_PROVIDER {
-            return Err(RunError::Config(format!(
-                "unknown provider `{}` — this build has one provider: `{}`",
-                config.provider,
-                config::DEFAULT_PROVIDER
-            )));
-        }
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
             None => SessionStore::open_default()?,
@@ -121,19 +114,7 @@ impl Runtime {
         let mut read_only_registry = Registry::full(&config.project_dir);
         read_only_registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
 
-        let mut auth = match &config.auth {
-            Some(paths) => AuthStore::open(paths.store.clone(), paths.codex_cli.clone())
-                .map_err(RunError::Auth)?,
-            None => AuthStore::open_default().map_err(RunError::Auth)?,
-        };
-        // Resolve credentials now, so a missing login fails here with
-        // a clear message instead of inside the first turn.
-        auth.ensure().map_err(RunError::Auth)?;
-        let mut codex_config = CodexConfig::default();
-        if let Some(base_url) = &config.base_url {
-            codex_config.base_url = base_url.clone();
-        }
-        let provider = OpenAiCodex::new(codex_config, auth);
+        let provider = Self::build_provider(&config)?;
 
         Ok(Self {
             engine_config: EngineConfig::new(config.model.clone()),
@@ -147,6 +128,64 @@ impl Runtime {
 
     pub fn config(&self) -> &RunConfig {
         &self.config
+    }
+
+    /// Build the provider the config names. Credentials resolve here,
+    /// so a missing login fails with a clear message instead of inside
+    /// the first turn.
+    fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
+        let open_store = || match &config.auth {
+            Some(paths) => AuthStore::open(paths.store.clone(), paths.codex_cli.clone())
+                .map_err(RunError::Auth),
+            None => AuthStore::open_default().map_err(RunError::Auth),
+        };
+        match config.provider.as_str() {
+            openai_codex::PROVIDER_ID => {
+                let mut auth = open_store()?;
+                auth.ensure().map_err(RunError::Auth)?;
+                let mut codex_config = CodexConfig::default();
+                if let Some(base_url) = &config.base_url {
+                    codex_config.base_url = base_url.clone();
+                }
+                Ok(Box::new(OpenAiCodex::new(codex_config, auth)))
+            }
+            anthropic::PROVIDER_ID => {
+                // The environment wins and an empty variable counts as
+                // unset — the order `AuthStore::resolve_anthropic_key`
+                // owns. The store opens only when the environment
+                // misses, so a broken store file cannot block a run
+                // that carries its key in the environment.
+                let api_key = match std::env::var(anthropic::ENV_API_KEY)
+                    .ok()
+                    .filter(|key| !key.is_empty())
+                {
+                    Some(key) => key,
+                    None => open_store()?
+                        .resolve_anthropic_key(None)
+                        .map(|(key, _)| key)
+                        .ok_or_else(|| {
+                            RunError::Auth(ProviderError::Auth(
+                                anthropic::NO_CREDENTIALS_HELP.to_string(),
+                            ))
+                        })?,
+                };
+                let mut anthropic_config = AnthropicConfig::default();
+                if let Some(base_url) = &config.base_url {
+                    anthropic_config.base_url = base_url.clone();
+                }
+                Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
+            }
+            other => {
+                let known: Vec<String> = demerzel_providers::PROVIDER_IDS
+                    .iter()
+                    .map(|id| format!("`{id}`"))
+                    .collect();
+                Err(RunError::Config(format!(
+                    "unknown provider `{other}` — this build has: {}",
+                    known.join(", ")
+                )))
+            }
+        }
     }
 
     /// Open the session for this run: the latest one when
@@ -197,7 +236,7 @@ impl Runtime {
             &self.registry
         };
         Engine::with_history(
-            &self.provider,
+            self.provider.as_ref(),
             registry,
             ApprovalPolicy::new(self.config.approval),
             self.engine_config.clone(),

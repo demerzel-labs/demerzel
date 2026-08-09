@@ -62,13 +62,21 @@ pub struct Usage {
     pub cache_read_tokens: u64,
 }
 
-/// Why the model stopped.
+/// Why the model stopped. Non-exhaustive: a later milestone can add a
+/// reason without breaking adapter or interface crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StopReason {
     EndTurn,
     ToolUse,
+    /// A token limit ended the turn: the output cap or the context
+    /// window.
     MaxTokens,
+    /// The model or its safety layer declined the request. The turn
+    /// produced no usable answer; the harness must not report it as
+    /// completed.
+    Refusal,
     Aborted,
 }
 

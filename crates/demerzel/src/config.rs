@@ -21,9 +21,7 @@ use std::path::{Path, PathBuf};
 
 use demerzel_core::ApprovalMode;
 
-use crate::DEFAULT_MODEL;
-
-/// The provider id every build ships.
+/// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
 
 /// Environment variables, one per flag.
@@ -297,13 +295,20 @@ pub fn resolve(
         .unwrap_or_else(|| Setting::new(DEFAULT_PROVIDER.to_string(), Origin::Default));
 
     // Within one layer the `[providers.<id>]` table is more specific
-    // than the top-level `model`, so it wins.
+    // than the top-level `model`, so it wins. A top-level `model`
+    // names one provider's model id: when its layer also names a
+    // provider, and that provider is not the active one, the resolver
+    // skips the key — a provider switch must not pair the other
+    // provider's model with the active adapter (step-3 decision).
     let layer_model = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
             l.providers
                 .get(&provider.value)
                 .and_then(|p| p.model.clone())
-                .or_else(|| l.model.clone())
+                .or_else(|| match &l.provider {
+                    Some(named) if *named != provider.value => None,
+                    _ => l.model.clone(),
+                })
         })
     };
     let model = flag(&flags.model)
@@ -311,8 +316,14 @@ pub fn resolve(
         .or_else(|| env(ENV_MODEL).map(|v| Setting::new(v, Origin::Env)))
         .or_else(|| layer_model(project, Origin::Project))
         .or_else(|| layer_model(user, Origin::User))
-        // The anthropic default model lands with its adapter.
-        .unwrap_or_else(|| Setting::new(DEFAULT_MODEL.to_string(), Origin::Default));
+        // Each provider carries its own default model. An unknown
+        // provider gets the shipped default; the run fails on the
+        // provider id before the model matters.
+        .unwrap_or_else(|| {
+            let default = demerzel_providers::default_model(&provider.value)
+                .unwrap_or(demerzel_providers::openai_codex::DEFAULT_MODEL);
+            Setting::new(default.to_string(), Origin::Default)
+        });
 
     // Trust rule: the project file cannot pick the endpoint requests
     // — and the credentials on them — go to.
@@ -431,6 +442,7 @@ fn some_setting<T>(setting: Setting<T>) -> Setting<Option<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use demerzel_providers::{anthropic, openai_codex};
 
     fn layer(text: &str) -> Layer {
         let (layer, warnings) = Layer::parse(text).unwrap();
@@ -459,7 +471,7 @@ mod tests {
         let settings = resolve_clean(&Flags::default(), &no_env, None, None);
         assert_eq!(settings.provider.value, DEFAULT_PROVIDER);
         assert_eq!(settings.provider.origin, Origin::Default);
-        assert_eq!(settings.model.value, DEFAULT_MODEL);
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
@@ -515,8 +527,57 @@ mod tests {
         };
         let env = |name: &str| (name == ENV_MODEL).then(String::new);
         let settings = resolve_clean(&flags, &env, None, None);
-        assert_eq!(settings.model.value, DEFAULT_MODEL);
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.model.origin, Origin::Default);
+    }
+
+    #[test]
+    fn each_provider_has_its_own_default_model() {
+        let flags = Flags {
+            provider: Some("anthropic".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, None);
+        assert_eq!(settings.model.value, anthropic::DEFAULT_MODEL);
+        assert_ne!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(settings.model.origin, Origin::Default);
+    }
+
+    #[test]
+    fn a_provider_switch_skips_the_other_providers_top_level_model() {
+        // The user file pairs a provider with a top-level model. A flag
+        // switches the provider; the paired model must not follow.
+        let user = layer(
+            "provider = \"anthropic\"\n\
+             model = \"claude-x\"",
+        );
+        let flags = Flags {
+            provider: Some(DEFAULT_PROVIDER.into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(settings.model.origin, Origin::Default);
+
+        // A layer that names no provider keeps its top-level model:
+        // the author wrote it for whatever provider is active.
+        let user = layer("model = \"unscoped-model\"");
+        let flags = Flags {
+            provider: Some("anthropic".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.model.value, "unscoped-model");
+
+        // When the layer's provider matches the active one, its
+        // top-level model applies.
+        let user = layer(
+            "provider = \"anthropic\"\n\
+             model = \"claude-x\"",
+        );
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.provider.value, "anthropic");
+        assert_eq!(settings.model.value, "claude-x");
     }
 
     #[test]
