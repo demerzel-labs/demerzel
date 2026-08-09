@@ -24,14 +24,6 @@ use demerzel_core::ApprovalMode;
 /// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
 
-/// The default model of the active provider. An unknown provider gets
-/// the shipped default; the run fails later with a clear
-/// unknown-provider error before the model matters.
-pub fn default_model(provider_id: &str) -> &'static str {
-    demerzel_providers::default_model(provider_id)
-        .unwrap_or(demerzel_providers::openai_codex::DEFAULT_MODEL)
-}
-
 /// Environment variables, one per flag.
 pub const ENV_PROVIDER: &str = "DEMERZEL_PROVIDER";
 pub const ENV_MODEL: &str = "DEMERZEL_MODEL";
@@ -324,9 +316,13 @@ pub fn resolve(
         .or_else(|| env(ENV_MODEL).map(|v| Setting::new(v, Origin::Env)))
         .or_else(|| layer_model(project, Origin::Project))
         .or_else(|| layer_model(user, Origin::User))
-        // Each provider carries its own default model.
+        // Each provider carries its own default model. An unknown
+        // provider gets the shipped default; the run fails on the
+        // provider id before the model matters.
         .unwrap_or_else(|| {
-            Setting::new(default_model(&provider.value).to_string(), Origin::Default)
+            let default = demerzel_providers::default_model(&provider.value)
+                .unwrap_or(demerzel_providers::openai_codex::DEFAULT_MODEL);
+            Setting::new(default.to_string(), Origin::Default)
         });
 
     // Trust rule: the project file cannot pick the endpoint requests
@@ -446,6 +442,7 @@ fn some_setting<T>(setting: Setting<T>) -> Setting<Option<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use demerzel_providers::{anthropic, openai_codex};
 
     fn layer(text: &str) -> Layer {
         let (layer, warnings) = Layer::parse(text).unwrap();
@@ -474,7 +471,7 @@ mod tests {
         let settings = resolve_clean(&Flags::default(), &no_env, None, None);
         assert_eq!(settings.provider.value, DEFAULT_PROVIDER);
         assert_eq!(settings.provider.origin, Origin::Default);
-        assert_eq!(settings.model.value, default_model(DEFAULT_PROVIDER));
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
@@ -530,7 +527,7 @@ mod tests {
         };
         let env = |name: &str| (name == ENV_MODEL).then(String::new);
         let settings = resolve_clean(&flags, &env, None, None);
-        assert_eq!(settings.model.value, default_model(DEFAULT_PROVIDER));
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.model.origin, Origin::Default);
     }
 
@@ -541,8 +538,8 @@ mod tests {
             ..Flags::default()
         };
         let settings = resolve_clean(&flags, &no_env, None, None);
-        assert_eq!(settings.model.value, default_model("anthropic"));
-        assert_ne!(settings.model.value, default_model(DEFAULT_PROVIDER));
+        assert_eq!(settings.model.value, anthropic::DEFAULT_MODEL);
+        assert_ne!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.model.origin, Origin::Default);
     }
 
@@ -559,7 +556,7 @@ mod tests {
             ..Flags::default()
         };
         let settings = resolve_clean(&flags, &no_env, None, Some(&user));
-        assert_eq!(settings.model.value, default_model(DEFAULT_PROVIDER));
+        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
         assert_eq!(settings.model.origin, Origin::Default);
 
         // A layer that names no provider keeps its top-level model:

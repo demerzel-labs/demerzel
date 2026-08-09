@@ -199,8 +199,8 @@ fn report_credentials(
         }
     }
 
-    let env_key_set = std::env::var(anthropic::ENV_API_KEY).is_ok_and(|value| !value.is_empty());
-    match store.probe_anthropic(env_key_set) {
+    let env_key = std::env::var(anthropic::ENV_API_KEY).ok();
+    match store.probe_anthropic(env_key.as_deref()) {
         Some(probe) => {
             let detail = if probe.source == CredentialSource::Env {
                 format!(" ({})", anthropic::ENV_API_KEY)

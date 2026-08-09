@@ -64,7 +64,7 @@ impl RunConfig {
         Self {
             project_dir,
             provider: config::DEFAULT_PROVIDER.to_string(),
-            model: config::default_model(config::DEFAULT_PROVIDER).to_string(),
+            model: openai_codex::DEFAULT_MODEL.to_string(),
             approval: ApprovalMode::ReadOnly,
             continue_last: false,
             data_root: None,
@@ -134,13 +134,14 @@ impl Runtime {
     /// so a missing login fails with a clear message instead of inside
     /// the first turn.
     fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
-        let mut auth = match &config.auth {
+        let open_store = || match &config.auth {
             Some(paths) => AuthStore::open(paths.store.clone(), paths.codex_cli.clone())
-                .map_err(RunError::Auth)?,
-            None => AuthStore::open_default().map_err(RunError::Auth)?,
+                .map_err(RunError::Auth),
+            None => AuthStore::open_default().map_err(RunError::Auth),
         };
         match config.provider.as_str() {
             openai_codex::PROVIDER_ID => {
+                let mut auth = open_store()?;
                 auth.ensure().map_err(RunError::Auth)?;
                 let mut codex_config = CodexConfig::default();
                 if let Some(base_url) = &config.base_url {
@@ -149,17 +150,25 @@ impl Runtime {
                 Ok(Box::new(OpenAiCodex::new(codex_config, auth)))
             }
             anthropic::PROVIDER_ID => {
-                // Credential order: the environment wins over the
-                // store; an empty variable counts as unset.
-                let api_key = std::env::var(anthropic::ENV_API_KEY)
+                // The environment wins and an empty variable counts as
+                // unset — the order `AuthStore::resolve_anthropic_key`
+                // owns. The store opens only when the environment
+                // misses, so a broken store file cannot block a run
+                // that carries its key in the environment.
+                let api_key = match std::env::var(anthropic::ENV_API_KEY)
                     .ok()
                     .filter(|key| !key.is_empty())
-                    .or_else(|| auth.anthropic_api_key().map(str::to_string))
-                    .ok_or_else(|| {
-                        RunError::Auth(ProviderError::Auth(
-                            anthropic::NO_CREDENTIALS_HELP.to_string(),
-                        ))
-                    })?;
+                {
+                    Some(key) => key,
+                    None => open_store()?
+                        .resolve_anthropic_key(None)
+                        .map(|(key, _)| key)
+                        .ok_or_else(|| {
+                            RunError::Auth(ProviderError::Auth(
+                                anthropic::NO_CREDENTIALS_HELP.to_string(),
+                            ))
+                        })?,
+                };
                 let mut anthropic_config = AnthropicConfig::default();
                 if let Some(base_url) = &config.base_url {
                     anthropic_config.base_url = base_url.clone();
@@ -167,9 +176,8 @@ impl Runtime {
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
             other => Err(RunError::Config(format!(
-                "unknown provider `{other}` — this build has: `{}`, `{}`",
-                openai_codex::PROVIDER_ID,
-                anthropic::PROVIDER_ID,
+                "unknown provider `{other}` — this build has: {}",
+                demerzel_providers::PROVIDER_IDS.join(", ")
             ))),
         }
     }

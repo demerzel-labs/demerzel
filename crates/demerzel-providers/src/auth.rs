@@ -59,11 +59,16 @@ const STORE_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
+    #[serde(default)]
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     openai_codex: Option<CodexCredentials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anthropic: Option<AnthropicCredentials>,
+    /// Sections a newer build wrote. They ride through a save
+    /// untouched, so an older binary never data-loses a newer file.
+    #[serde(default, flatten)]
+    extra: serde_json::Map<String, Value>,
 }
 
 /// Where a session's credentials would come from. `doctor` reports
@@ -121,6 +126,10 @@ pub struct AuthStore {
     token_url: String,
     creds: Option<CodexCredentials>,
     anthropic: Option<AnthropicCredentials>,
+    /// The rest of the parsed file: a newer build's sections and its
+    /// version, preserved across saves.
+    version: u32,
+    extra: serde_json::Map<String, Value>,
 }
 
 impl AuthStore {
@@ -138,6 +147,8 @@ impl AuthStore {
             token_url: DEFAULT_TOKEN_URL.to_string(),
             creds: file.openai_codex,
             anthropic: file.anthropic,
+            version: file.version,
+            extra: file.extra,
         })
     }
 
@@ -168,18 +179,26 @@ impl AuthStore {
         self.anthropic.as_ref().map(|creds| creds.api_key.as_str())
     }
 
-    /// Report where an anthropic session would find its key. The
-    /// environment wins over the store; `env_key_set` says whether
-    /// `ANTHROPIC_API_KEY` holds a non-empty value. `None` means the
-    /// session cannot authenticate.
-    pub fn probe_anthropic(&self, env_key_set: bool) -> Option<CredentialProbe> {
-        let source = if env_key_set {
-            CredentialSource::Env
-        } else if self.anthropic.is_some() {
-            CredentialSource::Store
-        } else {
-            return None;
-        };
+    /// Resolve the key an anthropic session uses. The rule lives here
+    /// and nowhere else: the environment value wins over the store,
+    /// and an empty value counts as unset. Pass the `ANTHROPIC_API_KEY`
+    /// value in; the store never reads the process environment, so
+    /// tests stay hermetic.
+    pub fn resolve_anthropic_key(
+        &self,
+        env_key: Option<&str>,
+    ) -> Option<(String, CredentialSource)> {
+        if let Some(key) = env_key.filter(|key| !key.is_empty()) {
+            return Some((key.to_string(), CredentialSource::Env));
+        }
+        self.anthropic_api_key()
+            .map(|key| (key.to_string(), CredentialSource::Store))
+    }
+
+    /// Report where an anthropic session would find its key, without
+    /// the key text. `None` means the session cannot authenticate.
+    pub fn probe_anthropic(&self, env_key: Option<&str>) -> Option<CredentialProbe> {
+        let (_, source) = self.resolve_anthropic_key(env_key)?;
         Some(CredentialProbe {
             source,
             expires: None,
@@ -334,9 +353,12 @@ impl AuthStore {
 
     fn save(&self) -> Result<(), ProviderError> {
         let file = StoreFile {
-            version: STORE_VERSION,
+            // Never downgrade the stamp of a newer file this build
+            // still understands enough to rewrite.
+            version: self.version.max(STORE_VERSION),
             openai_codex: self.creds.clone(),
             anthropic: self.anthropic.clone(),
+            extra: self.extra.clone(),
         };
         let text = serde_json::to_string_pretty(&file)
             .map_err(|e| ProviderError::Auth(format!("serialize auth store: {e}")))?;
@@ -562,15 +584,29 @@ mod tests {
         let store = AuthStore::open(path, None).unwrap();
         assert_eq!(store.anthropic_api_key(), Some("sk-test"));
 
-        let probe = store.probe_anthropic(false).unwrap();
-        assert_eq!(probe.source, CredentialSource::Store);
-        let probe = store.probe_anthropic(true).unwrap();
-        assert_eq!(probe.source, CredentialSource::Env);
+        assert_eq!(
+            store.resolve_anthropic_key(None),
+            Some(("sk-test".into(), CredentialSource::Store))
+        );
+        assert_eq!(
+            store.resolve_anthropic_key(Some("sk-env")),
+            Some(("sk-env".into(), CredentialSource::Env))
+        );
+        // An empty variable counts as unset.
+        assert_eq!(
+            store.resolve_anthropic_key(Some("")),
+            Some(("sk-test".into(), CredentialSource::Store))
+        );
+        assert_eq!(
+            store.probe_anthropic(None).unwrap().source,
+            CredentialSource::Store
+        );
 
         let empty = AuthStore::open(dir.path().join("other.json"), None).unwrap();
-        assert!(empty.probe_anthropic(false).is_none());
+        assert!(empty.probe_anthropic(None).is_none());
+        assert!(empty.resolve_anthropic_key(Some("")).is_none());
         assert_eq!(
-            empty.probe_anthropic(true).unwrap().source,
+            empty.probe_anthropic(Some("sk-env")).unwrap().source,
             CredentialSource::Env
         );
     }
@@ -592,6 +628,30 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
         assert_eq!(saved["openai_codex"]["access_token"], "access-1");
+    }
+
+    #[test]
+    fn a_save_preserves_a_newer_files_sections_and_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 3,
+                "anthropic": {"api_key": "sk-keep"},
+                "future_provider": {"token": "keep-me"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
+        let mut store = AuthStore::open(path.clone(), Some(source)).unwrap();
+        store.ensure().unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 3, "never downgrade the version stamp");
+        assert_eq!(saved["future_provider"]["token"], "keep-me");
+        assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
     }
 
     #[test]

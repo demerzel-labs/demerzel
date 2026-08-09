@@ -16,8 +16,9 @@ pub use demerzel_core::{
     ToolDefinition,
 };
 
-/// The provider ids this build ships.
-pub const PROVIDER_IDS: [&str; 2] = [openai_codex::PROVIDER_ID, anthropic::PROVIDER_ID];
+/// The provider ids this build ships. A slice, so a new adapter never
+/// changes the item's type.
+pub const PROVIDER_IDS: &[&str] = &[openai_codex::PROVIDER_ID, anthropic::PROVIDER_ID];
 
 /// The default model of a shipped provider; `None` for an unknown id.
 pub fn default_model(provider_id: &str) -> Option<&'static str> {

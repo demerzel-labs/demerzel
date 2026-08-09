@@ -347,6 +347,48 @@ fn doctor_reports_anthropic_credentials_per_source() {
     assert!(!out.contains("sk-env-secret"), "{out}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_order_prefers_the_environment_over_the_store() {
+    use demerzel_mock::{MockServer, anthropic};
+
+    // The store holds one key; the environment holds another. Two runs
+    // of the real binary against the mock show which key each setup
+    // sends.
+    let mock = MockServer::start(
+        vec![anthropic::text_turn("one"), anthropic::text_turn("two")],
+        Vec::new(),
+    )
+    .await;
+    let bed = Bed::new();
+    let dir = bed.data.join("demerzel");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        r#"{"version": 2, "anthropic": {"api_key": "sk-store-key"}}"#,
+    )
+    .unwrap();
+    let run = |env_key: Option<&str>| {
+        let mut command = bed.command();
+        command.args(["--provider", "anthropic", "--base-url", &mock.url(), "hi"]);
+        if let Some(key) = env_key {
+            command.env("ANTHROPIC_API_KEY", key);
+        }
+        command.output().unwrap()
+    };
+
+    // No variable: the store key goes on the wire.
+    let output = run(None);
+    assert!(output.status.success(), "{output:?}");
+    // The variable set: it wins over the store.
+    let output = run(Some("sk-env-key"));
+    assert!(output.status.success(), "{output:?}");
+
+    let received = mock.received();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].api_key.as_deref(), Some("sk-store-key"));
+    assert_eq!(received[1].api_key.as_deref(), Some("sk-env-key"));
+}
+
 #[test]
 fn the_repl_writes_the_history_file() {
     let bed = Bed::new();
