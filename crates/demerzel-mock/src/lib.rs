@@ -41,13 +41,15 @@ impl SseEvent {
     }
 }
 
-/// One scripted reply for `POST /responses`.
+/// One scripted reply for the model routes.
 #[derive(Debug, Clone)]
 pub struct MockResponse {
     pub status: u16,
     pub events: Vec<SseEvent>,
     /// Send the events, then hold the connection open forever.
     pub stall: bool,
+    /// A `retry-after` header value, in seconds.
+    pub retry_after: Option<u64>,
 }
 
 impl MockResponse {
@@ -57,6 +59,7 @@ impl MockResponse {
             status: 200,
             events: events.into_iter().map(SseEvent::new).collect(),
             stall: false,
+            retry_after: None,
         }
     }
 
@@ -75,6 +78,15 @@ impl MockResponse {
             status,
             events: Vec::new(),
             stall: false,
+            retry_after: None,
+        }
+    }
+
+    /// An error reply that carries a `retry-after` header.
+    pub fn error_with_retry_after(status: u16, seconds: u64) -> Self {
+        Self {
+            retry_after: Some(seconds),
+            ..Self::error(status)
         }
     }
 }
@@ -233,11 +245,18 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     if reply.status != 200 {
         let status =
             StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        return (
+        let mut response = (
             status,
             json!({"error": {"message": "scripted error"}}).to_string(),
         )
             .into_response();
+        if let Some(seconds) = reply.retry_after {
+            response.headers_mut().insert(
+                "retry-after",
+                seconds.to_string().parse().expect("digits are a header"),
+            );
+        }
+        return response;
     }
     let mut sse = String::new();
     for event in &reply.events {

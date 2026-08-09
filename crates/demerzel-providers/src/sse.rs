@@ -122,24 +122,23 @@ impl SseParser {
     }
 }
 
-/// Find the earliest record delimiter: `\n\n` or `\r\n\r\n`. The
-/// caller guarantees no delimiter starts before `from`, so the search
-/// skips that prefix.
+/// Find the earliest record delimiter: `\n\n` or `\r\n\r\n`. One pass
+/// over the bytes: each newline checks both patterns ending on it in
+/// constant time. The caller guarantees no delimiter starts before
+/// `from`, so the search skips that prefix.
 fn find_record_end(buf: &[u8], from: usize) -> Option<(usize, usize)> {
-    let lf = find_subslice(&buf[from..], b"\n\n").map(|at| at + from);
-    let crlf = find_subslice(&buf[from..], b"\r\n\r\n").map(|at| at + from);
-    match (lf, crlf) {
-        (Some(a), Some(b)) if b < a => Some((b, 4)),
-        (Some(a), _) => Some((a, 2)),
-        (None, Some(b)) => Some((b, 4)),
-        (None, None) => None,
+    for at in from.max(1)..buf.len() {
+        if buf[at] != b'\n' {
+            continue;
+        }
+        if buf[at - 1] == b'\n' {
+            return Some((at - 1, 2));
+        }
+        if at >= 3 && &buf[at - 3..=at] == b"\r\n\r\n" {
+            return Some((at - 3, 4));
+        }
     }
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    None
 }
 
 /// Join the record's `data:` lines with `\n`, per the SSE spec.
@@ -200,6 +199,76 @@ mod tests {
             let mut parser = SseParser::new();
             assert!(parser.push(&full[..cut]).is_empty(), "split {split}");
             assert_eq!(parser.push(&full[cut..]), vec!["x", "y"], "split {split}");
+        }
+    }
+
+    /// The old exhaustive-search parser, kept as the reference: scan
+    /// the whole buffer for both delimiters and take the earlier one.
+    fn reference_parse(bytes: &[u8]) -> Vec<String> {
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        }
+        let mut buf = bytes.to_vec();
+        let mut out = Vec::new();
+        loop {
+            let lf = find(&buf, b"\n\n");
+            let crlf = find(&buf, b"\r\n\r\n");
+            let (end, delim) = match (lf, crlf) {
+                (Some(a), Some(b)) if b < a => (b, 4),
+                (Some(a), _) => (a, 2),
+                (None, Some(b)) => (b, 4),
+                (None, None) => break,
+            };
+            if let Some(data) = parse_record(&buf[..end]) {
+                out.push(data);
+            }
+            buf.drain(..end + delim);
+        }
+        out
+    }
+
+    #[test]
+    fn matches_the_reference_parser_on_adversarial_streams() {
+        // A deterministic LCG builds byte streams heavy in CR and LF
+        // runs; every stream runs whole, halved, and byte-at-a-time.
+        let fragments: &[&[u8]] = &[
+            b"data: a",
+            b"\n",
+            b"\r",
+            b"\r\n",
+            b"\n\n",
+            b"\r\n\r\n",
+            b": note",
+            b"data: b\n\ndata: c",
+            b"x",
+        ];
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        for _ in 0..300 {
+            let mut stream = Vec::new();
+            for _ in 0..24 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let pick = (seed >> 33) as usize % fragments.len();
+                stream.extend_from_slice(fragments[pick]);
+            }
+            let expected = reference_parse(&stream);
+
+            let mut whole = SseParser::new();
+            assert_eq!(whole.push(&stream), expected);
+
+            let mut halves = SseParser::new();
+            let mid = stream.len() / 2;
+            let mut got = halves.push(&stream[..mid]);
+            got.extend(halves.push(&stream[mid..]));
+            assert_eq!(got, expected);
+
+            let mut bytewise = SseParser::new();
+            let mut got = Vec::new();
+            for byte in &stream {
+                got.extend(bytewise.push(std::slice::from_ref(byte)));
+            }
+            assert_eq!(got, expected);
         }
     }
 

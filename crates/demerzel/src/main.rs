@@ -136,7 +136,9 @@ fn main() {
         }
         Some(Ok(TurnOutcome::Completed)) => {}
         Some(Ok(TurnOutcome::MaxTokens)) => {
-            eprintln!("demerzel: the model hit the output-token limit");
+            eprintln!(
+                "demerzel: the model hit a token limit — the output cap or the context window"
+            );
             std::process::exit(1);
         }
         Some(Ok(TurnOutcome::CallLimit)) => {

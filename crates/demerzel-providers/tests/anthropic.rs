@@ -487,6 +487,73 @@ async fn retries_a_server_error_with_backoff() {
 }
 
 #[tokio::test]
+async fn honors_retry_after_between_attempts() {
+    let mock = MockServer::start(
+        vec![
+            MockResponse::error_with_retry_after(429, 1),
+            fixtures::text_turn("ok"),
+        ],
+        vec![],
+    )
+    .await;
+    let provider = provider_for(&mock);
+
+    let started = std::time::Instant::now();
+    let stream = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+    collect(stream).await;
+
+    assert_eq!(mock.received().len(), 2);
+    // The test config's backoff is one millisecond; a full second
+    // proves the header set the wait.
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "the retry must wait the server's retry-after"
+    );
+}
+
+#[tokio::test]
+async fn a_signature_on_the_block_start_seals_without_deltas() {
+    let events = vec![
+        fixtures::message_start(),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "plan", "signature": "sig-seed"},
+        }),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 3},
+        }),
+        json!({"type": "message_stop"}),
+    ];
+    let mock = MockServer::start(vec![MockResponse::stream(events)], vec![]).await;
+    let provider = provider_for(&mock);
+
+    let stream = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+    let events: Vec<StreamEvent> = collect(stream)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+
+    let StreamEvent::ReasoningDone { summary, sealed } = &events[0] else {
+        panic!("expected ReasoningDone, got {events:?}");
+    };
+    assert_eq!(summary, "plan");
+    let sealed = sealed.as_ref().unwrap();
+    assert_eq!(sealed.data["signature"], "sig-seed");
+    assert_eq!(sealed.data["thinking"], "plan");
+}
+
+#[tokio::test]
 async fn gives_up_after_max_attempts_on_rate_limits() {
     let mock = MockServer::start(
         vec![

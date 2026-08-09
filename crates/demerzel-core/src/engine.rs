@@ -152,7 +152,8 @@ impl Approver for NoPrompt {
 pub enum TurnOutcome {
     /// The model ended its turn.
     Completed,
-    /// The model hit the output-token limit.
+    /// The model hit a token limit: the output cap or the context
+    /// window.
     MaxTokens,
     /// The model or its safety layer declined the request.
     Refused,
@@ -735,6 +736,17 @@ mod tests {
 
     fn noop_sink() -> impl EventSink {
         |_: EngineEvent<'_>| {}
+    }
+
+    #[test]
+    fn a_refusal_ends_the_turn_as_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![vec![StreamEvent::Done(StopReason::Refusal)]]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let outcome = block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll));
+        assert_eq!(outcome.unwrap(), TurnOutcome::Refused);
     }
 
     #[test]

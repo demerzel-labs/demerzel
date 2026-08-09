@@ -175,10 +175,16 @@ impl Runtime {
                 }
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
-            other => Err(RunError::Config(format!(
-                "unknown provider `{other}` — this build has: {}",
-                demerzel_providers::PROVIDER_IDS.join(", ")
-            ))),
+            other => {
+                let known: Vec<String> = demerzel_providers::PROVIDER_IDS
+                    .iter()
+                    .map(|id| format!("`{id}`"))
+                    .collect();
+                Err(RunError::Config(format!(
+                    "unknown provider `{other}` — this build has: {}",
+                    known.join(", ")
+                )))
+            }
         }
     }
 

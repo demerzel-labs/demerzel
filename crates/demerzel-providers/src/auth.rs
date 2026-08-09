@@ -1,6 +1,9 @@
 //! The dmz credential store: one JSON file with mode 0600, one section
 //! per provider. File version 2 adds the `anthropic` section; a version-1
-//! file still parses, its `anthropic` section is simply absent.
+//! file still parses, its `anthropic` section is simply absent. Unknown
+//! sections and unknown fields inside known sections ride through a
+//! save untouched, and a save never lowers the version stamp, so this
+//! build can rewrite a newer file without data loss.
 //!
 //! The `openai_codex` section carries the OAuth machinery from M1. There
 //! is no login flow yet: the store imports the Codex CLI login from
@@ -46,12 +49,20 @@ pub struct CodexCredentials {
     /// RFC 3339 timestamp of the last token update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refresh: Option<String>,
+    /// Fields a newer build wrote into this section. They ride
+    /// through a save untouched.
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Credentials for the anthropic adapter: one API key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnthropicCredentials {
     pub api_key: String,
+    /// Fields a newer build wrote into this section. They ride
+    /// through a save untouched.
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// The store file version this build writes.
@@ -179,11 +190,12 @@ impl AuthStore {
         self.anthropic.as_ref().map(|creds| creds.api_key.as_str())
     }
 
-    /// Resolve the key an anthropic session uses. The rule lives here
-    /// and nowhere else: the environment value wins over the store,
-    /// and an empty value counts as unset. Pass the `ANTHROPIC_API_KEY`
-    /// value in; the store never reads the process environment, so
-    /// tests stay hermetic.
+    /// Resolve the key an anthropic session uses: the environment
+    /// value wins over the store, and an empty value counts as unset.
+    /// Pass the `ANTHROPIC_API_KEY` value in; the store never reads
+    /// the process environment, so tests stay hermetic. A caller with
+    /// a non-empty environment key may skip the store — and this call
+    /// — entirely; that is the same order.
     pub fn resolve_anthropic_key(
         &self,
         env_key: Option<&str>,
@@ -278,6 +290,7 @@ impl AuthStore {
             id_token: tokens["id_token"].as_str().map(str::to_string),
             account_id: tokens["account_id"].as_str().map(str::to_string),
             last_refresh: file["last_refresh"].as_str().map(str::to_string),
+            extra: serde_json::Map::new(),
         });
         self.save()
     }
@@ -495,6 +508,7 @@ mod tests {
             id_token: None,
             account_id: None,
             last_refresh: Some("2026-08-01T00:00:00Z".into()),
+            extra: serde_json::Map::new(),
         });
         assert!(store.codex_cli_file_is_newer());
 
@@ -522,6 +536,7 @@ mod tests {
             id_token: None,
             account_id: None,
             last_refresh: None,
+            extra: serde_json::Map::new(),
         });
         let probe = store.probe().unwrap();
         assert_eq!(probe.source, CredentialSource::Store);
@@ -638,20 +653,29 @@ mod tests {
             &path,
             json!({
                 "version": 3,
-                "anthropic": {"api_key": "sk-keep"},
+                "anthropic": {"api_key": "sk-keep", "oauth": {"refresh": "r-9"}},
+                "openai_codex": {
+                    "access_token": "a",
+                    "refresh_token": "r",
+                    "future_field": "keep-me-too",
+                },
                 "future_provider": {"token": "keep-me"},
             })
             .to_string(),
         )
         .unwrap();
-        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
-        let mut store = AuthStore::open(path.clone(), Some(source)).unwrap();
-        store.ensure().unwrap();
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        store.creds.as_mut().unwrap().access_token = "a2".into();
+        store.save().unwrap();
 
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["version"], 3, "never downgrade the version stamp");
         assert_eq!(saved["future_provider"]["token"], "keep-me");
+        // Unknown fields inside known sections survive too.
         assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
+        assert_eq!(saved["anthropic"]["oauth"]["refresh"], "r-9");
+        assert_eq!(saved["openai_codex"]["access_token"], "a2");
+        assert_eq!(saved["openai_codex"]["future_field"], "keep-me-too");
     }
 
     #[test]
