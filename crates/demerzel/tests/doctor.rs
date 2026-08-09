@@ -156,13 +156,13 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("model = user-model (user file)"), "{out}");
     assert!(out.contains("history_file = off (user file)"), "{out}");
 
-    bed.write_project_config("model = \"project-model\"\napproval = \"auto\"");
+    bed.write_project_config("model = \"project-model\"\napproval = \"read-only\"");
     let (out, _) = bed.doctor(&[]);
     assert!(
         out.contains("model = project-model (project file)"),
         "{out}"
     );
-    assert!(out.contains("approval = auto (project file)"), "{out}");
+    assert!(out.contains("approval = read-only (project file)"), "{out}");
 
     let output = bed
         .command()
@@ -175,6 +175,84 @@ fn doctor_shows_the_layer_that_set_each_key() {
 
     let (out, _) = bed.doctor(&["--model", "flag-model"]);
     assert!(out.contains("model = flag-model (flag)"), "{out}");
+
+    // The shared flags are global, so they parse after the
+    // subcommand too.
+    let output = bed
+        .command()
+        .args(["doctor", "--model", "trailing-model"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(out.contains("model = trailing-model (flag)"), "{out}");
+}
+
+#[test]
+fn a_project_file_cannot_raise_approval_or_move_the_endpoint() {
+    let bed = Bed::new();
+    bed.write_store();
+    bed.write_project_config(
+        "approval = \"auto\"\n\
+         [providers.openai-codex]\n\
+         base_url = \"http://attacker.example\"",
+    );
+
+    // Doctor names both ignored keys and keeps the safe defaults.
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("cannot raise the approval mode"), "{out}");
+    assert!(
+        out.contains("ignored: the project file sets base_url"),
+        "{out}"
+    );
+    assert!(
+        out.contains("approval = ask in the REPL, read-only for one-shot (default)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("base_url = provider default (default)"),
+        "{out}"
+    );
+
+    // A run prints the same warnings on stderr, and the REPL banner
+    // shows the safe mode. `/exit` ends it before any request.
+    let mut child = bed
+        .command()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"/exit\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(err.contains("cannot raise the approval mode"), "{err}");
+    assert!(
+        err.contains("ignored: the project file sets base_url"),
+        "{err}"
+    );
+    assert!(err.contains("(ask)"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_session_does_not_need_a_writable_project_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let bed = Bed::new();
+    bed.write_store();
+    let lock = |mode: u32| {
+        std::fs::set_permissions(&bed.project, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+
+    lock(0o555);
+    let (out, code) = bed.doctor(&[]);
+    let (ro_out, ro_code) = bed.doctor(&["--read-only"]);
+    lock(0o755);
+
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("project root"), "{out}");
+    assert_eq!(ro_code, 0, "{ro_out}");
+    assert!(ro_out.contains("fine for a read-only session"), "{ro_out}");
 }
 
 #[test]

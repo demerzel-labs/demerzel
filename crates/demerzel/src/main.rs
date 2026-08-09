@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use demerzel::config::{self, Flags, Origin};
+use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
 use demerzel::{RunConfig, Runtime, doctor};
 use demerzel_core::{ApprovalMode, TurnOutcome};
@@ -23,23 +23,23 @@ struct Cli {
     continue_last: bool,
 
     /// Provider id. DEMERZEL_PROVIDER sets it too.
-    #[arg(long)]
+    #[arg(long, global = true)]
     provider: Option<String>,
 
     /// Model name to request. DEMERZEL_MODEL sets it too.
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<String>,
 
     /// Endpoint base URL. DEMERZEL_BASE_URL sets it too.
-    #[arg(long)]
+    #[arg(long, global = true)]
     base_url: Option<String>,
 
     /// Run the write and execute tools without approval prompts.
-    #[arg(long, conflicts_with = "read_only")]
+    #[arg(long, global = true, conflicts_with = "read_only")]
     auto: bool,
 
     /// Advertise only the read tools.
-    #[arg(long)]
+    #[arg(long, global = true)]
     read_only: bool,
 }
 
@@ -158,19 +158,15 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     let locations = config::Locations::locate(&cwd);
     let user = load_layer(locations.user.as_deref())?;
     let project = load_layer(Some(&locations.project))?;
-    let settings = config::resolve(
+    let (settings, ignored) = config::resolve(
         &cli.flags(),
         &|name| std::env::var(name).ok(),
         project.as_ref(),
         user.as_ref(),
     );
-
-    // A cloned repository must not silently redirect requests — and
-    // the credentials on them — to its own endpoint.
-    if settings.base_url.origin == Origin::Project
-        && let Some(url) = &settings.base_url.value
-    {
-        eprintln!("demerzel: the project config file sets base_url = {url}");
+    // The trust rule dropped these project-file keys; say so.
+    for warning in &ignored {
+        eprintln!("demerzel: {warning}");
     }
 
     let interactive = cli.prompt.is_none();

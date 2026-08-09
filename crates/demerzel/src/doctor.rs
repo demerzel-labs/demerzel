@@ -1,140 +1,168 @@
 //! `demerzel doctor`: report the state a session depends on. The
 //! report shows presence, not values — never token or key text.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use demerzel_core::{ApprovalMode, SessionStore};
+use demerzel_providers::openai_codex::AuthStore;
 use demerzel_providers::openai_codex::auth::NO_CREDENTIALS_HELP;
-use demerzel_providers::openai_codex::{AuthStore, CredentialSource};
 
-use crate::config::{self, Flags, Layer, Locations, Origin};
+use crate::config::{self, Flags, Layer, Locations, Origin, mode_name};
 
 /// Run the checks and print the report to stdout. Returns the process
 /// exit code: 0 when every check passes, 1 otherwise.
 pub fn run(project_dir: &Path, flags: &Flags) -> i32 {
+    let mut out = std::io::stdout().lock();
+    // A closed pipe must not turn a healthy machine into exit 101.
+    match report(project_dir, flags, &mut out) {
+        Ok(0) => 0,
+        _ => 1,
+    }
+}
+
+/// Write the full report to `out` and return the problem count.
+pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io::Result<u32> {
     let mut problems = 0u32;
     let locations = Locations::locate(project_dir);
 
-    println!("config files");
-    let user = report_file("user", locations.user.as_deref(), &mut problems);
-    let project = report_file("project", Some(&locations.project), &mut problems);
+    writeln!(out, "config files")?;
+    let user = report_file("user", locations.user.as_deref(), &mut problems, out)?;
+    let project = report_file("project", Some(&locations.project), &mut problems, out)?;
 
-    let settings = config::resolve(
+    let (settings, ignored) = config::resolve(
         flags,
         &|name| std::env::var(name).ok(),
         project.as_ref(),
         user.as_ref(),
     );
-    println!("active settings");
+    writeln!(out, "active settings")?;
+    for warning in &ignored {
+        writeln!(out, "  warning: {warning}")?;
+    }
     print_setting(
+        out,
         "provider",
         &settings.provider.value,
         settings.provider.origin,
-    );
-    print_setting("model", &settings.model.value, settings.model.origin);
+    )?;
+    print_setting(out, "model", &settings.model.value, settings.model.origin)?;
     let approval = match settings.approval.value {
         Some(mode) => mode_name(mode).to_string(),
         None => "ask in the REPL, read-only for one-shot".to_string(),
     };
-    print_setting("approval", &approval, settings.approval.origin);
+    print_setting(out, "approval", &approval, settings.approval.origin)?;
     let history = if settings.history_file.value {
         "on"
     } else {
         "off"
     };
-    print_setting("history_file", history, settings.history_file.origin);
+    print_setting(out, "history_file", history, settings.history_file.origin)?;
     let base_url = settings
         .base_url
         .value
         .as_deref()
         .unwrap_or("provider default");
-    print_setting("base_url", base_url, settings.base_url.origin);
+    print_setting(out, "base_url", base_url, settings.base_url.origin)?;
     if settings.provider.value != config::DEFAULT_PROVIDER {
         problems += 1;
-        println!(
+        writeln!(
+            out,
             "  problem: provider `{}` is not in this build; `{}` is",
             settings.provider.value,
             config::DEFAULT_PROVIDER
-        );
+        )?;
     }
 
-    report_credentials(&mut problems);
-    report_tools(project_dir, &mut problems);
+    report_credentials(&mut problems, out)?;
+    // A read-only session never writes the project root, so a
+    // non-writable root is only a note there.
+    let read_only = settings.approval.value == Some(ApprovalMode::ReadOnly);
+    report_tools(project_dir, read_only, &mut problems, out)?;
 
     match problems {
-        0 => {
-            println!("result: ok — a session can start");
-            0
-        }
-        1 => {
-            println!("result: 1 problem");
-            1
-        }
-        n => {
-            println!("result: {n} problems");
-            1
-        }
+        0 => writeln!(out, "result: ok — a session can start")?,
+        1 => writeln!(out, "result: 1 problem")?,
+        n => writeln!(out, "result: {n} problems")?,
     }
+    Ok(problems)
 }
 
-fn print_setting(name: &str, value: &str, origin: Origin) {
-    println!("  {name} = {value} ({origin})");
+fn print_setting(
+    out: &mut dyn Write,
+    name: &str,
+    value: &str,
+    origin: Origin,
+) -> std::io::Result<()> {
+    writeln!(out, "  {name} = {value} ({origin})")
 }
 
-fn mode_name(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
-    }
-}
-
-/// Report one config file and return its parsed layer.
-fn report_file(label: &str, path: Option<&Path>, problems: &mut u32) -> Option<Layer> {
+/// Report one config file and return its parsed layer. The file is
+/// read and parsed once; the secret scan walks the same table.
+fn report_file(
+    label: &str,
+    path: Option<&Path>,
+    problems: &mut u32,
+    out: &mut dyn Write,
+) -> std::io::Result<Option<Layer>> {
     let Some(path) = path else {
-        println!("  {label}: none — HOME is not set");
-        return None;
+        writeln!(out, "  {label}: none — HOME is not set")?;
+        return Ok(None);
     };
-    match config::load(path) {
-        Ok(None) => {
-            println!("  {label}: {} — none", path.display());
-            None
-        }
-        Ok(Some((layer, warnings))) => {
-            println!("  {label}: {} — found", path.display());
-            for warning in warnings {
-                println!("  warning: {label} file: {warning}");
-            }
-            for warning in secret_warnings(path) {
-                println!("  warning: {label} file: {warning}");
-            }
-            Some(layer)
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(out, "  {label}: {} — none", path.display())?;
+            return Ok(None);
         }
         Err(error) => {
             *problems += 1;
-            println!("  problem: {error}");
-            None
+            writeln!(out, "  problem: cannot read {}: {error}", path.display())?;
+            return Ok(None);
+        }
+    };
+    let table = match text.parse::<toml::Table>() {
+        Ok(table) => table,
+        Err(error) => {
+            *problems += 1;
+            writeln!(out, "  problem: {}: {error}", path.display())?;
+            return Ok(None);
+        }
+    };
+    writeln!(out, "  {label}: {} — found", path.display())?;
+    let mut secrets = Vec::new();
+    scan_table(&table, "", &mut secrets);
+    match Layer::from_table(table) {
+        Ok((layer, warnings)) => {
+            for warning in warnings.iter().chain(&secrets) {
+                writeln!(out, "  warning: {label} file: {warning}")?;
+            }
+            Ok(Some(layer))
+        }
+        Err(message) => {
+            *problems += 1;
+            for warning in &secrets {
+                writeln!(out, "  warning: {label} file: {warning}")?;
+            }
+            writeln!(out, "  problem: {}: {message}", path.display())?;
+            Ok(None)
         }
     }
 }
 
-fn report_credentials(problems: &mut u32) {
-    println!("credentials");
+fn report_credentials(problems: &mut u32, out: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(out, "credentials")?;
     let store = match AuthStore::open_default() {
         Ok(store) => store,
         Err(error) => {
             *problems += 1;
-            println!("  problem: {error}");
-            return;
+            writeln!(out, "  problem: {error}")?;
+            return Ok(());
         }
     };
     match store.probe() {
-        Some(probe) => {
-            let source = match probe.source {
-                CredentialSource::Store => "in the dmz store",
-                CredentialSource::CodexCliImport => "ready to import at the first run",
-            };
+        Some(probe) if probe.source.usable() => {
             let expiry = match probe.expires {
                 Some(when) if when <= SystemTime::now() => {
                     " — the access token is expired; the next run refreshes it".to_string()
@@ -145,57 +173,84 @@ fn report_credentials(problems: &mut u32) {
                 ),
                 None => String::new(),
             };
-            println!("  openai-codex: {source}{expiry}");
+            writeln!(out, "  openai-codex: {}{expiry}", probe.source.describe())?;
+        }
+        Some(probe) => {
+            *problems += 1;
+            writeln!(out, "  problem: openai-codex: {}", probe.source.describe())?;
         }
         None => {
             *problems += 1;
-            println!("  openai-codex: none — {NO_CREDENTIALS_HELP}");
+            writeln!(out, "  openai-codex: none — {NO_CREDENTIALS_HELP}")?;
         }
     }
+    Ok(())
 }
 
-fn report_tools(project_dir: &Path, problems: &mut u32) {
-    println!("tools");
+fn report_tools(
+    project_dir: &Path,
+    read_only: bool,
+    problems: &mut u32,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "tools")?;
     match find_in_path("bash") {
-        Some(path) => println!("  bash: {}", path.display()),
+        Some(path) => writeln!(out, "  bash: {}", path.display())?,
         None => {
             *problems += 1;
-            println!("  problem: bash is not on PATH");
+            writeln!(out, "  problem: bash is not on PATH")?;
         }
     }
-    check_writable("project root", project_dir, problems);
+    match probe_writable(project_dir) {
+        Ok(()) => writeln!(out, "  project root: writable — {}", project_dir.display())?,
+        Err(error) if read_only => {
+            writeln!(
+                out,
+                "  project root: not writable ({error}) — fine for a read-only session"
+            )?;
+        }
+        Err(error) => {
+            *problems += 1;
+            writeln!(
+                out,
+                "  problem: project root {} is not writable: {error}",
+                project_dir.display()
+            )?;
+        }
+    }
     match SessionStore::open_default() {
         Ok(store) => {
-            check_writable(
-                "session directory",
-                &store.sessions_dir(project_dir),
-                problems,
-            );
+            let dir = store.sessions_dir(project_dir);
+            match probe_writable(&dir) {
+                Ok(()) => writeln!(out, "  session directory: writable — {}", dir.display())?,
+                Err(error) => {
+                    *problems += 1;
+                    writeln!(
+                        out,
+                        "  problem: session directory {} is not writable: {error}",
+                        dir.display()
+                    )?;
+                }
+            }
         }
         Err(error) => {
             *problems += 1;
-            println!("  problem: session directory: {error}");
+            writeln!(out, "  problem: session directory: {error}")?;
         }
     }
+    Ok(())
 }
 
-fn check_writable(label: &str, dir: &Path, problems: &mut u32) {
-    match probe_writable(dir) {
-        Ok(()) => println!("  {label}: writable — {}", dir.display()),
-        Err(error) => {
-            *problems += 1;
-            println!(
-                "  problem: {label} {} is not writable: {error}",
-                dir.display()
-            );
-        }
-    }
-}
-
-/// Mirror a session start: create the directory, then a file in it.
+/// Check that a session could write under `dir` without creating it:
+/// probe the nearest existing ancestor with a short-lived file.
 fn probe_writable(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let probe = dir.join(".doctor-probe");
+    let mut target = dir;
+    while !target.exists() {
+        target = target
+            .parent()
+            .ok_or_else(|| std::io::Error::other("no existing ancestor"))?;
+    }
+    let probe = target.join(".dmz-doctor-probe");
     std::fs::write(&probe, b"")?;
     std::fs::remove_file(&probe)
 }
@@ -220,19 +275,19 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Warn on values that look like credentials. The auth store is the
-/// only place for secrets.
-fn secret_warnings(path: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return Vec::new();
-    };
-    let mut warnings = Vec::new();
-    scan_table(&table, "", &mut warnings);
-    warnings
-}
+/// Key names that suggest a credential.
+const SECRET_WORDS: &[&str] = &[
+    "key",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "auth",
+    "bearer",
+];
+
+/// Value prefixes of common credential formats.
+const SECRET_PREFIXES: &[&str] = &["sk-", "sk_", "ghp_", "gho_", "xox", "eyJ"];
 
 fn scan_table(table: &toml::Table, prefix: &str, out: &mut Vec<String>) {
     for (key, value) in table {
@@ -241,48 +296,88 @@ fn scan_table(table: &toml::Table, prefix: &str, out: &mut Vec<String>) {
         } else {
             format!("{prefix}.{key}")
         };
-        match value {
-            toml::Value::Table(sub) => scan_table(sub, &path, out),
-            toml::Value::String(text) if secret_name(key) || secret_value(text) => {
-                out.push(format!(
-                    "`{path}` looks like a secret; move it to the auth store"
-                ));
+        scan_value(key, &path, value, out);
+    }
+}
+
+fn scan_value(key: &str, path: &str, value: &toml::Value, out: &mut Vec<String>) {
+    match value {
+        toml::Value::Table(sub) => scan_table(sub, path, out),
+        toml::Value::Array(items) => {
+            for item in items {
+                scan_value(key, path, item, out);
             }
-            _ => {}
         }
+        toml::Value::String(text) if secret_name(key) || secret_value(text) => {
+            out.push(format!(
+                "`{path}` looks like a secret; move it to the auth store"
+            ));
+        }
+        _ => {}
     }
 }
 
 fn secret_name(key: &str) -> bool {
-    ["key", "token", "secret", "password"]
-        .iter()
-        .any(|word| key.contains(word))
+    let key = key.to_ascii_lowercase();
+    SECRET_WORDS.iter().any(|word| key.contains(word))
 }
 
 fn secret_value(text: &str) -> bool {
-    text.starts_with("sk-")
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn warnings(text: &str) -> Vec<String> {
+        let table = text.parse::<toml::Table>().unwrap();
+        let mut out = Vec::new();
+        scan_table(&table, "", &mut out);
+        out
+    }
+
     #[test]
-    fn secret_shapes_are_flagged_by_name_or_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "model = \"gpt-5.6-sol\"\n\
-             api_key = \"abc\"\n\
+    fn secret_names_are_flagged_in_any_case_and_nesting() {
+        let found = warnings(
+            "API_KEY = \"abc\"\n\
+             AuthToken = \"abc\"\n\
              [providers.anthropic]\n\
-             base_url = \"sk-oops\"",
-        )
-        .unwrap();
-        let warnings = secret_warnings(&path);
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings[0].contains("`api_key`"));
-        assert!(warnings[1].contains("`providers.anthropic.base_url`"));
+             Secret = \"x\"",
+        );
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found[0].contains("`API_KEY`"));
+        assert!(found[1].contains("`AuthToken`"));
+        assert!(found[2].contains("`providers.anthropic.Secret`"));
+    }
+
+    #[test]
+    fn secret_values_are_flagged_by_shape_and_inside_arrays() {
+        let found = warnings(
+            "model = \"gpt-5.6-sol\"\n\
+             a = \"sk-live\"\n\
+             b = \"ghp_abc\"\n\
+             c = \"eyJhbGci\"\n\
+             extras = [\"xoxb-1\", \"plain\"]",
+        );
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found.iter().any(|w| w.contains("`extras`")));
+    }
+
+    #[test]
+    fn plain_settings_are_not_flagged() {
+        assert!(
+            warnings(
+                "model = \"gpt-5.6-sol\"\n\
+                 provider = \"openai-codex\"\n\
+                 history_file = true\n\
+                 [providers.openai-codex]\n\
+                 base_url = \"http://localhost:1\"",
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -291,11 +386,22 @@ mod tests {
     }
 
     #[test]
-    fn writable_probe_cleans_up() {
+    fn writable_probe_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("fresh");
+        let target = dir.path().join("a").join("b");
         probe_writable(&target).unwrap();
-        assert!(target.exists());
-        assert!(!target.join(".doctor-probe").exists());
+        assert!(!target.exists());
+        assert!(!dir.path().join("a").exists());
+        assert!(!dir.path().join(".dmz-doctor-probe").exists());
+    }
+
+    #[test]
+    fn the_report_runs_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let problems = report(dir.path(), &Flags::default(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("active settings"), "{text}");
+        assert!(problems <= 1, "{text}");
     }
 }

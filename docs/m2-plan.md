@@ -103,6 +103,15 @@ Rules:
 - A `[providers.<id>]` table sets per-provider endpoint and model. The
   top-level `provider` key picks the active one. Role tables come in
   M3; the shape above stays valid when they land.
+- In one layer, a `[providers.<id>]` value is more specific than the
+  top-level `model`, so it wins. Across layers, the higher layer wins.
+- Trust rule (step-2 review decision): a project file travels with the
+  repository, so it cannot raise privilege. It cannot raise the
+  approval mode above the user setting, it cannot set `base_url`, and
+  it cannot turn the history file on when the user file turns it off.
+  Ignored keys warn on stderr and in `doctor`.
+- A one-shot run clamps `approval = "ask"` to read-only. There is
+  nobody to ask.
 - No secrets in config files. Credentials live in the auth store only.
   `doctor` warns when it finds a key-shaped value in a config file.
 
@@ -264,6 +273,10 @@ Each step is one PR with its own verify line.
 
 - Anthropic default model. Placeholder above is `claude-sonnet-5`;
   fix the exact model id in step 3 from the live API.
+- Cross-provider model keys (step-2 review). A top-level `model`
+  names one provider's model id, so a provider switch can pair it
+  with the wrong adapter. Decide the rule in step 3, and give each
+  provider its own default model there.
 - Per-input approval grants (deferred from M1). Decide in step 6
   whether `always` stays name-scoped or gains per-input granularity
   for bash.
