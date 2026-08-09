@@ -26,6 +26,13 @@ use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 /// Byte cap for the tool input shown in an approval prompt.
 const PREVIEW_BYTES: usize = 1200;
 
+/// Byte cap for one history entry. A pasted document must not grow
+/// the history file and slow every later boot.
+const HISTORY_ENTRY_BYTES: usize = 8 * 1024;
+
+/// Entry cap for the history, in memory and on disk.
+const HISTORY_ENTRIES: usize = 500;
+
 /// One request to the reader thread.
 struct ReadRequest {
     prompt: String,
@@ -50,8 +57,9 @@ struct Reader {
 
 impl Reader {
     /// Start the reader thread. Fails when the line editor cannot
-    /// start, instead of exiting silently later.
-    fn spawn() -> std::io::Result<Self> {
+    /// start, instead of exiting silently later. `history` is the
+    /// input-history file; `None` keeps history in memory only.
+    fn spawn(history: Option<std::path::PathBuf>) -> std::io::Result<Self> {
         let (requests, receiver) = std_mpsc::channel::<ReadRequest>();
         let (init_tx, init_rx) = std_mpsc::channel::<Result<(), String>>();
         std::thread::spawn(move || {
@@ -64,21 +72,36 @@ impl Reader {
             } else {
                 rustyline::config::Behavior::Stdio
             };
-            let config = rustyline::Config::builder().behavior(behavior).build();
+            let config = rustyline::Config::builder()
+                .behavior(behavior)
+                .max_history_size(HISTORY_ENTRIES)
+                .expect("the entry cap is a small constant")
+                .build();
+            // `with_history` does not hand the config to the history,
+            // so the entry cap must go in here too.
+            let file_history = rustyline::history::FileHistory::with_config(&config);
             let mut editor =
-                match rustyline::Editor::<(), rustyline::history::MemHistory>::with_history(
+                match rustyline::Editor::<(), rustyline::history::FileHistory>::with_history(
                     config,
-                    rustyline::history::MemHistory::new(),
+                    file_history,
                 ) {
-                    Ok(editor) => {
-                        let _ = init_tx.send(Ok(()));
-                        editor
-                    }
+                    Ok(editor) => editor,
                     Err(error) => {
                         let _ = init_tx.send(Err(error.to_string()));
                         return;
                     }
                 };
+            // History is best effort: a missing file is the first
+            // run, and a write error must not stop the session. The
+            // load runs before the init reply, so the ready marker —
+            // and the boot bench behind it — covers it.
+            if let Some(path) = &history {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = editor.load_history(path);
+            }
+            let _ = init_tx.send(Ok(()));
             while let Ok(request) = receiver.recv() {
                 if request.reply.is_closed() {
                     continue;
@@ -91,8 +114,12 @@ impl Reader {
                 if let ReadOutcome::Line(line) = &outcome
                     && request.remember
                     && !line.trim().is_empty()
+                    && line.len() <= HISTORY_ENTRY_BYTES
                 {
                     let _ = editor.add_history_entry(line.as_str());
+                    if let Some(path) = &history {
+                        let _ = editor.append_history(path);
+                    }
                 }
                 // An answer whose asker went away is discarded: a line
                 // meant for a dead approval prompt must never become
@@ -343,7 +370,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // external signal cannot kill the process while the terminal is
     // raw.
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
-    let reader = Reader::spawn()?;
+    let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
     let mode = match runtime.config().approval {
         ApprovalMode::ReadOnly => "read-only",

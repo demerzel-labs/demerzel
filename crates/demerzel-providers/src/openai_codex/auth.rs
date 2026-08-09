@@ -25,6 +25,9 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Default token refresh endpoint.
 pub const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
+/// The message for a run with no credentials. `doctor` prints it too.
+pub const NO_CREDENTIALS_HELP: &str = "no credentials: log in with the Codex CLI (`codex login`)";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodexCredentials {
     pub access_token: String,
@@ -43,6 +46,50 @@ struct StoreFile {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     openai_codex: Option<CodexCredentials>,
+}
+
+/// Where a session's credentials would come from. `doctor` reports
+/// it; [`AuthStore::probe`] fills it without writing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CredentialSource {
+    /// The dmz store already holds credentials.
+    Store,
+    /// The store is empty; the first run imports the Codex CLI login.
+    CodexCliImport,
+    /// The Codex CLI file exists but does not parse; a session fails
+    /// on it with a parse error, not a missing login.
+    CodexCliInvalid,
+}
+
+impl CredentialSource {
+    /// One report line for `doctor`. The wording lives here because
+    /// only this adapter names the Codex CLI.
+    pub fn describe(self) -> &'static str {
+        match self {
+            CredentialSource::Store => "in the dmz store",
+            CredentialSource::CodexCliImport => "ready to import from the Codex CLI",
+            CredentialSource::CodexCliInvalid => "the Codex CLI auth file does not parse",
+        }
+    }
+
+    /// Whether a session can authenticate from this source.
+    pub fn usable(self) -> bool {
+        matches!(
+            self,
+            CredentialSource::Store | CredentialSource::CodexCliImport
+        )
+    }
+}
+
+/// The result of a read-only credential check.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct CredentialProbe {
+    pub source: CredentialSource,
+    /// The `exp` claim of the access token, when the token parses as
+    /// a JWT.
+    pub expires: Option<SystemTime>,
 }
 
 /// The dmz credential store, one JSON file with mode 0600.
@@ -101,12 +148,39 @@ impl AuthStore {
         if self.creds.is_none() {
             self.import_from_codex_cli()?;
         }
-        self.creds.as_ref().ok_or_else(|| {
-            ProviderError::Auth(
-                "no credentials: log in with the Codex CLI (`codex login`); \
-                 `dmz login` arrives in M2"
-                    .to_string(),
-            )
+        self.creds
+            .as_ref()
+            .ok_or_else(|| ProviderError::Auth(NO_CREDENTIALS_HELP.to_string()))
+    }
+
+    /// Report where [`AuthStore::ensure`] would find credentials.
+    /// Reads only; it never writes the store. `None` means a session
+    /// cannot authenticate. The probe mirrors what a session does: an
+    /// unreadable import file or one without both tokens counts as no
+    /// credentials, and a file that fails to parse as JSON reports
+    /// [`CredentialSource::CodexCliInvalid`], because the import
+    /// errors on it.
+    pub fn probe(&self) -> Option<CredentialProbe> {
+        if let Some(creds) = &self.creds {
+            return Some(CredentialProbe {
+                source: CredentialSource::Store,
+                expires: jwt_expiry(&creds.access_token),
+            });
+        }
+        let source = self.codex_cli_path.as_ref()?;
+        let text = std::fs::read_to_string(source).ok()?;
+        let Ok(file) = serde_json::from_str::<Value>(&text) else {
+            return Some(CredentialProbe {
+                source: CredentialSource::CodexCliInvalid,
+                expires: None,
+            });
+        };
+        let access = file["tokens"]["access_token"].as_str()?;
+        // The import needs both tokens, so the probe does too.
+        file["tokens"]["refresh_token"].as_str()?;
+        Some(CredentialProbe {
+            source: CredentialSource::CodexCliImport,
+            expires: jwt_expiry(access),
         })
     }
 
@@ -242,6 +316,29 @@ fn parse_rfc3339(stamp: &str) -> Option<SystemTime> {
     humantime::parse_rfc3339(stamp).ok()
 }
 
+/// Seconds for 9999-12-31T23:59:59Z. A larger `exp` is malformed —
+/// usually a millisecond timestamp — and RFC 3339 cannot render it.
+const MAX_EXPIRY_SECONDS: u64 = 253_402_300_799;
+
+/// Read the `exp` claim out of a JWT. Malformed or out-of-range
+/// claims are `None`, never a panic: the value comes from a file on
+/// disk.
+fn jwt_expiry(jwt: &str) -> Option<SystemTime> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = &claims["exp"];
+    let seconds = exp
+        .as_u64()
+        .or_else(|| exp.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))?;
+    if seconds > MAX_EXPIRY_SECONDS {
+        return None;
+    }
+    SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds))
+}
+
 /// Read the ChatGPT account id claim out of an id-token JWT.
 fn jwt_account_id(jwt: &str) -> Option<String> {
     let payload = jwt.split('.').nth(1)?;
@@ -337,6 +434,76 @@ mod tests {
 
         store.creds.as_mut().unwrap().last_refresh = Some("2026-08-03T00:00:00Z".into());
         assert!(!store.codex_cli_file_is_newer());
+    }
+
+    #[test]
+    fn probe_reports_the_source_without_writing_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
+        let store_path = dir.path().join("auth.json");
+
+        // Import available: the probe sees it and writes nothing.
+        let store = AuthStore::open(store_path.clone(), Some(source)).unwrap();
+        let probe = store.probe().unwrap();
+        assert_eq!(probe.source, CredentialSource::CodexCliImport);
+        assert!(!store_path.exists());
+
+        // Filled store: the probe reads it directly.
+        let mut store = AuthStore::open(store_path.clone(), None).unwrap();
+        store.creds = Some(CodexCredentials {
+            access_token: fake_jwt(json!({"exp": 4102444800u64})),
+            refresh_token: "refresh".into(),
+            id_token: None,
+            account_id: None,
+            last_refresh: None,
+        });
+        let probe = store.probe().unwrap();
+        assert_eq!(probe.source, CredentialSource::Store);
+        let expires = probe.expires.unwrap();
+        let seconds = expires
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(seconds, 4102444800);
+
+        // Neither: no credentials.
+        let empty = AuthStore::open(dir.path().join("other.json"), None).unwrap();
+        assert!(empty.probe().is_none());
+    }
+
+    #[test]
+    fn probe_separates_an_unparsable_codex_cli_file_from_a_missing_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("codex-auth.json");
+
+        std::fs::write(&source, "not json {").unwrap();
+        let store = AuthStore::open(dir.path().join("auth.json"), Some(source.clone())).unwrap();
+        let probe = store.probe().unwrap();
+        assert_eq!(probe.source, CredentialSource::CodexCliInvalid);
+        assert!(!probe.source.usable());
+
+        // Valid JSON without both tokens is a missing login, like the
+        // import treats it.
+        std::fs::write(&source, r#"{"tokens": {"access_token": "a"}}"#).unwrap();
+        let store = AuthStore::open(dir.path().join("auth.json"), Some(source)).unwrap();
+        assert!(store.probe().is_none());
+    }
+
+    #[test]
+    fn jwt_expiry_rejects_malformed_claims_without_panicking() {
+        assert!(jwt_expiry("not-a-jwt").is_none());
+        assert!(jwt_expiry(&fake_jwt(json!({}))).is_none());
+        assert!(jwt_expiry(&fake_jwt(json!({"exp": u64::MAX}))).is_none());
+        // A millisecond timestamp is past the year 9999.
+        assert!(jwt_expiry(&fake_jwt(json!({"exp": 1_754_654_400_000u64}))).is_none());
+        assert!(jwt_expiry(&fake_jwt(json!({"exp": -5.0}))).is_none());
+
+        let expires = jwt_expiry(&fake_jwt(json!({"exp": 4_102_444_800.5}))).unwrap();
+        let seconds = expires
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(seconds, 4_102_444_800);
     }
 
     #[test]
