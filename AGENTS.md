@@ -27,10 +27,39 @@ current.
   stability, correctness. Fix the material findings. Verify the fixes
   with one more review pass. Record the review results in the pull
   request body.
+- Test discipline, checked by the correctness lens: tests exercise
+  public contracts. Do not pin incidental output, such as report
+  wording, unless a plan doc names that output as contract.
+- Declare contract growth in every pull request body, under a
+  `Contract growth` heading. The load-bearing contracts:
+  1. The provider trait.
+  2. Engine events.
+  3. Tool names and input schemas.
+  4. Config keys.
+  5. The session file schema.
+  6. The CLI flags and subcommands.
+  List each addition or change to one of these. Write
+  `Contract growth: none` when there is none. Daniel reviews this
+  section closely; the review gate owns the implementation.
 - Optimize for performance, low memory use, clean stable APIs, and an
   architecture that stays clear as the project grows. Do not trade
   customizability away for these goals.
 - Stop after you open the pull request. Daniel reviews and merges.
+
+## Milestone close-out
+
+Run these two steps at the end of every milestone, before the next
+milestone plan lands:
+
+- An alignment review over the whole repository, not a diff. Two
+  lenses: architecture — the crates and contracts still match
+  [`docs/plan.md`](docs/plan.md) — and simplification — speculative
+  abstraction, dead config surface, single-use indirection. Fold the
+  findings into the plan docs.
+- The metrics receipt: build the release binary, run
+  `bench/metrics.py`, and commit the JSON it writes to
+  `bench/results/`. Compare it against the previous milestone's
+  receipt in the alignment review.
 
 ## Source rules
 

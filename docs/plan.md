@@ -73,6 +73,11 @@ Runtime choices: tokio, reqwest with rustls (keeps musl static builds clean),
 ratatui + crossterm for the TUI. A custom terminal renderer (jcode built its
 own) is considered only if the bench suite shows ratatui as the bottleneck.
 
+Platforms: Linux and macOS are the supported targets. Platform-specific
+code stays POSIX, behind `cfg(unix)`. CI builds and tests both systems.
+The Linux-only tooling lives in `bench/` and is not part of the product.
+Windows is out of scope until a milestone names it.
+
 ### Edits: hash-anchored
 
 File reads return numbered lines under a short snapshot tag of the whole
@@ -313,9 +318,10 @@ the miss documented with a profile trace.
 
 ### M5 — Open-source launch
 
-Docs, contribution guide, CI (fmt, clippy, test, iai-callgrind gate),
-cargo-dist static releases (musl), `dmz` hardlink in installers, README with
-the benchmark report. **Verify:** clean-machine install to working session in
+Docs, contribution guide, the full CI gate (iai-callgrind on top of the
+fmt–clippy–test matrix that landed after M2 step 2), cargo-dist releases —
+static musl for Linux, x86_64 and aarch64 darwin for macOS — `dmz` hardlink
+in installers, README with the benchmark report. **Verify:** clean-machine install to working session in
 under two minutes with each of: ChatGPT subscription, Anthropic key.
 
 ---
