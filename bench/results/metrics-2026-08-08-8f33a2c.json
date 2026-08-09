@@ -1,0 +1,98 @@
+{
+  "benchmark": "metrics",
+  "bin": "target/release/demerzel",
+  "git_rev": "8f33a2c",
+  "git_dirty": false,
+  "date": "2026-08-08",
+  "machine": "machine-2026-08-08.json",
+  "crates": {
+    "demerzel": {
+      "lines": 910,
+      "pub_items": 15
+    },
+    "demerzel-core": {
+      "lines": 2740,
+      "pub_items": 68
+    },
+    "demerzel-mock": {
+      "lines": 306,
+      "pub_items": 15
+    },
+    "demerzel-providers": {
+      "lines": 912,
+      "pub_items": 21
+    },
+    "demerzel-tools": {
+      "lines": 3008,
+      "pub_items": 24
+    }
+  },
+  "lines_total": 7876,
+  "pub_items_total": 143,
+  "external_deps": [
+    "axum",
+    "base64",
+    "clap",
+    "criterion",
+    "futures-core",
+    "globset",
+    "grep-regex",
+    "grep-searcher",
+    "humantime",
+    "ignore",
+    "libc",
+    "reqwest",
+    "rustyline",
+    "serde",
+    "serde_json",
+    "tempfile",
+    "thiserror",
+    "tokio"
+  ],
+  "external_dep_count": 18,
+  "binary_bytes": 6853248,
+  "contracts": {
+    "provider_trait": [
+      "id",
+      "capabilities",
+      "stream"
+    ],
+    "engine_events": [
+      "TextDelta",
+      "ReasoningDelta",
+      "ToolStart",
+      "ToolRun",
+      "ToolEnd",
+      "ModelUsage"
+    ],
+    "tools": [
+      "read",
+      "edit",
+      "create",
+      "bash",
+      "grep",
+      "glob"
+    ],
+    "config_keys": [],
+    "cli_fields": [
+      "prompt",
+      "continue_last",
+      "model",
+      "base_url",
+      "auto",
+      "read_only"
+    ],
+    "cli_subcommands": [
+      "Doctor",
+      "Login"
+    ]
+  },
+  "contract_counts": {
+    "provider_trait": 3,
+    "engine_events": 6,
+    "tools": 6,
+    "config_keys": 0,
+    "cli_fields": 6,
+    "cli_subcommands": 2
+  }
+}
