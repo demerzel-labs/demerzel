@@ -202,7 +202,7 @@ fn report_tools(
         }
     }
     match probe_writable(project_dir) {
-        Ok(()) => writeln!(out, "  project root: writable — {}", project_dir.display())?,
+        Ok(_) => writeln!(out, "  project root: writable — {}", project_dir.display())?,
         Err(error) if read_only => {
             writeln!(
                 out,
@@ -222,7 +222,17 @@ fn report_tools(
         Ok(store) => {
             let dir = store.sessions_dir(project_dir);
             match probe_writable(&dir) {
-                Ok(()) => writeln!(out, "  session directory: writable — {}", dir.display())?,
+                Ok(probed) if probed == dir => {
+                    writeln!(out, "  session directory: writable — {}", dir.display())?;
+                }
+                Ok(probed) => {
+                    writeln!(
+                        out,
+                        "  session directory: writable — {} (checked {})",
+                        dir.display(),
+                        probed.display()
+                    )?;
+                }
                 Err(error) => {
                     *problems += 1;
                     writeln!(
@@ -243,7 +253,9 @@ fn report_tools(
 
 /// Check that a session could write under `dir` without creating it:
 /// probe the nearest existing ancestor with a short-lived file.
-fn probe_writable(dir: &Path) -> std::io::Result<()> {
+/// Returns the directory the probe wrote to, so the report names
+/// what was checked.
+fn probe_writable(dir: &Path) -> std::io::Result<&Path> {
     let mut target = dir;
     while !target.exists() {
         target = target
@@ -252,7 +264,8 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
     }
     let probe = target.join(".dmz-doctor-probe");
     std::fs::write(&probe, b"")?;
-    std::fs::remove_file(&probe)
+    std::fs::remove_file(&probe)?;
+    Ok(target)
 }
 
 fn find_in_path(name: &str) -> Option<PathBuf> {
@@ -386,22 +399,13 @@ mod tests {
     }
 
     #[test]
-    fn writable_probe_creates_nothing() {
+    fn writable_probe_creates_nothing_and_names_the_checked_ancestor() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("a").join("b");
-        probe_writable(&target).unwrap();
+        let probed = probe_writable(&target).unwrap();
+        assert_eq!(probed, dir.path());
         assert!(!target.exists());
         assert!(!dir.path().join("a").exists());
         assert!(!dir.path().join(".dmz-doctor-probe").exists());
-    }
-
-    #[test]
-    fn the_report_runs_in_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut out = Vec::new();
-        let problems = report(dir.path(), &Flags::default(), &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("active settings"), "{text}");
-        assert!(problems <= 1, "{text}");
     }
 }

@@ -53,16 +53,18 @@ enum Command {
 }
 
 impl Cli {
-    /// The flag layer of the config resolution.
+    /// The flag layer of the config resolution. Read-only wins over
+    /// auto: clap rejects the pair at one level, but a global flag on
+    /// each side of a subcommand slips past that check.
     fn flags(&self) -> Flags {
         Flags {
             provider: self.provider.clone(),
             model: self.model.clone(),
             base_url: self.base_url.clone(),
-            approval: if self.auto {
-                Some(ApprovalMode::Auto)
-            } else if self.read_only {
+            approval: if self.read_only {
                 Some(ApprovalMode::ReadOnly)
+            } else if self.auto {
+                Some(ApprovalMode::Auto)
             } else {
                 None
             },
@@ -257,6 +259,16 @@ mod tests {
     fn auto_and_read_only_conflict() {
         let error = Cli::try_parse_from(["demerzel", "--auto", "--read-only", "x"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn read_only_wins_when_global_flags_bypass_the_conflict_check() {
+        // One flag before the subcommand and one after slip past
+        // clap's same-level conflict check.
+        let cli = Cli::try_parse_from(["demerzel", "--read-only", "doctor", "--auto"]).unwrap();
+        assert_eq!(cli.flags().approval, Some(ApprovalMode::ReadOnly));
+        let cli = Cli::try_parse_from(["demerzel", "--auto", "doctor", "--read-only"]).unwrap();
+        assert_eq!(cli.flags().approval, Some(ApprovalMode::ReadOnly));
     }
 
     #[test]

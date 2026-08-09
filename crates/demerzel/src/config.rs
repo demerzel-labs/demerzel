@@ -346,6 +346,7 @@ pub fn resolve(
 
     // Trust rule: the project file can lower the approval mode, never
     // raise it. The baseline is the user file, or the default `ask`.
+    // A flag decides the mode outright, so no warning then.
     let user_approval = layer_key(user, Origin::User, |l| l.approval);
     let baseline = user_approval
         .as_ref()
@@ -353,11 +354,13 @@ pub fn resolve(
         .unwrap_or(ApprovalMode::Ask);
     let project_approval = match layer_key(project, Origin::Project, |l| l.approval) {
         Some(setting) if rank(setting.value) > rank(baseline) => {
-            warnings.push(format!(
-                "ignored: the project file sets approval = {}; a project file \
-                 cannot raise the approval mode; use a flag or the user file",
-                mode_name(setting.value)
-            ));
+            if flags.approval.is_none() {
+                warnings.push(format!(
+                    "ignored: the project file sets approval = {}; a project file \
+                     cannot raise the approval mode; use a flag or the user file",
+                    mode_name(setting.value)
+                ));
+            }
             None
         }
         other => other,
@@ -578,6 +581,16 @@ mod tests {
         assert_eq!(settings.approval.value, Some(ApprovalMode::ReadOnly));
         assert_eq!(settings.approval.origin, Origin::User);
         assert_eq!(warnings.len(), 1);
+
+        // A flag decides the mode outright; the warning goes away.
+        let project = layer("approval = \"auto\"");
+        let flags = Flags {
+            approval: Some(ApprovalMode::Auto),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, Some(&project), None);
+        assert_eq!(settings.approval.value, Some(ApprovalMode::Auto));
+        assert_eq!(settings.approval.origin, Origin::Flag);
     }
 
     #[test]

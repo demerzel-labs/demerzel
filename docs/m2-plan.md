@@ -73,7 +73,9 @@ bench/                 # + render-throughput bench, cache-hit measurement
 TOML, three layers plus defaults. Highest wins:
 
 1. Command-line flags, then their environment variables.
-2. Project file: `.demerzel/config.toml` at the project root.
+2. Project file: `.demerzel/config.toml` at the project root. The
+   project root is the working directory of the run — the M1 rule
+   for tools and sessions. There is no upward search.
 3. User file: `$XDG_CONFIG_HOME/demerzel/config.toml`.
 4. Built-in defaults.
 
@@ -109,7 +111,9 @@ Rules:
   repository, so it cannot raise privilege. It cannot raise the
   approval mode above the user setting, it cannot set `base_url`, and
   it cannot turn the history file on when the user file turns it off.
-  Ignored keys warn on stderr and in `doctor`.
+  Ignored keys warn on stderr and in `doctor`. A project `provider`
+  key can still pick among the endpoints the user file defines;
+  step 3 revisits that edge with the second provider.
 - A one-shot run clamps `approval = "ask"` to read-only. There is
   nobody to ask.
 - No secrets in config files. Credentials live in the auth store only.
