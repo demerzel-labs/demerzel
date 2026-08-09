@@ -327,9 +327,16 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
     match value["type"].as_str().unwrap_or("") {
         "message_start" => {
             let usage = &value["message"]["usage"];
-            state.usage.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
-            state.usage.cache_read_tokens = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
-            state.usage.output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
+            let count = |field: &str| usage[field].as_u64().unwrap_or(0);
+            // The wire `input_tokens` excludes the cached prompt parts.
+            // The neutral field is the whole prompt, like the codex
+            // adapter reports, with `cache_read_tokens` as the subset
+            // served from cache.
+            state.usage.input_tokens = count("input_tokens")
+                + count("cache_creation_input_tokens")
+                + count("cache_read_input_tokens");
+            state.usage.cache_read_tokens = count("cache_read_input_tokens");
+            state.usage.output_tokens = count("output_tokens");
             Vec::new()
         }
         "content_block_start" => {
