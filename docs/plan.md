@@ -126,9 +126,12 @@ translate. No adapter is privileged.
   the first API-key credential path (Anthropic supports no subscription
   OAuth for third-party tools). The provider trait is written in M1 with
   this adapter in mind so wiring it is mechanical, not architectural.
-- Later, by demand: `openai-compat` (Chat Completions against a configurable
-  base URL — Ollama, vLLM, LM Studio, llama.cpp, and most gateways; the
-  widest door for an open-source audience), Gemini, Bedrock.
+- **Post-M5: the local-model track** — `openai-compat` returns as phase 1
+  (Chat Completions against a configurable base URL — Ollama, vLLM,
+  LM Studio, llama.cpp, and most gateways; the widest door for an
+  open-source audience), then a managed local engine. See the post-M5
+  milestone.
+- Later, by demand: Gemini, Bedrock.
 
 Adapters declare capabilities (tool calling, streaming, caching, usage fields);
 the harness degrades features per capability instead of assuming them. Model
@@ -248,22 +251,66 @@ micro-benchmarks; iai-callgrind instruction counts as the CI regression gate
 
 ### Layer 3 — agentic capability (harness + model)
 
-- **Terminal-Bench 2.0** (89 Docker tasks, the field standard) as the primary
-  suite.
-- **Artificial Analysis Coding Agent Index** (scores model+harness stacks) as
-  the external third-party target once public.
-- **Fixed-model A/B**: the same model driven through Demerzel and through
-  Claude Code / pi / omp isolates the harness contribution (Harness-Bench
-  methodology).
-- Cheap smoke: aider-polyglot-style task set for fast iteration.
+- **Terminal-Bench 3.0**, pinned, as the headline terminal suite.
+  **Terminal-Bench 2.1** stays as the longitudinal track for comparison
+  across releases.
+- **SWE-bench Verified** as the repository-repair track.
+- **Fixed-model A/B**: the same model, budget, task versions, and
+  environment driven through Demerzel, through a minimal scaffold, and
+  through one reproducible production harness. The pairing isolates the
+  harness contribution.
+- Cheap smoke: a 3–5 task hermetic subset of the private task bank (see
+  the evaluation contract) for per-PR iteration.
+- **Artificial Analysis Coding Agent Index** stays an external
+  reference, not release evidence.
 
-### Layer 4 — loop efficiency
+### Layer 4 — reliability and efficiency
 
+Layer 4 reports a performance–reliability curve, not one efficiency
+score:
+
+- `pass@1`, `pass@k`, and `pass^k` on repeated Layer-3 trials, with
+  task-level confidence intervals.
+- Accepted tasks and repeated-run success plotted against tokens, cost,
+  wall time, context growth, and machine resources.
 - Prompt-cache hit rate (cache-read tokens / input tokens) on replayed
   sessions — proves prefix discipline.
-- Tokens per completed task on the Layer-3 suites — cost per successful task.
 - Memory recall precision on replayed sessions with known relevant facts —
   gates the optional move from BM25 to embeddings.
+
+### Evaluation contract
+
+The evaluated candidate is model × harness × tools × environment ×
+budget, not a bare model and not one transcript. The contract is
+versioned with the code:
+
+1. **Candidate envelope**: the Demerzel commit and binary, the provider
+   and model snapshot, system-prompt and tool-schema hashes, the
+   environment image, the retry and context policy, and the execution
+   budget.
+2. **Scenario**: clean setup from an immutable base, a deterministic
+   seed, the allowed tools, a state oracle, policy assertions, slice
+   labels, and an optional fault profile.
+3. **Evidence bundle**: the typed model and tool trace, artifacts, the
+   final-state diff, outcome assertions, token and tool cost, wall
+   time, memory and I/O, and an infrastructure-failure classification.
+4. **Grading order**: outcome first — inspect the final state, do not
+   trust the agent's claim of success. Layers 1–2 stay deterministic.
+   Trace graders serve diagnosis and mandatory approval paths.
+   Calibrated rubric judges decide only where code and state cannot.
+5. **Release gates**: a confirmed critical policy failure blocks.
+   Capability changes use explicit non-inferiority margins. Cost,
+   latency, and resource budgets warn or block separately — they never
+   disappear into one scalar score. No harness-superiority claim
+   without a same-model, same-budget paired result.
+6. **Living suite**: reproduced dogfood failures graduate into a small
+   per-PR regression bank. Nightly runs add repetitions, perturbations,
+   and judge grades. Sealed and adversarial cases stay pre-release.
+
+Build order across milestones: measurement seams land in M2, the runner
+foundation at the M3 exit, the public baseline as the first M4
+workstream, the published receipts as an M5 launch gate. The milestone
+sections below carry the details.
 
 ### Targets
 
@@ -303,6 +350,9 @@ real numbers.
 ratatui TUI (streaming, edit previews, approvals), `anthropic` adapter with
 prompt caching and API-key credentials, `dmz login` for the ChatGPT
 subscription, layered config (user, project, flags), slash commands, `doctor`.
+Measurement seams for the evaluation contract: engine events and session
+records keep usage, cost, cache, tool-step, termination, environment, and
+final-outcome fields. The full evaluation runner does not delay M2.
 **Verify:** TUI session parity with the REPL; cache-hit rate measured on a
 replayed session; config precedence tests.
 
@@ -310,15 +360,27 @@ replayed session; config precedence tests.
 
 Skills, hooks, MCP client with deferred discovery, subagents with typed
 results, competitor-config auto-discovery, theming, project memory (store,
-tools, auto-recall), and the personality profile. **Verify:** a skill, a hook,
+tools, auto-recall), and the personality profile. At the M3 exit, the
+evaluation runner foundation: the Harbor agent adapter, versioned candidate
+and scenario manifests, the evidence-bundle serializer, artifact and
+state-oracle interfaces, and a 10–20 task private bank built from reproduced
+dogfood failures, with a 3–5 task hermetic smoke subset cheap enough for CI.
+**Verify:** a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
 existing `.claude`/`.cursor` config with zero edits; a fact saved in one
-session comes back in a fresh session inside the token budget.
+session comes back in a fresh session inside the token budget; the smoke
+subset runs hermetically.
 
 ### M4 — Optimization pass and first benchmark report
 
-Profile against Layer 1/2 gates; land prefix stability, compaction with
-distillation into memory, connection reuse. Publish the first full report: pinned competitor versions, machine spec,
+The public benchmark baseline is the first workstream: pinned
+Terminal-Bench 3.0 as the headline track, Terminal-Bench 2.1 as the
+longitudinal track, SWE-bench Verified as the repository-repair track, and
+fixed-model A/B pairs against a minimal scaffold and one reproducible
+production harness — same model snapshot, effort, budgets, task versions,
+and environment. Then profile against Layer 1/2 gates; land prefix
+stability, compaction with distillation into memory, connection reuse.
+Publish the first full report: pinned competitor versions, machine spec,
 raw data, all four layers. **Verify:** every gate in the targets table met or
 the miss documented with a profile trace.
 
@@ -327,8 +389,41 @@ the miss documented with a profile trace.
 Docs, contribution guide, the full CI gate (iai-callgrind on top of the
 fmt–clippy–test matrix that landed after M2 step 2), cargo-dist releases —
 static musl for Linux, x86_64 and aarch64 darwin for macOS — `dmz` hardlink
-in installers, README with the benchmark report. **Verify:** clean-machine install to working session in
+in installers, README with the benchmark report. The benchmark receipts are
+a launch gate: committed manifests, raw results, traces, slice reports,
+confidence intervals, cost, tokens, and infrastructure-error rates, under
+the evaluation contract. **Verify:** clean-machine install to working session in
 under two minutes with each of: ChatGPT subscription, Anthropic key.
+
+### Post-M5 — Local models and benchmark expansion
+
+The local-model track, in three phases. The engine stays outside the
+Demerzel executable, so the <25 MB binary gate holds. "Offline" means no
+network egress by default. Telemetry stays out; any future telemetry must
+be opt-in.
+
+1. **Local provider contract.** Restore `openai-compat` for Ollama, vLLM,
+   LM Studio, and user-owned `llama-server`. `local` is an ordinary
+   provider: explicit capabilities, model identity recorded in session
+   files, the same tool schemas, approval policy, loop, and error
+   taxonomy. Add a no-egress integration test and local-provider fixtures
+   to the mock server.
+2. **Managed sidecar.** `dmz --offline-model <model.gguf>`. Download a
+   pinned, checksum-verified `llama.cpp` build only after explicit
+   approval. Discover existing GGUF files and running servers before any
+   download. Estimate weights-plus-KV-cache memory and show the
+   assumptions before launch. Distinguish owned from attached servers;
+   clean up only owned processes.
+3. **Native engine experiment.** Consider in-process inference only if it
+   beats the managed sidecar on measured stable-prefix reuse, tool-call
+   validity, subagent batching, footprint, latency, and accepted-task
+   rate. The likely default stays the sidecar.
+
+Benchmark expansion, same placement: SWE-bench Pro and Multilingual, Aider
+Polyglot as an edit-protocol diagnostic, METR-style time-horizon
+stratification, and a Factorio long-horizon track. Same-model local/cloud
+runs join the Layer-3 pairs, with raw receipts published like every other
+claim.
 
 ---
 
@@ -357,7 +452,7 @@ under two minutes with each of: ChatGPT subscription, Anthropic key.
   overrides); decide in M3 with real dogfood feedback.
 - Subagent transport: in-process vs subprocess-per-agent; footprint benches
   decide.
-- Whether Terminal-Bench harness adapters accept a third-party agent cleanly or
-  need a shim (investigate during M3).
+- Whether the Harbor agent adapter accepts a third-party agent cleanly or
+  needs a shim (build at the M3 exit; Terminal-Bench runs through Harbor).
 - Name collision hygiene: crates.io names (`demerzel` availability) checked
   before M5.
