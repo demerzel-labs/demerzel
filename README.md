@@ -30,6 +30,12 @@ cargo build --release
 The branch `archive/python-pipeline-harness-2026-07-31` holds the previous
 contents of this repository: a Python review harness for CI pipelines.
 
+## Prior art
+
+Demerzel builds on ideas from coding agents that came before it.
+[`docs/prior-art.md`](docs/prior-art.md) names each source and the
+license that applies. Demerzel does not copy code from other projects.
+
 ## License
 
 MIT

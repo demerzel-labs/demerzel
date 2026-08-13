@@ -99,8 +99,8 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
-    /// One report line for `doctor`. The wording lives here because
-    /// only this module names the Codex CLI.
+    /// One report line for `doctor`. The wording lives here, next to
+    /// the import machinery it describes.
     pub fn describe(self) -> &'static str {
         match self {
             CredentialSource::Store => "in the dmz store",

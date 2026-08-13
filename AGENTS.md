@@ -20,6 +20,23 @@ current.
   1. `cargo fmt`
   2. `cargo clippy --workspace --all-targets -- -D warnings`
   3. `cargo test --workspace`
+- Publication check, before every pull request. Read the full diff.
+  Reject content that must not become public:
+  1. Other products named in source code, code comments, or READMEs
+     (see Source rules).
+  2. Credentials or secret-shaped strings. A test value must be
+     clearly fake.
+  3. Personal identifiers of the project's own people: usernames,
+     email addresses, hostnames, and absolute paths under a home
+     directory. The owner's name in `LICENSE` and in this file is
+     deliberate and stays.
+  4. Endpoints, tokens, or identifiers that are not already
+     published. A value counts as published when an open-source
+     client states it.
+  Remove each hit, or move the content to its approved place. Do
+  this before the pull request opens. A full-tree sweep with the
+  same list ran on 2026-08-12, so the diff scope covers everything
+  after that date.
 - The final gate before every pull request that changes code: dispatch
   adversarial review subagents (Opus 5, high reasoning effort) over the
   full change set.
@@ -63,11 +80,20 @@ milestone plan lands:
 
 ## Source rules
 
-- Do not name other coding harnesses in source code or code comments —
-  no product names, no borrowed feature names. Prior-art credit lives
-  in `docs/` only.
-- Exception: the `openai-codex` adapter names the Codex CLI, because
-  that client is the wire-contract reference for the endpoint.
+- Demerzel credits its design inspirations openly. All prior-art
+  credit lives in `docs/`. [`docs/prior-art.md`](docs/prior-art.md)
+  names each source and the license that applies. Demerzel
+  reimplements ideas; it does not copy code from other projects.
+- Keep code, code comments, and READMEs in Demerzel's own terms. Do
+  not describe a feature through another product's name. Such a
+  reference goes stale and hides the contract the code must state.
+- Exception: these sites name the Codex CLI:
+  `crates/demerzel-providers/src/openai_codex/`,
+  `crates/demerzel-providers/src/auth.rs`, and the callers and
+  examples that wire the credential import. That client is the
+  wire-contract reference for the endpoint and the source of
+  imported logins. The word Codex alone names the endpoint and the
+  provider; it is not a product name under this rule.
 
 ## Documentation placement
 
