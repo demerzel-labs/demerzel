@@ -2,8 +2,8 @@
 """PSS/USS sampler: the Layer 1 memory measurement primitive.
 
 Reads /proc/<pid>/smaps_rollup for each given PID and prints PSS and USS in
-KiB, plus totals. PSS is the metric jcode publishes, so cross-agent comparisons
-use it; USS is reported alongside because it is the stricter number.
+KiB, plus totals. PSS is the metric that published cross-agent comparisons
+use; USS is reported alongside because it is the stricter number.
 
 `idle.py` next to this file drives the idle-session scenario over this
 primitive. The N-session and large-transcript scenarios come later.

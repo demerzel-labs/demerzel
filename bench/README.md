@@ -16,7 +16,8 @@ data for each number goes into `results/`. The "Benchmark program" section of
    runs. Each report keeps the confidence intervals that hyperfine calculates.
 5. **Comparable.** When a report compares Demerzel with another agent, it uses
    the same metric as that agent. For memory, the metric is PSS from
-   `/proc/<pid>/smaps_rollup`, because jcode publishes PSS.
+   `/proc/<pid>/smaps_rollup`, the metric the comparison targets publish.
+   [`docs/plan.md`](../docs/plan.md) names the comparison targets.
 6. **Raw data included.** We commit the raw JSON output next to each published
    summary.
 
