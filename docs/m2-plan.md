@@ -53,7 +53,8 @@ file-backed REPL history, cache-hit measurement.
 Out (deferred to the milestone in parentheses): skills, hooks, MCP,
 subagents, competitor-config discovery, theming, memory, personality
 (M3), per-role model routing and fallback chains (M3, with subagents),
-compaction (M4), `openai-compat` adapter (by demand), background-task
+compaction (M4), `openai-compat` adapter (post-M5, phase 1 of the
+local-model track in [`plan.md`](plan.md)), background-task
 mechanism (decision revisited at the end of M2; see the open question
 in [`plan.md`](plan.md)).
 
@@ -232,6 +233,12 @@ A Layer-4 slice, pulled forward because it is the M2 exit criterion:
   envelope.
 - Add a render-throughput bench for the TUI over the mock stream
   (Layer 2).
+- Measurement seams (evaluation-contract prework, see
+  [`plan.md`](plan.md)): engine events and session records keep
+  usage, cost, cache, tool-step, termination, environment, and
+  final-outcome fields. Step 7 checks that these fields are present.
+  The full evaluation runner waits for the M3 exit and does not
+  delay M2.
 
 ## Dependencies
 
