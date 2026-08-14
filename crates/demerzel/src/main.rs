@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
-use demerzel::{RunConfig, Runtime, doctor};
+use demerzel::{RunConfig, Runtime, doctor, login};
 use demerzel_core::{ApprovalMode, TurnOutcome};
 
 /// Demerzel: a terminal coding agent.
@@ -48,8 +48,16 @@ struct Cli {
 enum Command {
     /// Check config, credentials, and tools.
     Doctor,
-    /// Log in with the ChatGPT subscription. Arrives later in M2.
-    Login,
+    /// Log in to a provider.
+    ///
+    /// With no argument the flow is the ChatGPT subscription, through
+    /// the browser.
+    Login {
+        /// anthropic (an API key, prompted and verified) or
+        /// openai-codex (the browser flow, the default).
+        #[arg(value_name = "PROVIDER")]
+        provider: Option<String>,
+    },
 }
 
 impl Cli {
@@ -83,9 +91,8 @@ fn main() {
     };
     match &cli.command {
         Some(Command::Doctor) => std::process::exit(doctor::run(&cwd, &cli.flags())),
-        Some(Command::Login) => {
-            eprintln!("demerzel: `login` arrives later in M2");
-            std::process::exit(1);
+        Some(Command::Login { provider }) => {
+            std::process::exit(run_login(&cli, provider.as_deref(), &cwd))
         }
         None => {}
     }
@@ -159,6 +166,84 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Run `dmz login` and return the process exit code. Ctrl-C stops
+/// the flow and exits 130, like an aborted one-shot.
+fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
+    // The positional wins; the global `--provider` flag is the same
+    // request in flag form.
+    let provider = provider.or(cli.provider.as_deref());
+    let options = match login_options(cli, provider, cwd) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("demerzel: {message}");
+            return 1;
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build the tokio runtime");
+    let outcome = runtime.block_on(async {
+        // Biased, signal first: the Ctrl-C handler installs before
+        // the login future can occupy the first poll.
+        tokio::select! {
+            biased;
+            signal = tokio::signal::ctrl_c() => {
+                // A registration failure resolves here too; name it
+                // instead of posing as an interrupt.
+                if let Err(error) = signal {
+                    eprintln!("demerzel: the Ctrl-C watch failed: {error}");
+                }
+                None
+            }
+            result = login::run(provider, &options) => Some(result),
+        }
+    });
+    match outcome {
+        None => {
+            eprintln!("demerzel: login aborted");
+            // Exit while the runtime lives. Dropping it would wait
+            // for a parked stdin read that only Enter can end.
+            std::process::exit(130);
+        }
+        Some(Ok(())) => 0,
+        Some(Err(error)) => {
+            eprintln!("demerzel: {error}");
+            1
+        }
+    }
+}
+
+/// Build the login options: the store path the provider crate owns,
+/// and for the key check the endpoint the config layers resolve for
+/// the anthropic provider — flags beat environment beat user file,
+/// the same order a session uses.
+fn login_options(cli: &Cli, provider: Option<&str>, cwd: &Path) -> Result<login::Options, String> {
+    let store_path =
+        demerzel_providers::auth::AuthStore::default_path().map_err(|e| e.to_string())?;
+    let mut options = login::Options::new(store_path);
+    if provider == Some(demerzel_providers::anthropic::PROVIDER_ID) {
+        let locations = config::Locations::locate(cwd);
+        let user = load_layer(locations.user.as_deref())?;
+        let project = load_layer(Some(&locations.project))?;
+        let mut flags = cli.flags();
+        flags.provider = Some(demerzel_providers::anthropic::PROVIDER_ID.to_string());
+        let (settings, ignored) = config::resolve(
+            &flags,
+            &|name| std::env::var(name).ok(),
+            project.as_ref(),
+            user.as_ref(),
+        );
+        for warning in &ignored {
+            eprintln!("demerzel: {warning}");
+        }
+        if let Some(base_url) = settings.base_url.value {
+            options.anthropic_base_url = base_url;
+        }
+    }
+    Ok(options)
 }
 
 /// Resolve flags, environment, and config files into the run config.
@@ -282,7 +367,14 @@ mod tests {
         let cli = parse(&["doctor"]);
         assert!(matches!(cli.command, Some(Command::Doctor)));
         let cli = parse(&["login"]);
-        assert!(matches!(cli.command, Some(Command::Login)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Login { provider: None })
+        ));
+        let cli = parse(&["login", "anthropic"]);
+        assert!(
+            matches!(cli.command, Some(Command::Login { provider: Some(p) }) if p == "anthropic")
+        );
     }
 
     #[test]

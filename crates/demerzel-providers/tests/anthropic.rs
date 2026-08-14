@@ -627,3 +627,41 @@ async fn a_stream_cut_before_message_stop_is_a_protocol_error() {
         Some(Err(ProviderError::Protocol(m))) if m.contains("message_stop")
     ));
 }
+
+#[tokio::test]
+async fn verify_key_maps_the_status_to_the_outcome() {
+    // 200 accepts, 401 rejects, 500 is a server error.
+    let mock = MockServer::start(
+        vec![
+            MockResponse::stream(vec![]),
+            MockResponse::error(401),
+            MockResponse::error(403),
+            MockResponse::error(500),
+        ],
+        vec![],
+    )
+    .await;
+    let http = reqwest::Client::new();
+
+    demerzel_providers::anthropic::verify_key(&http, &mock.url(), "sk-good")
+        .await
+        .unwrap();
+    let rejected = demerzel_providers::anthropic::verify_key(&http, &mock.url(), "sk-bad")
+        .await
+        .unwrap_err();
+    assert!(matches!(rejected, ProviderError::Auth(_)), "{rejected}");
+    let no_access = demerzel_providers::anthropic::verify_key(&http, &mock.url(), "sk-403")
+        .await
+        .unwrap_err();
+    assert!(matches!(no_access, ProviderError::Auth(_)), "{no_access}");
+    let broken = demerzel_providers::anthropic::verify_key(&http, &mock.url(), "sk-any")
+        .await
+        .unwrap_err();
+    assert!(matches!(broken, ProviderError::Server(_)), "{broken}");
+
+    let received = mock.received();
+    assert_eq!(received.len(), 4);
+    assert_eq!(received[0].path, "/v1/models");
+    assert_eq!(received[0].api_key.as_deref(), Some("sk-good"));
+    assert_eq!(received[0].anthropic_version.as_deref(), Some("2023-06-01"));
+}

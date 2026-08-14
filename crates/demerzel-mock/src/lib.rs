@@ -1,11 +1,11 @@
 //! Mock model endpoint for hermetic tests and Layer-2 benchmarks.
 //!
-//! The server implements `POST /responses` (Codex) and
-//! `POST /v1/messages` (Anthropic); both replay one scripted list of
-//! responses in request order. It also implements `POST /oauth/token`
-//! for the credential-refresh path. It records every request so tests
-//! can assert on serialization and headers. Never part of the shipped
-//! binary.
+//! The server implements `POST /responses` (Codex), `POST /v1/messages`
+//! (Anthropic), and `GET /v1/models` (the key check); all three replay
+//! one scripted list of responses in request order. It also implements
+//! `POST /oauth/token` for the credential-refresh and login-exchange
+//! paths. It records every request so tests can assert on
+//! serialization and headers. Never part of the shipped binary.
 
 pub mod anthropic;
 pub mod codex;
@@ -25,7 +25,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use serde_json::Value;
 use serde_json::json;
 
@@ -161,6 +161,7 @@ impl MockServer {
         let app = Router::new()
             .route("/responses", post(handle_responses))
             .route("/v1/messages", post(handle_messages))
+            .route("/v1/models", get(handle_models))
             .route("/oauth/token", post(handle_token))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -223,6 +224,10 @@ async fn handle_messages(
     scripted_reply(&state, "/v1/messages", &headers, body)
 }
 
+async fn handle_models(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    scripted_reply(&state, "/v1/models", &headers, String::new())
+}
+
 /// Replay the next scripted reply, whichever model route asked.
 fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: String) -> Response {
     if !state.cycle {
@@ -282,12 +287,61 @@ async fn handle_token(
     body: String,
 ) -> Response {
     if !state.cycle {
-        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        record(&state, "/oauth/token", &headers, body);
+        record(&state, "/oauth/token", &headers, parse_token_body(&body));
     }
     let next = state.token_responses.lock().unwrap().pop_front();
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock token script exhausted").into_response();
     };
     (StatusCode::OK, reply.to_string()).into_response()
+}
+
+/// The token route receives two body shapes: the refresh flow posts
+/// JSON, the login exchange posts a urlencoded form. Record both as
+/// one JSON object so tests assert the same way.
+fn parse_token_body(body: &str) -> Value {
+    if let Ok(value) = serde_json::from_str(body) {
+        return value;
+    }
+    let mut map = serde_json::Map::new();
+    for pair in body.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(form_decode(key), Value::String(form_decode(value)));
+    }
+    Value::Object(map)
+}
+
+/// Decode one urlencoded form value. A copy of the provider crate's
+/// private decoder: depending on `demerzel-providers` here would make
+/// a dev-dependency cycle.
+fn form_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

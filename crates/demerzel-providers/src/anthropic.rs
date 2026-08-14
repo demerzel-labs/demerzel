@@ -31,7 +31,8 @@ pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 pub const ENV_API_KEY: &str = "ANTHROPIC_API_KEY";
 
 /// The message for a run with no API key. `doctor` prints it too.
-pub const NO_CREDENTIALS_HELP: &str = "no Anthropic API key: set ANTHROPIC_API_KEY";
+pub const NO_CREDENTIALS_HELP: &str =
+    "no Anthropic API key: run `dmz login anthropic` or set ANTHROPIC_API_KEY";
 
 /// Pinned `anthropic-version` header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -59,6 +60,39 @@ impl Default for AnthropicConfig {
             thinking: Some(json!({"type": "adaptive", "display": "summarized"})),
         }
     }
+}
+
+/// Check an API key with one cheap call: list one model. `Ok` means
+/// the endpoint accepted the key. `dmz login anthropic` verifies a
+/// key with this before it stores it.
+pub async fn verify_key(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<(), ProviderError> {
+    let url = format!("{base_url}/v1/models?limit=1");
+    let response = http
+        .get(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| ProviderError::Network(format!("key check: {e}")))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    // Every 4xx except 429 means the endpoint refused this check —
+    // a bad key, or a wrong endpoint URL. Not an outage.
+    if status.is_client_error() && status.as_u16() != 429 {
+        return Err(ProviderError::Auth(format!(
+            "the endpoint rejected the key check (status {status}) — \
+             check the key and the endpoint URL"
+        )));
+    }
+    Err(ProviderError::Server(format!(
+        "key check failed with status {status}"
+    )))
 }
 
 pub struct Anthropic {
