@@ -190,7 +190,14 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
         // the login future can occupy the first poll.
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => None,
+            signal = tokio::signal::ctrl_c() => {
+                // A registration failure resolves here too; name it
+                // instead of posing as an interrupt.
+                if let Err(error) = signal {
+                    eprintln!("demerzel: the Ctrl-C watch failed: {error}");
+                }
+                None
+            }
             result = login::run(provider, &options) => Some(result),
         }
     });

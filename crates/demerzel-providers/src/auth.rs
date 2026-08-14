@@ -415,7 +415,9 @@ impl AuthStore {
         }
         // Write a fresh sibling file at mode 0600 from creation, then
         // rename it into place. No reader sees a world-readable window
-        // or a half-written store.
+        // or a half-written store. Two concurrent saves can race on
+        // the sibling file and fail cleanly; neither can corrupt the
+        // store.
         let tmp = self.path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
         let mut options = std::fs::OpenOptions::new();
@@ -433,6 +435,13 @@ impl AuthStore {
             handle
                 .write_all(text.as_bytes())
                 .map_err(|e| ProviderError::Auth(format!("write {tmp:?}: {e}")))?;
+        }
+        // The creation mode is masked by the umask; this is not.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| ProviderError::Auth(format!("chmod {tmp:?}: {e}")))?;
         }
         std::fs::rename(&tmp, &self.path)
             .map_err(|e| ProviderError::Auth(format!("write {:?}: {e}", self.path)))?;

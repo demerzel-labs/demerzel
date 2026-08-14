@@ -82,11 +82,12 @@ pub async fn verify_key(
     if status.is_success() {
         return Ok(());
     }
-    // Every 4xx except 429 means the endpoint refused this key or
-    // this request — not an outage.
+    // Every 4xx except 429 means the endpoint refused this check —
+    // a bad key, or a wrong endpoint URL. Not an outage.
     if status.is_client_error() && status.as_u16() != 429 {
         return Err(ProviderError::Auth(format!(
-            "the endpoint rejected the key (status {status})"
+            "the endpoint rejected the key check (status {status}) — \
+             check the key and the endpoint URL"
         )));
     }
     Err(ProviderError::Server(format!(

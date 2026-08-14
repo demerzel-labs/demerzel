@@ -9,7 +9,7 @@
 //!
 //! The loopback listener hand-rolls its HTTP reply, so the flow needs
 //! no HTTP-server dependency. Each connection is served on its own
-//! task inside one time budget, so a stalled client cannot block the
+//! task under a read deadline, so a stalled client cannot block the
 //! real redirect. Only a request that carries this login's state ends
 //! the wait; everything else gets a 404 and the wait continues, so a
 //! stray or hostile local request cannot end the login.
@@ -29,9 +29,10 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::RunError;
 
-/// The whole time budget for one loopback connection: read the
-/// request, write the reply.
-const CONNECTION_BUDGET: Duration = Duration::from_secs(10);
+/// The time budget for reading one loopback request. The reply is a
+/// small buffered write and runs untimed, so a slow reply can never
+/// discard a received code.
+const READ_BUDGET: Duration = Duration::from_secs(10);
 
 /// Everything a login run needs. `main` fills it with the defaults;
 /// tests point the endpoints at a mock and the store at a temp dir.
@@ -151,10 +152,7 @@ impl CodexFlow {
                     let request = Arc::clone(&self.request);
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let served =
-                            tokio::time::timeout(CONNECTION_BUDGET, serve_connection(stream, request))
-                                .await;
-                        if let Ok(Some(outcome)) = served {
+                        if let Some(outcome) = serve_connection(stream, request).await {
                             let _ = tx.send(outcome).await;
                         }
                     });
@@ -237,7 +235,10 @@ async fn serve_connection(
     mut stream: TcpStream,
     request: Arc<oauth::AuthorizeRequest>,
 ) -> Option<Result<String, RunError>> {
-    let target = read_request_target(&mut stream).await?;
+    let target = tokio::time::timeout(READ_BUDGET, read_request_target(&mut stream))
+        .await
+        .ok()
+        .flatten()?;
     let path = target
         .split_once('?')
         .map_or(target.as_str(), |(path, _)| path);
@@ -271,7 +272,7 @@ async fn serve_connection(
 /// Read the target out of an HTTP request line. Reads until the
 /// headers end, so the reply never races unread request bytes.
 /// `None` for anything that does not deliver a request line within
-/// the buffer; the caller's time budget bounds the wait.
+/// the buffer; the caller's read budget bounds the wait.
 async fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut buf = [0u8; 8192];
     let mut len = 0;
