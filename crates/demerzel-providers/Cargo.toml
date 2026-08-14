@@ -10,10 +10,12 @@ repository.workspace = true
 base64 = { workspace = true }
 demerzel-core = { workspace = true }
 futures-core = { workspace = true }
+getrandom = { workspace = true }
 humantime = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync", "time", "rt"] }
 
 [dev-dependencies]

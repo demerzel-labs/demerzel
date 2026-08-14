@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
-use demerzel::{RunConfig, Runtime, doctor};
+use demerzel::{RunConfig, Runtime, doctor, login};
 use demerzel_core::{ApprovalMode, TurnOutcome};
 
 /// Demerzel: a terminal coding agent.
@@ -48,8 +48,12 @@ struct Cli {
 enum Command {
     /// Check config, credentials, and tools.
     Doctor,
-    /// Log in with the ChatGPT subscription. Arrives later in M2.
-    Login,
+    /// Log in. No argument: the ChatGPT subscription, through the
+    /// browser. `anthropic`: an API key, prompted and verified.
+    Login {
+        #[arg(value_name = "PROVIDER")]
+        provider: Option<String>,
+    },
 }
 
 impl Cli {
@@ -83,10 +87,7 @@ fn main() {
     };
     match &cli.command {
         Some(Command::Doctor) => std::process::exit(doctor::run(&cwd, &cli.flags())),
-        Some(Command::Login) => {
-            eprintln!("demerzel: `login` arrives later in M2");
-            std::process::exit(1);
-        }
+        Some(Command::Login { provider }) => std::process::exit(run_login(provider.as_deref())),
         None => {}
     }
     let config = match run_config(&cli, cwd) {
@@ -157,6 +158,40 @@ fn main() {
         Some(Err(error)) => {
             eprintln!("demerzel: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Run `dmz login` and return the process exit code. Ctrl-C stops
+/// the flow and exits 130, like an aborted one-shot.
+fn run_login(provider: Option<&str>) -> i32 {
+    let store_path = match demerzel_core::paths::data_dir() {
+        Ok(dir) => dir.join("auth.json"),
+        Err(error) => {
+            eprintln!("demerzel: {error}");
+            return 1;
+        }
+    };
+    let options = login::Options::new(store_path);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build the tokio runtime");
+    let outcome = runtime.block_on(async {
+        tokio::select! {
+            result = login::run(provider, &options) => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
+        }
+    });
+    match outcome {
+        None => {
+            eprintln!("demerzel: login aborted");
+            130
+        }
+        Some(Ok(())) => 0,
+        Some(Err(error)) => {
+            eprintln!("demerzel: {error}");
+            1
         }
     }
 }
@@ -282,7 +317,14 @@ mod tests {
         let cli = parse(&["doctor"]);
         assert!(matches!(cli.command, Some(Command::Doctor)));
         let cli = parse(&["login"]);
-        assert!(matches!(cli.command, Some(Command::Login)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Login { provider: None })
+        ));
+        let cli = parse(&["login", "anthropic"]);
+        assert!(
+            matches!(cli.command, Some(Command::Login { provider: Some(p) }) if p == "anthropic")
+        );
     }
 
     #[test]

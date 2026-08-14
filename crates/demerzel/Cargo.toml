@@ -16,16 +16,17 @@ demerzel-core = { workspace = true }
 demerzel-providers = { workspace = true }
 demerzel-tools = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
 rustyline = { workspace = true, features = ["with-file-history"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "signal", "time"] }
 toml = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 demerzel-mock = { workspace = true }
-reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 

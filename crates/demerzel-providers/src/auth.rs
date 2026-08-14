@@ -5,11 +5,11 @@
 //! save untouched, and a save never lowers the version stamp, so this
 //! build can rewrite a newer file without data loss.
 //!
-//! The `openai_codex` section carries the OAuth machinery from M1. There
-//! is no login flow yet: the store imports the Codex CLI login from
-//! `~/.codex/auth.json` into dmz's own file and refreshes tokens with
-//! the standard OAuth refresh flow. It writes updates to its own store
-//! only, never to the Codex CLI file.
+//! The `openai_codex` section carries the OAuth machinery. `dmz login`
+//! writes it through the PKCE flow in [`crate::oauth`]; the store can
+//! also import a Codex CLI login from `~/.codex/auth.json`. Tokens
+//! refresh with the standard OAuth refresh flow. The store writes
+//! updates to its own file only, never to the Codex CLI file.
 //!
 //! Refresh strategy (M1 decision): when the Codex CLI file holds a newer
 //! `last_refresh` than our store, re-import it instead of spending our
@@ -17,8 +17,7 @@
 //! other while the Codex CLI stays in daily use.
 //!
 //! The `anthropic` section holds an API key. `dmz login anthropic`
-//! (M2 step 4) writes it; until then the `ANTHROPIC_API_KEY` variable
-//! is the usual source and the store section stays empty.
+//! writes it; the `ANTHROPIC_API_KEY` variable stays the override.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -36,7 +35,7 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
 /// The message for a run with no credentials. `doctor` prints it too.
-pub const NO_CREDENTIALS_HELP: &str = "no credentials: log in with the Codex CLI (`codex login`)";
+pub const NO_CREDENTIALS_HELP: &str = "no credentials: run `dmz login`";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodexCredentials {
@@ -258,6 +257,28 @@ impl AuthStore {
         })
     }
 
+    /// Store fresh codex credentials — a completed `dmz login` — and
+    /// save the file at mode 0600.
+    pub fn set_codex_credentials(&mut self, creds: CodexCredentials) -> Result<(), ProviderError> {
+        self.creds = Some(creds);
+        self.save()
+    }
+
+    /// Store the Anthropic API key and save the file at mode 0600.
+    /// Extra fields in an existing section ride through untouched.
+    pub fn set_anthropic_key(&mut self, api_key: String) -> Result<(), ProviderError> {
+        match &mut self.anthropic {
+            Some(creds) => creds.api_key = api_key,
+            None => {
+                self.anthropic = Some(AnthropicCredentials {
+                    api_key,
+                    extra: serde_json::Map::new(),
+                })
+            }
+        }
+        self.save()
+    }
+
     /// The ChatGPT account id, from the store or from the id token.
     pub fn account_id(&self) -> Option<String> {
         let creds = self.creds.as_ref()?;
@@ -419,7 +440,7 @@ fn jwt_expiry(jwt: &str) -> Option<SystemTime> {
 }
 
 /// Read the ChatGPT account id claim out of an id-token JWT.
-fn jwt_account_id(jwt: &str) -> Option<String> {
+pub(crate) fn jwt_account_id(jwt: &str) -> Option<String> {
     let payload = jwt.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
@@ -697,6 +718,55 @@ mod tests {
     }
 
     #[test]
+    fn login_setters_write_both_sections_at_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        store
+            .set_codex_credentials(CodexCredentials {
+                access_token: "at-login".into(),
+                refresh_token: "rt-login".into(),
+                id_token: None,
+                account_id: Some("acct_1".into()),
+                last_refresh: Some("2026-08-13T00:00:00Z".into()),
+                extra: serde_json::Map::new(),
+            })
+            .unwrap();
+        store.set_anthropic_key("sk-login".into()).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let reopened = AuthStore::open(path, None).unwrap();
+        assert_eq!(reopened.credentials().unwrap().access_token, "at-login");
+        assert_eq!(reopened.anthropic_api_key(), Some("sk-login"));
+    }
+
+    #[test]
+    fn set_anthropic_key_keeps_extra_section_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 2,
+                "anthropic": {"api_key": "sk-old", "future": "keep-me"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        store.set_anthropic_key("sk-new".into()).unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["anthropic"]["api_key"], "sk-new");
+        assert_eq!(saved["anthropic"]["future"], "keep-me");
+    }
+
+    #[test]
     fn missing_codex_cli_file_reports_a_clear_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = AuthStore::open(
@@ -705,6 +775,6 @@ mod tests {
         )
         .unwrap();
         let error = store.ensure().unwrap_err();
-        assert!(error.to_string().contains("codex login"));
+        assert!(error.to_string().contains("dmz login"));
     }
 }

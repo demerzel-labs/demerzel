@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod doctor;
+pub mod login;
 pub mod repl;
 
 use std::path::PathBuf;

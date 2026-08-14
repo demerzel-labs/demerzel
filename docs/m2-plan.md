@@ -3,14 +3,15 @@
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-08)
+## Status (2026-08-13)
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
 config and `doctor`, PR #18) and the platform statement (PR #19) are
-merged. Step 3 (the `anthropic` adapter) is in review. Live manual
-sessions from the step-3 build meet exit criterion 2: a multi-turn
-tool session, a Ctrl-C abort, and a `--continue` resume that replayed
-the full history all completed against the Anthropic API.
+merged. Step 3 (the `anthropic` adapter, PR #20) is merged. Live
+manual sessions from the step-3 build meet exit criterion 2: a
+multi-turn tool session, a Ctrl-C abort, and a `--continue` resume
+that replayed the full history all completed against the Anthropic
+API. Step 4 (`dmz login`) is in review.
 
 ## Goal
 
@@ -171,7 +172,11 @@ Two forms, one command:
 - `dmz login` — PKCE authorization-code flow for the ChatGPT
   subscription. The Codex CLI login flow is the wire-contract
   reference, and `CLIENT_ID` is already in the codebase. Steps:
-  1. Start a loopback listener on `127.0.0.1` with an ephemeral port.
+  1. Start a loopback listener on `127.0.0.1`, on the first free
+     registered redirect port: 1455, then 1457. The authorization
+     server accepts the redirect only on these ports (step-4
+     decision), so an ephemeral port cannot receive it. Tests bind
+     port 0.
   2. Open the browser to the authorization URL with an S256 challenge.
      When the browser does not open, print the URL.
   3. Receive the code on the loopback listener, exchange it for

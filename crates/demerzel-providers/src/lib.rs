@@ -7,6 +7,7 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod oauth;
 pub mod openai_codex;
 mod retry;
 mod sse;
