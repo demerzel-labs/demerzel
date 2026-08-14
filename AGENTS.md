@@ -94,7 +94,8 @@ milestone plan lands:
   examples that wire the credential import. That client is the
   wire-contract reference for the endpoint, the login flow, and the
   source of imported logins. The word Codex alone names the endpoint
-  and the provider; it is not a product name under this rule.
+  and the provider, and the word ChatGPT names the subscription a
+  login signs into; neither is a product name under this rule.
 
 ## Documentation placement
 

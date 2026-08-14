@@ -82,10 +82,12 @@ pub async fn verify_key(
     if status.is_success() {
         return Ok(());
     }
-    if status.as_u16() == 401 {
-        return Err(ProviderError::Auth(
-            "the endpoint rejected the key".to_string(),
-        ));
+    // Every 4xx except 429 means the endpoint refused this key or
+    // this request — not an outage.
+    if status.is_client_error() && status.as_u16() != 429 {
+        return Err(ProviderError::Auth(format!(
+            "the endpoint rejected the key (status {status})"
+        )));
     }
     Err(ProviderError::Server(format!(
         "key check failed with status {status}"

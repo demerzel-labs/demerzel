@@ -311,7 +311,9 @@ fn parse_token_body(body: &str) -> Value {
     Value::Object(map)
 }
 
-/// Decode one urlencoded form value.
+/// Decode one urlencoded form value. A copy of the provider crate's
+/// private decoder: depending on `demerzel-providers` here would make
+/// a dev-dependency cycle.
 fn form_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

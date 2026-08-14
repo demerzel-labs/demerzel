@@ -10,14 +10,13 @@ use demerzel_providers::auth::AuthStore;
 use serde_json::json;
 
 fn options(dir: &Path, mock: &MockServer) -> Options {
-    Options {
-        store_path: dir.join("auth.json"),
-        authorize_endpoint: format!("{}/oauth/authorize", mock.url()),
-        token_url: format!("{}/oauth/token", mock.url()),
-        redirect_ports: vec![0],
-        open_browser: false,
-        anthropic_base_url: mock.url(),
-    }
+    let mut options = Options::new(dir.join("auth.json"));
+    options.authorize_endpoint = format!("{}/oauth/authorize", mock.url());
+    options.token_url = format!("{}/oauth/token", mock.url());
+    options.redirect_ports = vec![0];
+    options.open_browser = false;
+    options.anthropic_base_url = mock.url();
+    options
 }
 
 /// One query-parameter value out of a URL. The login values are
@@ -32,7 +31,7 @@ fn param(url: &str, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn the_loopback_flow_stores_credentials() {
+async fn the_loopback_flow_rides_over_stray_requests_and_stores_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockServer::start(
         Vec::new(),
@@ -47,20 +46,22 @@ async fn the_loopback_flow_stores_credentials() {
     let state = param(&url, "state");
     let port = flow.port();
 
-    // The fake browser: a stray request first — the wait must ride
-    // over it — then the real redirect.
+    // The fake browser sends three strays — a foreign path, a bare
+    // callback, a callback with a foreign state — then the real
+    // redirect. The wait must ride over every stray.
     let browser = tokio::spawn(async move {
         let http = reqwest::Client::new();
-        let stray = http
-            .get(format!("http://127.0.0.1:{port}/favicon.ico"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(stray.status().as_u16(), 404);
+        let base = format!("http://127.0.0.1:{port}");
+        for stray in [
+            format!("{base}/favicon.ico"),
+            format!("{base}/auth/callback"),
+            format!("{base}/auth/callback?code=evil&state=forged"),
+        ] {
+            let reply = http.get(&stray).send().await.unwrap();
+            assert_eq!(reply.status().as_u16(), 404, "{stray}");
+        }
         let reply = http
-            .get(format!(
-                "http://127.0.0.1:{port}/auth/callback?code=code-1&state={state}"
-            ))
+            .get(format!("{base}/auth/callback?code=code-1&state={state}"))
             .send()
             .await
             .unwrap();
@@ -97,27 +98,27 @@ async fn the_loopback_flow_stores_credentials() {
 }
 
 #[tokio::test]
-async fn a_wrong_state_fails_the_flow() {
+async fn a_denied_login_ends_the_flow_with_the_server_error() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockServer::start(Vec::new(), Vec::new()).await;
     let options = options(dir.path(), &mock);
 
     let mut flow = CodexFlow::start(&options).await.unwrap();
+    let state = param(&flow.authorize_url(), "state");
     let port = flow.port();
     let browser = tokio::spawn(async move {
         let reply = reqwest::Client::new()
             .get(format!(
-                "http://127.0.0.1:{port}/auth/callback?code=code-1&state=foreign"
+                "http://127.0.0.1:{port}/auth/callback?error=access_denied&state={state}"
             ))
             .send()
             .await
             .unwrap();
         assert_eq!(reply.status().as_u16(), 200);
-        assert!(reply.text().await.unwrap().contains("Login failed"));
     });
 
     let error = flow.wait_for_callback().await.unwrap_err();
-    assert!(error.to_string().contains("state"), "{error}");
+    assert!(error.to_string().contains("access_denied"), "{error}");
     browser.await.unwrap();
     assert!(!options.store_path.exists());
 }

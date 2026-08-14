@@ -8,7 +8,9 @@
 //! reference client.
 //!
 //! This module owns the wire contract: challenge, URLs, parsing, and
-//! the exchange. The interactive flow — listener, browser, prompts —
+//! the exchange. [`crate::auth`] holds the other half of the same
+//! contract: `CLIENT_ID` and the token endpoint, shared with the
+//! refresh flow. The interactive flow — listener, browser, prompts —
 //! lives in the bin crate.
 
 use base64::Engine;
@@ -35,31 +37,34 @@ const SCOPE: &str = "openid profile email offline_access";
 /// One prepared authorization request: endpoint, state, and PKCE pair.
 /// Build it once per login; the state and the verifier tie the
 /// callback and the exchange to this request.
-#[derive(Debug)]
 pub struct AuthorizeRequest {
     endpoint: String,
-    client_id: String,
     port: u16,
     state: String,
     verifier: String,
     challenge: String,
 }
 
-impl AuthorizeRequest {
-    /// A request against the default endpoint, redirecting to `port`
-    /// on the loopback interface.
-    pub fn new(port: u16) -> Result<Self, ProviderError> {
-        Self::with_endpoint(DEFAULT_AUTHORIZE_URL.to_string(), port)
+/// The verifier is the proof of possession and the state gates the
+/// callback; neither belongs in debug output.
+impl std::fmt::Debug for AuthorizeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthorizeRequest")
+            .field("endpoint", &self.endpoint)
+            .field("port", &self.port)
+            .finish_non_exhaustive()
     }
+}
 
-    /// A request against a custom authorization endpoint. Tests use
-    /// it; the default flow never does.
+impl AuthorizeRequest {
+    /// A request against `endpoint`, redirecting to `port` on the
+    /// loopback interface. The default endpoint is
+    /// [`DEFAULT_AUTHORIZE_URL`]; tests point elsewhere.
     pub fn with_endpoint(endpoint: String, port: u16) -> Result<Self, ProviderError> {
         let verifier = base64url(&random_bytes::<64>()?);
         let challenge = challenge_s256(&verifier);
         Ok(Self {
             endpoint,
-            client_id: CLIENT_ID.to_string(),
             port,
             state: base64url(&random_bytes::<32>()?),
             verifier,
@@ -74,8 +79,15 @@ impl AuthorizeRequest {
 
     /// The registered redirect target. The host is `localhost` per the
     /// reference client; the listener binds `127.0.0.1`.
-    pub fn redirect_uri(&self) -> String {
+    fn redirect_uri(&self) -> String {
         format!("http://localhost:{}{CALLBACK_PATH}", self.port)
+    }
+
+    /// Whether a redirect carries this request's state. The listener
+    /// uses it to tell this login's callback from a stray request:
+    /// a stray request must not end the wait.
+    pub fn state_matches(&self, target: &str) -> bool {
+        query_value(target, "state").as_deref() == Some(self.state.as_str())
     }
 
     /// The full authorization URL the browser opens.
@@ -86,7 +98,7 @@ impl AuthorizeRequest {
              &id_token_add_organizations=true&codex_cli_simplified_flow=true\
              &state={}&originator=codex_cli_rs",
             self.endpoint,
-            self.client_id,
+            CLIENT_ID,
             percent_encode(&self.redirect_uri()),
             percent_encode(SCOPE),
             self.challenge,
@@ -99,7 +111,7 @@ impl AuthorizeRequest {
     /// the loopback request line and a pasted URL parse the same way.
     /// The state must match this request.
     pub fn parse_callback(&self, target: &str) -> Result<String, ProviderError> {
-        let query = target
+        let query = strip_fragment(target)
             .split_once('?')
             .map(|(_, query)| query)
             .ok_or_else(|| ProviderError::Auth("the redirect carries no query".to_string()))?;
@@ -148,7 +160,7 @@ impl AuthorizeRequest {
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", &self.redirect_uri()),
-            ("client_id", &self.client_id),
+            ("client_id", CLIENT_ID),
             ("code_verifier", &self.verifier),
         ];
         let response = http
@@ -203,15 +215,35 @@ fn base64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Everything before a `#`. A pasted URL can carry a fragment; the
+/// query ends where it starts.
+fn strip_fragment(target: &str) -> &str {
+    target.split_once('#').map_or(target, |(before, _)| before)
+}
+
+/// One percent-decoded query value out of a URL or a path-and-query.
+fn query_value(target: &str, name: &str) -> Option<String> {
+    let (_, query) = strip_fragment(target).split_once('?')?;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == name).then(|| percent_decode(value))
+    })
+}
+
 /// Percent-encode everything outside the URL unreserved set.
 fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(input.len() + input.len() / 2);
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(byte as char);
             }
-            _ => out.push_str(&format!("%{byte:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX[usize::from(byte >> 4)] as char);
+                out.push(HEX[usize::from(byte & 0x0F)] as char);
+            }
         }
     }
     out
@@ -248,7 +280,8 @@ fn percent_decode(input: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 #[cfg(test)]
@@ -345,6 +378,25 @@ mod tests {
         assert_eq!(percent_decode("a%2Bb+c"), "a+b c");
         assert_eq!(percent_decode("%zz%4"), "%zz%4");
         assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn state_matching_separates_this_login_from_a_stray_request() {
+        let request = request();
+        let ours = format!("/auth/callback?code=x&state={}", request.state);
+        assert!(request.state_matches(&ours));
+        assert!(!request.state_matches("/auth/callback?code=x&state=other"));
+        assert!(!request.state_matches("/auth/callback?code=x"));
+        assert!(!request.state_matches("/auth/callback"));
+        let hidden = format!("/auth/callback#?state={}", request.state);
+        assert!(!request.state_matches(&hidden));
+    }
+
+    #[test]
+    fn a_fragment_does_not_leak_into_the_query() {
+        let request = request();
+        let target = format!("/auth/callback?code=abc&state={}#fragment", request.state);
+        assert_eq!(request.parse_callback(&target).unwrap(), "abc");
     }
 
     fn fake_id_token() -> String {

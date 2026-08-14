@@ -21,7 +21,7 @@ reqwest = { workspace = true }
 rustyline = { workspace = true, features = ["with-file-history"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "net", "signal", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "signal", "sync", "time"] }
 toml = { workspace = true }
 
 [dev-dependencies]

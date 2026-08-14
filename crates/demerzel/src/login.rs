@@ -8,31 +8,43 @@
 //! `demerzel_providers::oauth`; this module owns the interaction.
 //!
 //! The loopback listener hand-rolls its HTTP reply, so the flow needs
-//! no HTTP-server dependency. It serves one browser redirect; every
-//! other request gets a 404 and the wait continues.
+//! no HTTP-server dependency. Each connection is served on its own
+//! task inside one time budget, so a stalled client cannot block the
+//! real redirect. Only a request that carries this login's state ends
+//! the wait; everything else gets a 404 and the wait continues, so a
+//! stray or hostile local request cannot end the login.
+//!
+//! [`CodexFlow`] is the tested seam: the end-to-end tests drive the
+//! listener with their own fake browser through it. Keep it public.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use demerzel_providers::auth::{self, AuthStore};
-use demerzel_providers::{anthropic, oauth};
+use demerzel_providers::{ProviderError, anthropic, oauth, openai_codex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::RunError;
 
+/// The whole time budget for one loopback connection: read the
+/// request, write the reply.
+const CONNECTION_BUDGET: Duration = Duration::from_secs(10);
+
 /// Everything a login run needs. `main` fills it with the defaults;
 /// tests point the endpoints at a mock and the store at a temp dir.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Options {
     /// The dmz auth store file the login writes.
     pub store_path: PathBuf,
     pub authorize_endpoint: String,
     pub token_url: String,
-    /// Loopback ports to try in order. Port 0 binds an ephemeral
-    /// port; only tests use that, the authorization server accepts
-    /// redirects on the registered ports alone.
+    /// Loopback ports to try in order. The authorization server
+    /// accepts redirects only on the registered ports. Tests bind
+    /// port 0 to get an ephemeral one.
     pub redirect_ports: Vec<u16>,
     pub open_browser: bool,
     /// Endpoint for the API-key check.
@@ -52,23 +64,30 @@ impl Options {
     }
 }
 
-/// Run one login. `provider` is the subcommand argument: `None` for
-/// the ChatGPT subscription, `anthropic` for the API key.
+/// Run one login. `provider` is the resolved provider id: `None` or
+/// `openai-codex` for the ChatGPT subscription, `anthropic` for the
+/// API key.
 pub async fn run(provider: Option<&str>, options: &Options) -> Result<(), RunError> {
     match provider {
-        None => codex(options).await,
+        None | Some(openai_codex::PROVIDER_ID) => codex(options).await,
         Some(anthropic::PROVIDER_ID) => anthropic_login(options).await,
-        Some(other) => Err(RunError::Config(format!(
-            "unknown login form `{other}` — run `dmz login` for the ChatGPT \
-             subscription, or `dmz login anthropic` for an API key"
-        ))),
+        Some(other) => {
+            let known: Vec<String> = demerzel_providers::PROVIDER_IDS
+                .iter()
+                .map(|id| format!("`{id}`"))
+                .collect();
+            Err(RunError::Config(format!(
+                "unknown provider `{other}` — this build has: {}",
+                known.join(", ")
+            )))
+        }
     }
 }
 
 /// The PKCE flow, split into steps so tests can drive the listener
 /// with their own fake browser.
 pub struct CodexFlow {
-    request: oauth::AuthorizeRequest,
+    request: Arc<oauth::AuthorizeRequest>,
     listener: Option<TcpListener>,
 }
 
@@ -85,12 +104,19 @@ impl CodexFlow {
         }
         let port = match &listener {
             Some(bound) => bound.local_addr()?.port(),
-            None => oauth::REDIRECT_PORTS[0],
+            None => options
+                .redirect_ports
+                .first()
+                .copied()
+                .unwrap_or(oauth::REDIRECT_PORTS[0]),
         };
         let request =
             oauth::AuthorizeRequest::with_endpoint(options.authorize_endpoint.clone(), port)
                 .map_err(RunError::Auth)?;
-        Ok(Self { request, listener })
+        Ok(Self {
+            request: Arc::new(request),
+            listener,
+        })
     }
 
     /// The URL the browser opens.
@@ -109,17 +135,33 @@ impl CodexFlow {
     }
 
     /// Wait for the browser redirect and return the authorization
-    /// code. Requests to other paths get a 404 and the wait goes on;
-    /// the first callback request — success or error — ends it.
+    /// code. The first request that carries this login's state ends
+    /// the wait — with the code, or with the server's error. The
+    /// wait consumes the listener; the port frees before the token
+    /// exchange runs.
     pub async fn wait_for_callback(&mut self) -> Result<String, RunError> {
-        let listener = self
-            .listener
-            .as_ref()
-            .expect("the caller checked listening()");
+        let listener = self.listener.take().ok_or_else(|| {
+            RunError::Config("no loopback listener — paste the redirect URL instead".to_string())
+        })?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String, RunError>>(1);
         loop {
-            let (mut stream, _) = listener.accept().await?;
-            if let Some(result) = serve_connection(&mut stream, &self.request).await {
-                return result;
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let request = Arc::clone(&self.request);
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let served =
+                            tokio::time::timeout(CONNECTION_BUDGET, serve_connection(stream, request))
+                                .await;
+                        if let Ok(Some(outcome)) = served {
+                            let _ = tx.send(outcome).await;
+                        }
+                    });
+                }
+                outcome = rx.recv() => {
+                    return outcome.expect("the loop holds a sender");
+                }
             }
         }
     }
@@ -162,8 +204,8 @@ async fn codex(options: &Options) -> Result<(), RunError> {
         flow.wait_for_callback().await?
     } else {
         println!(
-            "No redirect port is free. Complete the login in the browser, \
-             then paste the redirect URL here."
+            "The redirect ports are all busy. Complete the login in the \
+             browser, then paste the redirect URL here."
         );
         let line = read_stdin_line("Redirect URL: ").await?;
         flow.parse_pasted(&line)?
@@ -174,9 +216,11 @@ async fn codex(options: &Options) -> Result<(), RunError> {
 }
 
 async fn anthropic_login(options: &Options) -> Result<(), RunError> {
-    let key = prompt_for_key("Anthropic API key: ")?;
+    let key = prompt_for_key("Anthropic API key: ").await?;
     if key.is_empty() {
-        return Err(RunError::Config("the key is empty".to_string()));
+        return Err(RunError::Auth(ProviderError::Auth(
+            "the key is empty".to_string(),
+        )));
     }
     anthropic::verify_key(&http_client(), &options.anthropic_base_url, &key)
         .await
@@ -188,20 +232,28 @@ async fn anthropic_login(options: &Options) -> Result<(), RunError> {
 }
 
 /// Serve one connection. `Some` carries the flow's outcome; `None`
-/// means the request was not the callback and the wait continues.
+/// means the request was not this login's callback.
 async fn serve_connection(
-    stream: &mut TcpStream,
-    request: &oauth::AuthorizeRequest,
+    mut stream: TcpStream,
+    request: Arc<oauth::AuthorizeRequest>,
 ) -> Option<Result<String, RunError>> {
-    let target = read_request_target(stream).await?;
-    if !target.starts_with(oauth::CALLBACK_PATH) {
-        respond(stream, "404 Not Found", "<p>Not the login callback.</p>").await;
+    let target = read_request_target(&mut stream).await?;
+    let path = target
+        .split_once('?')
+        .map_or(target.as_str(), |(path, _)| path);
+    if path != oauth::CALLBACK_PATH || !request.state_matches(&target) {
+        respond(
+            &mut stream,
+            "404 Not Found",
+            "<p>Not the login callback.</p>",
+        )
+        .await;
         return None;
     }
     match request.parse_callback(&target) {
         Ok(code) => {
             respond(
-                stream,
+                &mut stream,
                 "200 OK",
                 "<p>Login complete. Close this tab and return to the terminal.</p>",
             )
@@ -210,14 +262,16 @@ async fn serve_connection(
         }
         Err(error) => {
             let body = format!("<p>Login failed: {}</p>", escape_html(&error.to_string()));
-            respond(stream, "200 OK", &body).await;
+            respond(&mut stream, "200 OK", &body).await;
             Some(Err(RunError::Auth(error)))
         }
     }
 }
 
-/// Read the target out of an HTTP request line. `None` for anything
-/// that does not deliver one line within the limits.
+/// Read the target out of an HTTP request line. Reads until the
+/// headers end, so the reply never races unread request bytes.
+/// `None` for anything that does not deliver a request line within
+/// the buffer; the caller's time budget bounds the wait.
 async fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut buf = [0u8; 8192];
     let mut len = 0;
@@ -225,15 +279,18 @@ async fn read_request_target(stream: &mut TcpStream) -> Option<String> {
         if len == buf.len() {
             return None;
         }
-        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf[len..]))
-            .await
-            .ok()?
-            .ok()?;
+        let read = stream.read(&mut buf[len..]).await.ok()?;
         if read == 0 {
             break;
         }
+        // Rescan only the new bytes, plus the overlap a split
+        // delimiter needs.
+        let scan_from = len.saturating_sub(3);
         len += read;
-        if buf[..len].windows(2).any(|pair| pair == b"\r\n") {
+        if buf[scan_from..len]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n")
+        {
             break;
         }
     }
@@ -298,65 +355,89 @@ fn http_client() -> reqwest::Client {
 async fn read_stdin_line(prompt: &str) -> Result<String, RunError> {
     print!("{prompt}");
     std::io::stdout().flush()?;
-    let line = tokio::task::spawn_blocking(|| {
+    read_blocking_line().await
+}
+
+/// One stdin line, read on the blocking pool. The runtime thread
+/// stays free to poll the Ctrl-C branch of the caller's select.
+async fn read_blocking_line() -> Result<String, RunError> {
+    tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).map(|_| line)
     })
     .await
-    .map_err(|error| RunError::Config(format!("stdin reader: {error}")))??;
-    Ok(line)
+    .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+    .map_err(RunError::Io)
 }
 
-/// Prompt for the API key with echo off. A piped stdin — no
-/// terminal — reads plainly, which keeps tests and scripts working.
-fn prompt_for_key(prompt: &str) -> Result<String, RunError> {
+/// Prompt for the API key with echo off. The guard restores the
+/// terminal on every exit path, including the drop of an aborted
+/// future. A piped stdin — tests, scripts — reads plainly.
+async fn prompt_for_key(prompt: &str) -> Result<String, RunError> {
     print!("{prompt}");
     std::io::stdout().flush()?;
-    let line = read_line_echo_off()?;
-    Ok(line.trim().to_string())
-}
-
-#[cfg(unix)]
-fn read_line_echo_off() -> Result<String, std::io::Error> {
-    /// Restore the saved terminal state on every exit path.
-    struct Restore(Option<libc::termios>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            if let Some(saved) = &self.0 {
-                unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved) };
-            }
-        }
-    }
-
-    let saved = unsafe {
-        if libc::isatty(libc::STDIN_FILENO) == 1 {
-            let mut term: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut term) == 0 {
-                let saved = term;
-                term.c_lflag &= !libc::ECHO;
-                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term);
-                Some(saved)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    let echo_off = saved.is_some();
-    let _restore = Restore(saved);
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    if echo_off {
+    let guard = EchoGuard::disable();
+    let line = read_blocking_line().await?;
+    let was_off = guard.active();
+    drop(guard);
+    if was_off {
         // The user's Enter did not echo; end the prompt line.
         println!();
     }
-    Ok(line)
+    Ok(line.trim().to_string())
 }
 
+/// Terminal echo, off for the lifetime of the guard. A process kill
+/// by an untrapped signal skips every destructor, this one included;
+/// the shell restores its own terminal at the next prompt.
+#[cfg(unix)]
+struct EchoGuard(Option<libc::termios>);
+
+#[cfg(unix)]
+impl EchoGuard {
+    fn disable() -> Self {
+        unsafe {
+            if libc::isatty(libc::STDIN_FILENO) != 1 {
+                return Self(None);
+            }
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut term) != 0 {
+                return Self(None);
+            }
+            let saved = term;
+            term.c_lflag &= !libc::ECHO;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term) != 0 {
+                return Self(None);
+            }
+            Self(Some(saved))
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        if let Some(saved) = &self.0 {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved) };
+        }
+    }
+}
+
+/// Echo stays on where termios does not exist.
 #[cfg(not(unix))]
-fn read_line_echo_off() -> Result<String, std::io::Error> {
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line)
+struct EchoGuard;
+
+#[cfg(not(unix))]
+impl EchoGuard {
+    fn disable() -> Self {
+        Self
+    }
+
+    fn active(&self) -> bool {
+        false
+    }
 }

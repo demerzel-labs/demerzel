@@ -162,14 +162,20 @@ impl AuthStore {
         })
     }
 
+    /// The default store file. The store owns this spelling; callers
+    /// that need the path — `dmz login` — ask here.
+    pub fn default_path() -> Result<PathBuf, ProviderError> {
+        let data_dir = demerzel_core::paths::data_dir()
+            .map_err(|error| ProviderError::Auth(error.to_string()))?;
+        Ok(data_dir.join("auth.json"))
+    }
+
     /// Open the store at the default paths.
     pub fn open_default() -> Result<Self, ProviderError> {
         let home = std::env::var_os("HOME")
             .ok_or_else(|| ProviderError::Auth("HOME is not set".to_string()))?;
-        let data_dir = demerzel_core::paths::data_dir()
-            .map_err(|error| ProviderError::Auth(error.to_string()))?;
         Self::open(
-            data_dir.join("auth.json"),
+            Self::default_path()?,
             Some(Path::new(&home).join(".codex/auth.json")),
         )
     }
@@ -258,8 +264,15 @@ impl AuthStore {
     }
 
     /// Store fresh codex credentials — a completed `dmz login` — and
-    /// save the file at mode 0600.
+    /// save the file at mode 0600. Extra fields in the old section
+    /// ride through untouched, the promise the module doc makes.
     pub fn set_codex_credentials(&mut self, creds: CodexCredentials) -> Result<(), ProviderError> {
+        let mut creds = creds;
+        if let Some(old) = self.creds.take() {
+            for (key, value) in old.extra {
+                creds.extra.entry(key).or_insert(value);
+            }
+        }
         self.creds = Some(creds);
         self.save()
     }
@@ -400,14 +413,29 @@ impl AuthStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ProviderError::Auth(format!("create {parent:?}: {e}")))?;
         }
-        std::fs::write(&self.path, text)
-            .map_err(|e| ProviderError::Auth(format!("write {:?}: {e}", self.path)))?;
+        // Write a fresh sibling file at mode 0600 from creation, then
+        // rename it into place. No reader sees a world-readable window
+        // or a half-written store.
+        let tmp = self.path.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| ProviderError::Auth(format!("chmod {:?}: {e}", self.path)))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        {
+            use std::io::Write;
+            let mut handle = options
+                .open(&tmp)
+                .map_err(|e| ProviderError::Auth(format!("write {tmp:?}: {e}")))?;
+            handle
+                .write_all(text.as_bytes())
+                .map_err(|e| ProviderError::Auth(format!("write {tmp:?}: {e}")))?;
+        }
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| ProviderError::Auth(format!("write {:?}: {e}", self.path)))?;
         Ok(())
     }
 }
@@ -740,9 +768,44 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        assert!(!path.with_extension("json.tmp").exists());
         let reopened = AuthStore::open(path, None).unwrap();
         assert_eq!(reopened.credentials().unwrap().access_token, "at-login");
         assert_eq!(reopened.anthropic_api_key(), Some("sk-login"));
+    }
+
+    #[test]
+    fn set_codex_credentials_keeps_extra_section_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 2,
+                "openai_codex": {
+                    "access_token": "a",
+                    "refresh_token": "r",
+                    "future_field": "keep-me",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        store
+            .set_codex_credentials(CodexCredentials {
+                access_token: "a2".into(),
+                refresh_token: "r2".into(),
+                id_token: None,
+                account_id: None,
+                last_refresh: None,
+                extra: serde_json::Map::new(),
+            })
+            .unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["openai_codex"]["access_token"], "a2");
+        assert_eq!(saved["openai_codex"]["future_field"], "keep-me");
     }
 
     #[test]
@@ -775,6 +838,6 @@ mod tests {
         )
         .unwrap();
         let error = store.ensure().unwrap_err();
-        assert!(error.to_string().contains("dmz login"));
+        assert!(error.to_string().contains(NO_CREDENTIALS_HELP));
     }
 }
