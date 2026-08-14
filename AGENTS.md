@@ -89,11 +89,12 @@ milestone plan lands:
   reference goes stale and hides the contract the code must state.
 - Exception: these sites name the Codex CLI:
   `crates/demerzel-providers/src/openai_codex/`,
-  `crates/demerzel-providers/src/auth.rs`, and the callers and
+  `crates/demerzel-providers/src/auth.rs`,
+  `crates/demerzel-providers/src/oauth.rs`, and the callers and
   examples that wire the credential import. That client is the
-  wire-contract reference for the endpoint and the source of
-  imported logins. The word Codex alone names the endpoint and the
-  provider; it is not a product name under this rule.
+  wire-contract reference for the endpoint, the login flow, and the
+  source of imported logins. The word Codex alone names the endpoint
+  and the provider; it is not a product name under this rule.
 
 ## Documentation placement
 
