@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
 
 use demerzel_core::{
-    ApprovalAnswer, ApprovalMode, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
+    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
 };
 use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
@@ -357,12 +357,21 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
 
 /// A line is a command only when its first token after `/` is a bare
 /// word, so a prompt that starts with an absolute path reaches the
-/// model.
-fn slash_command(line: &str) -> Option<&str> {
+/// model. The TUI driver shares this rule.
+pub(crate) fn slash_command(line: &str) -> Option<&str> {
     let rest = line.strip_prefix('/')?;
     let first = rest.split_whitespace().next().unwrap_or("");
     let bare_word = !first.is_empty() && first.chars().all(|c| c.is_ascii_lowercase() || c == '-');
     bare_word.then_some(first)
+}
+
+/// The reply for a command no interface knows. Both interfaces show
+/// the same words.
+pub(crate) fn unknown_command(name: &str) -> String {
+    format!(
+        "unknown command: /{name} — /exit and /quit work today; \
+         more commands arrive in M2"
+    )
 }
 
 async fn repl(runtime: &Runtime) -> Result<(), RunError> {
@@ -372,11 +381,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
-    let mode = match runtime.config().approval {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
-    };
+    let mode = crate::mode_name(runtime.config().approval);
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
     eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
@@ -395,10 +400,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     match command {
                         "exit" | "quit" => break,
                         other => {
-                            eprintln!(
-                                "unknown command: /{other} — /exit and /quit work today; \
-                                 more commands arrive in M2"
-                            );
+                            eprintln!("{}", unknown_command(other));
                             continue;
                         }
                     }

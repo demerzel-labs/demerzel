@@ -30,10 +30,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import harness
 
 
-def measure_once(bin_path: str, env: dict[str, str], cold: bool) -> float:
+def measure_once(
+    bin_path: str, env: dict[str, str], cold: bool, argv: list[str] | None
+) -> float:
     if cold:
         harness.evict_verified(bin_path)
-    pid, master, elapsed_ns, seen = harness.spawn_ready(bin_path, env)
+    pid, master, elapsed_ns, seen = harness.spawn_ready(bin_path, env, argv)
     harness.shutdown(pid, master, seen)
     return elapsed_ns / 1e6
 
@@ -52,6 +54,11 @@ def main() -> int:
         action="store_true",
         help="evict the binary from the page cache before each measured run",
     )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="measure the plain line interface instead of the full screen",
+    )
     parser.add_argument("--out", help="output JSON path (default: under bench/results)")
     args = parser.parse_args()
 
@@ -60,6 +67,8 @@ def main() -> int:
         return 1
 
     mode = "cold" if args.cold else "warm"
+    interface = "plain" if args.plain else "tui"
+    argv = [args.bin, "--plain"] if args.plain else None
     with tempfile.TemporaryDirectory(prefix="demerzel-bench-") as data_home:
         harness.write_auth_fixture(data_home)
         env = harness.bench_env(data_home)
@@ -67,13 +76,17 @@ def main() -> int:
         # Warmup runs use the same mode as the measured runs, so the
         # first cold sample is not the only unwarmed one.
         for _ in range(args.warmup):
-            measure_once(args.bin, env, cold=args.cold)
-        samples = [measure_once(args.bin, env, cold=args.cold) for _ in range(args.runs)]
+            measure_once(args.bin, env, cold=args.cold, argv=argv)
+        samples = [
+            measure_once(args.bin, env, cold=args.cold, argv=argv)
+            for _ in range(args.runs)
+        ]
 
     report = harness.base_report("pty-time-to-interactive", args.bin)
     report.update(
         {
             "mode": mode,
+            "interface": interface,
             "warmup": args.warmup,
             "runs": args.runs,
             "env_size": len(env),
@@ -82,10 +95,11 @@ def main() -> int:
             "stats_ms": harness.stats(samples),
         }
     )
+    suffix = "-plain" if args.plain else ""
     out_path = args.out or os.path.join(
         harness.REPO_ROOT,
         "bench/results",
-        f"pty-boot-{mode}-{report['date']}-{report['git_rev']}.json",
+        f"pty-boot-{mode}{suffix}-{report['date']}-{report['git_rev']}.json",
     )
     harness.write_report(out_path, report)
     print(

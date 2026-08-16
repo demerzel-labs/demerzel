@@ -15,6 +15,7 @@ clap = { workspace = true }
 demerzel-core = { workspace = true }
 demerzel-providers = { workspace = true }
 demerzel-tools = { workspace = true }
+demerzel-tui = { workspace = true }
 humantime = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }

@@ -3,7 +3,7 @@
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-13)
+## Status (2026-08-15)
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
 config and `doctor`, PR #18) and the platform statement (PR #19) are
@@ -11,7 +11,11 @@ merged. Step 3 (the `anthropic` adapter, PR #20) is merged. Live
 manual sessions from the step-3 build meet exit criterion 2: a
 multi-turn tool session, a Ctrl-C abort, and a `--continue` resume
 that replayed the full history all completed against the Anthropic
-API. Step 4 (`dmz login`) is in review.
+API. Step 4 (`dmz login`, PR #23) is merged. Step 5 (the TUI
+foundation) is in review. Step 5 includes a minimal approval
+question, because ask mode is the interactive default and a session
+without it cannot approve a write. Step 6 keeps the richer prompt,
+the edit previews, the shared command registry, and the status bar.
 
 ## Goal
 

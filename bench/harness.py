@@ -18,17 +18,22 @@ Spawn notes:
 """
 
 import ctypes
+import fcntl
 import json
 import mmap
 import os
 import select
 import signal
 import statistics
+import struct
 import subprocess
+import termios
 import time
 
 READY_MARKER = b"demerzel ready"
-PROMPT_MARKER = b"dmz> "
+# No trailing space: the full-screen interface draws the prompt cell
+# by cell and never writes the blank cell after it.
+PROMPT_MARKER = b"dmz>"
 READY_TIMEOUT_S = 10.0
 PROMPT_TIMEOUT_S = 2.0
 EXIT_TIMEOUT_S = 5.0
@@ -149,6 +154,9 @@ def spawn_ready(
     """Spawn `bin_path` in a PTY and wait for the ready marker on the
     merged stream. Returns (pid, master_fd, elapsed_ns, seen_bytes)."""
     master, slave = os.openpty()
+    # A fresh PTY reports zero rows and columns. Give it a real window
+    # or the full-screen interface has nothing to draw into.
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     dup2 = [(os.POSIX_SPAWN_DUP2, slave, fd) for fd in (0, 1, 2)]
     start = time.perf_counter_ns()
     try:

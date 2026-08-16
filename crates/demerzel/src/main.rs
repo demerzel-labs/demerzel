@@ -22,6 +22,10 @@ struct Cli {
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
 
+    /// Use the plain line interface instead of the full screen.
+    #[arg(long)]
+    plain: bool,
+
     /// Provider id. DEMERZEL_PROVIDER sets it too.
     #[arg(long, global = true)]
     provider: Option<String>,
@@ -110,7 +114,12 @@ fn main() {
         .expect("build the tokio runtime");
 
     if cli.prompt.is_none() {
-        if let Err(error) = runtime.block_on(repl::run(&config)) {
+        let result = if use_tui(&cli) {
+            runtime.block_on(demerzel::tui::run(&config))
+        } else {
+            runtime.block_on(repl::run(&config))
+        };
+        if let Err(error) = result {
             eprintln!("demerzel: {error}");
             std::process::exit(1);
         }
@@ -166,6 +175,19 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// The full screen needs a real terminal on both ends and a terminal
+/// type that can drive it. Everything else falls back to the REPL.
+fn use_tui(cli: &Cli) -> bool {
+    use std::io::IsTerminal as _;
+    if cli.plain {
+        return false;
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return false;
+    }
+    std::env::var_os("TERM").is_some_and(|term| !term.is_empty() && term != "dumb")
 }
 
 /// Run `dmz login` and return the process exit code. Ctrl-C stops
@@ -306,7 +328,13 @@ mod tests {
     fn a_bare_invocation_is_the_repl_with_no_approval_flag() {
         let cli = parse(&[]);
         assert!(cli.prompt.is_none());
+        assert!(!cli.plain);
         assert_eq!(cli.flags().approval, None);
+    }
+
+    #[test]
+    fn the_plain_flag_parses() {
+        assert!(parse(&["--plain"]).plain);
     }
 
     #[test]
