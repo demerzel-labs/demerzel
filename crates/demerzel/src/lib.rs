@@ -4,10 +4,13 @@
 //! [`Runtime`] holds the long-lived pieces; the REPL and one-shot mode
 //! build engines over it.
 
+mod commands;
 pub mod config;
 pub mod doctor;
 pub mod login;
+mod preview;
 pub mod repl;
+pub mod tui;
 
 use std::path::PathBuf;
 
@@ -21,8 +24,18 @@ use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
 
-/// First line the REPL prints. The PTY boot probe waits for it.
+/// First line an interactive interface prints on stderr. The PTY boot
+/// probe waits for it; the TUI prints it before the alternate screen.
 pub const READY_MARKER: &str = "demerzel ready";
+
+/// The approval mode as the interfaces name it.
+pub(crate) fn mode_name(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::ReadOnly => "read-only",
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::Auto => "auto",
+    }
+}
 
 /// Auth store locations for one run.
 #[derive(Debug, Clone)]

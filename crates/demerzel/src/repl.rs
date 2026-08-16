@@ -15,16 +15,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
 
 use demerzel_core::{
-    ApprovalAnswer, ApprovalMode, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
+    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
 };
 use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
+use crate::commands::{slash_command, unknown_command};
+use crate::preview::input_preview;
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
-
-/// Byte cap for the tool input shown in an approval prompt.
-const PREVIEW_BYTES: usize = 1200;
 
 /// Byte cap for one history entry. A pasted document must not grow
 /// the history file and slow every later boot.
@@ -308,61 +307,11 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
     }
 }
 
-/// Serializes into a capped buffer, so a preview of a large input
-/// never materializes the whole document.
-struct CappedWriter {
-    buf: Vec<u8>,
-    cap: usize,
-}
-
-impl std::io::Write for CappedWriter {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if self.buf.len() >= self.cap {
-            return Err(std::io::Error::other("preview cap reached"));
-        }
-        let take = data.len().min(self.cap - self.buf.len());
-        self.buf.extend_from_slice(&data[..take]);
-        if take < data.len() {
-            return Err(std::io::Error::other("preview cap reached"));
-        }
-        Ok(take)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Pretty tool input, capped for the terminal.
-fn input_preview(input: &Value) -> String {
-    let mut writer = CappedWriter {
-        buf: Vec::with_capacity(PREVIEW_BYTES.min(256)),
-        cap: PREVIEW_BYTES,
-    };
-    let complete = serde_json::to_writer_pretty(&mut writer, input).is_ok();
-    let text = String::from_utf8_lossy(&writer.buf).into_owned();
-    if complete {
-        text
-    } else {
-        format!("{text}\n[input truncated]")
-    }
-}
-
 /// Run the interactive REPL to completion. The caller owns the tokio
 /// runtime.
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
     repl(&runtime).await
-}
-
-/// A line is a command only when its first token after `/` is a bare
-/// word, so a prompt that starts with an absolute path reaches the
-/// model.
-fn slash_command(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix('/')?;
-    let first = rest.split_whitespace().next().unwrap_or("");
-    let bare_word = !first.is_empty() && first.chars().all(|c| c.is_ascii_lowercase() || c == '-');
-    bare_word.then_some(first)
 }
 
 async fn repl(runtime: &Runtime) -> Result<(), RunError> {
@@ -372,11 +321,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
-    let mode = match runtime.config().approval {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
-    };
+    let mode = crate::mode_name(runtime.config().approval);
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
     eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
@@ -385,7 +330,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // so an idle boot reads and writes no session file.
     let mut engine: Option<Engine<'_>> = None;
     loop {
-        match reader.read("dmz> ", true).await {
+        match reader.read(demerzel_tui::PROMPT, true).await {
             ReadOutcome::Line(line) => {
                 let line = line.trim();
                 if line.is_empty() {
@@ -395,10 +340,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     match command {
                         "exit" | "quit" => break,
                         other => {
-                            eprintln!(
-                                "unknown command: /{other} — /exit and /quit work today; \
-                                 more commands arrive in M2"
-                            );
+                            eprintln!("{}", unknown_command(other));
                             continue;
                         }
                     }
@@ -475,17 +417,6 @@ async fn drain(sigint: &mut Signal) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn slash_commands_require_a_bare_word() {
-        assert_eq!(slash_command("/exit"), Some("exit"));
-        assert_eq!(slash_command("/quit  "), Some("quit"));
-        assert_eq!(slash_command("/help me"), Some("help"));
-        assert_eq!(slash_command("/home/user/x.rs:12 panics, fix it"), None);
-        assert_eq!(slash_command("/Weird"), None);
-        assert_eq!(slash_command("plain prompt"), None);
-    }
 
     #[test]
     fn answers_parse_strictly() {
@@ -496,19 +427,5 @@ mod tests {
         assert_eq!(parse_answer(""), ApprovalAnswer::Deny);
         assert_eq!(parse_answer("n"), ApprovalAnswer::Deny);
         assert_eq!(parse_answer("yep"), ApprovalAnswer::Deny);
-    }
-
-    #[test]
-    fn the_input_preview_caps_long_inputs_without_serializing_them() {
-        let short = json!({"path": "f.txt"});
-        assert_eq!(
-            input_preview(&short),
-            serde_json::to_string_pretty(&short).unwrap()
-        );
-
-        let long = json!({"content": "é".repeat(200_000)});
-        let preview = input_preview(&long);
-        assert!(preview.len() < PREVIEW_BYTES + 100);
-        assert!(preview.ends_with("[input truncated]"));
     }
 }

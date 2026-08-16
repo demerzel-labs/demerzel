@@ -18,17 +18,22 @@ Spawn notes:
 """
 
 import ctypes
+import fcntl
 import json
 import mmap
 import os
 import select
 import signal
 import statistics
+import struct
 import subprocess
+import termios
 import time
 
 READY_MARKER = b"demerzel ready"
-PROMPT_MARKER = b"dmz> "
+# No trailing space: the full-screen interface draws the prompt cell
+# by cell and never writes the blank cell after it.
+PROMPT_MARKER = b"dmz>"
 READY_TIMEOUT_S = 10.0
 PROMPT_TIMEOUT_S = 2.0
 EXIT_TIMEOUT_S = 5.0
@@ -149,6 +154,9 @@ def spawn_ready(
     """Spawn `bin_path` in a PTY and wait for the ready marker on the
     merged stream. Returns (pid, master_fd, elapsed_ns, seen_bytes)."""
     master, slave = os.openpty()
+    # A fresh PTY reports zero rows and columns. Give it a real window
+    # or the full-screen interface has nothing to draw into.
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     dup2 = [(os.POSIX_SPAWN_DUP2, slave, fd) for fd in (0, 1, 2)]
     start = time.perf_counter_ns()
     try:
@@ -166,6 +174,25 @@ def spawn_ready(
             f"{status} before the ready marker; output: {buf.decode(errors='replace')!r}"
         )
     return pid, master, elapsed_ns, buf
+
+
+def wait_prompt(pid: int, master: int, seen: bytes) -> tuple[int, bytes]:
+    """Continue reading after the ready marker until the input prompt.
+    Returns the extra nanoseconds and the full output. The prompt
+    covers what the marker does not: the screen switch, the history
+    load, and the first frame. On failure the child is cleaned up
+    before the error raises."""
+    if PROMPT_MARKER in seen:
+        return 0, seen
+    start = time.perf_counter_ns()
+    status, buf = _read_until(master, PROMPT_MARKER, PROMPT_TIMEOUT_S)
+    elapsed_ns = time.perf_counter_ns() - start
+    if status != "found":
+        shutdown(pid, master, wait_prompt=False)
+        raise RuntimeError(
+            f"{status} before the prompt; output: {buf.decode(errors='replace')!r}"
+        )
+    return elapsed_ns, seen + buf
 
 
 def _wait_exit(pid: int, timeout_s: float) -> bool:

@@ -30,12 +30,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import harness
 
 
-def measure_once(bin_path: str, env: dict[str, str], cold: bool) -> float:
+def measure_once(
+    bin_path: str, env: dict[str, str], cold: bool, argv: list[str] | None
+) -> tuple[float, float]:
+    """One run: milliseconds to the ready marker, and to the input
+    prompt. The prompt time also covers the interface setup."""
     if cold:
         harness.evict_verified(bin_path)
-    pid, master, elapsed_ns, seen = harness.spawn_ready(bin_path, env)
+    pid, master, ready_ns, seen = harness.spawn_ready(bin_path, env, argv)
+    prompt_extra_ns, seen = harness.wait_prompt(pid, master, seen)
     harness.shutdown(pid, master, seen)
-    return elapsed_ns / 1e6
+    return ready_ns / 1e6, (ready_ns + prompt_extra_ns) / 1e6
 
 
 def main() -> int:
@@ -52,6 +57,11 @@ def main() -> int:
         action="store_true",
         help="evict the binary from the page cache before each measured run",
     )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="measure the plain line interface instead of the full screen",
+    )
     parser.add_argument("--out", help="output JSON path (default: under bench/results)")
     args = parser.parse_args()
 
@@ -60,6 +70,8 @@ def main() -> int:
         return 1
 
     mode = "cold" if args.cold else "warm"
+    interface = "plain" if args.plain else "tui"
+    argv = [args.bin, "--plain"] if args.plain else None
     with tempfile.TemporaryDirectory(prefix="demerzel-bench-") as data_home:
         harness.write_auth_fixture(data_home)
         env = harness.bench_env(data_home)
@@ -67,30 +79,40 @@ def main() -> int:
         # Warmup runs use the same mode as the measured runs, so the
         # first cold sample is not the only unwarmed one.
         for _ in range(args.warmup):
-            measure_once(args.bin, env, cold=args.cold)
-        samples = [measure_once(args.bin, env, cold=args.cold) for _ in range(args.runs)]
+            measure_once(args.bin, env, cold=args.cold, argv=argv)
+        pairs = [
+            measure_once(args.bin, env, cold=args.cold, argv=argv)
+            for _ in range(args.runs)
+        ]
+    ready_samples = [ready for ready, _ in pairs]
+    prompt_samples = [prompt for _, prompt in pairs]
 
     report = harness.base_report("pty-time-to-interactive", args.bin)
     report.update(
         {
             "mode": mode,
+            "interface": interface,
             "warmup": args.warmup,
             "runs": args.runs,
             "env_size": len(env),
             "spawn_floor_ms": floor,
-            "samples_ms": [round(s, 3) for s in samples],
-            "stats_ms": harness.stats(samples),
+            "samples_ms": [round(s, 3) for s in ready_samples],
+            "stats_ms": harness.stats(ready_samples),
+            "prompt_samples_ms": [round(s, 3) for s in prompt_samples],
+            "prompt_stats_ms": harness.stats(prompt_samples),
         }
     )
+    suffix = "-plain" if args.plain else ""
     out_path = args.out or os.path.join(
         harness.REPO_ROOT,
         "bench/results",
-        f"pty-boot-{mode}-{report['date']}-{report['git_rev']}.json",
+        f"pty-boot-{mode}{suffix}-{report['date']}-{report['git_rev']}.json",
     )
     harness.write_report(out_path, report)
     print(
-        f"{mode}: median {report['stats_ms']['median']} ms over {args.runs} runs "
-        f"(spawn floor {floor['median']} ms)"
+        f"{mode} {interface}: ready median {report['stats_ms']['median']} ms, "
+        f"prompt median {report['prompt_stats_ms']['median']} ms over "
+        f"{args.runs} runs (spawn floor {floor['median']} ms)"
     )
     print(f"raw data: {out_path}")
     return 0

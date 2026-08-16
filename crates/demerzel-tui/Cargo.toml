@@ -1,0 +1,17 @@
+[package]
+name = "demerzel-tui"
+description = "Full-screen terminal interface for the demerzel coding agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+demerzel-core = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "time"] }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+rustyline = { workspace = true, features = ["with-file-history"] }
+tempfile = { workspace = true }

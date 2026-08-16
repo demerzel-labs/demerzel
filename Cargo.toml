@@ -6,6 +6,7 @@ members = [
     "crates/demerzel-mock",
     "crates/demerzel-providers",
     "crates/demerzel-tools",
+    "crates/demerzel-tui",
 ]
 
 [workspace.package]
@@ -19,6 +20,7 @@ demerzel-core = { path = "crates/demerzel-core" }
 demerzel-mock = { path = "crates/demerzel-mock" }
 demerzel-providers = { path = "crates/demerzel-providers" }
 demerzel-tools = { path = "crates/demerzel-tools" }
+demerzel-tui = { path = "crates/demerzel-tui" }
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -31,6 +33,7 @@ grep-searcher = "0.1"
 humantime = "2"
 ignore = "0.4"
 libc = "0.2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 rustyline = { version = "18", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +43,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 toml = { version = "1.1", default-features = false, features = ["parse", "display", "serde", "std"] }
+unicode-width = "0.2"
 
 [profile.release]
 lto = "thin"
