@@ -1,21 +1,20 @@
 //! Frame rendering: the transcript pane above, the input line below.
 //!
-//! Pure functions over interface state, so tests drive them through
-//! ratatui's `TestBackend` without a terminal.
+//! Functions over interface state, driven in tests through ratatui's
+//! `TestBackend` without a terminal. The one write-back: `draw`
+//! clamps the transcript's scroll to the rows that exist.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthChar as _;
 
+use crate::PROMPT;
 use crate::input::Input;
 use crate::transcript::{Kind, Transcript};
 use crate::wrap::{display_width, wrap};
-
-/// The input prompt. The bench probe's shutdown path waits for these
-/// bytes on the output stream, so the spelling is load-bearing.
-pub(crate) const PROMPT: &str = "dmz> ";
 
 /// What one frame shows.
 pub(crate) struct View<'a> {
@@ -55,6 +54,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
 
 fn style(kind: Kind) -> Style {
     match kind {
+        Kind::Prompt => Style::default().add_modifier(Modifier::BOLD),
         Kind::Text | Kind::Status => Style::default(),
         Kind::Reasoning | Kind::Notice => Style::default().add_modifier(Modifier::DIM),
         Kind::Error => Style::default().fg(Color::Red),
@@ -95,24 +95,53 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
 }
 
 /// The prompt and the buffer, windowed so the cursor stays visible.
+/// Cost is bounded by the row width, never by the buffer length, so
+/// a large paste cannot slow every later frame.
 fn draw_input(frame: &mut Frame, area: Rect, input: &Input) {
-    let shown: String = input.text().chars().filter_map(displayed).collect();
-    let before_cursor: usize = input.text()[..input.cursor()]
-        .chars()
-        .filter_map(displayed)
-        .map(|ch| display_width(ch.encode_utf8(&mut [0u8; 4])))
-        .sum();
-
     let width = usize::from(area.width);
-    let cursor_col = display_width(PROMPT) + before_cursor;
-    // Skip columns from the left until the cursor fits on the row.
-    let skip = cursor_col.saturating_sub(width.saturating_sub(1));
-    let text = format!("{PROMPT}{shown}");
-    let visible = skip_columns(&text, skip);
+    // One column stays free so the cursor can sit past the last char.
+    let avail_before = width - 1;
 
-    frame.render_widget(Paragraph::new(visible), area);
-    let x = area.x + (cursor_col - skip) as u16;
-    frame.set_cursor_position((x.min(area.x + area.width - 1), area.y));
+    // Walk back from the cursor to find the window start.
+    let mut before_cols = 0usize;
+    let mut window_start = input.cursor();
+    for ch in input.text()[..input.cursor()].chars().rev() {
+        let cols = displayed(ch).map(|shown| shown.width().unwrap_or(0));
+        if let Some(cols) = cols
+            && before_cols + cols > avail_before
+        {
+            break;
+        }
+        before_cols += cols.unwrap_or(0);
+        window_start -= ch.len_utf8();
+    }
+
+    // The prompt joins only when the whole prefix fits after it.
+    let prompt_cols = display_width(PROMPT);
+    let with_prompt = window_start == 0 && prompt_cols + before_cols <= avail_before;
+    let mut text = String::with_capacity(width * 4);
+    let mut used = 0usize;
+    if with_prompt {
+        text.push_str(PROMPT);
+        used = prompt_cols;
+    }
+    let mut cursor_x = None;
+    for (offset, ch) in input.text()[window_start..].char_indices() {
+        if window_start + offset == input.cursor() {
+            cursor_x = Some(used);
+        }
+        let Some(shown) = displayed(ch) else { continue };
+        let cols = shown.width().unwrap_or(0);
+        if used + cols > width {
+            break;
+        }
+        text.push(shown);
+        used += cols;
+    }
+    let cursor_x = cursor_x.unwrap_or(used).min(width - 1);
+
+    frame.render_widget(Paragraph::new(text), area);
+    frame.set_cursor_position((area.x + cursor_x as u16, area.y));
 }
 
 /// The printable stand-in for one input char.
@@ -123,21 +152,6 @@ fn displayed(ch: char) -> Option<char> {
         ch if ch.is_control() => None,
         ch => Some(ch),
     }
-}
-
-/// Drop `skip` display columns from the front.
-fn skip_columns(text: &str, skip: usize) -> &str {
-    if skip == 0 {
-        return text;
-    }
-    let mut cols = 0usize;
-    for (index, ch) in text.char_indices() {
-        if cols >= skip {
-            return &text[index..];
-        }
-        cols += display_width(ch.encode_utf8(&mut [0u8; 4]));
-    }
-    ""
 }
 
 #[cfg(test)]
@@ -271,6 +285,32 @@ mod tests {
         // The tail is visible; the head scrolled off with the prompt.
         assert!(lines[1].contains("j"), "{:?}", lines[1]);
         assert!(!lines[1].contains("dmz>"));
+    }
+
+    #[test]
+    fn a_wide_char_at_the_window_edge_keeps_the_cursor_aligned() {
+        let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+        let mut transcript = Transcript::new();
+        let mut input = Input::new();
+        input.set("日本日本日");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    View {
+                        transcript: &mut transcript,
+                        input: &input,
+                        approval: None,
+                    },
+                );
+            })
+            .unwrap();
+        // Four wide chars fit before the cursor; the fifth straddles
+        // the edge and drops whole, so the cursor sits at column 8.
+        let position = terminal.get_cursor_position().unwrap();
+        assert_eq!((position.x, position.y), (8, 1));
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0u16, 1u16)].symbol(), "本");
     }
 
     #[test]

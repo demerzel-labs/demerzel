@@ -1,9 +1,10 @@
-//! Capped tool-input preview for approval prompts.
+//! Capped tool-input preview for approval prompts. Both interfaces
+//! show the same preview for the same call.
 
 use serde_json::Value;
 
 /// Byte cap for the tool input shown in an approval prompt.
-const PREVIEW_BYTES: usize = 1200;
+pub(crate) const PREVIEW_BYTES: usize = 1200;
 
 /// Serializes into a capped buffer, so a preview of a large input
 /// never materializes the whole document.
@@ -31,7 +32,7 @@ impl std::io::Write for CappedWriter {
 }
 
 /// Pretty tool input, capped for the screen.
-pub fn input_preview(input: &Value) -> String {
+pub(crate) fn input_preview(input: &Value) -> String {
     let mut writer = CappedWriter {
         buf: Vec::with_capacity(PREVIEW_BYTES.min(256)),
         cap: PREVIEW_BYTES,
@@ -51,7 +52,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn the_preview_caps_long_inputs_without_serializing_them() {
+    fn the_input_preview_caps_long_inputs_without_serializing_them() {
         let short = json!({"path": "f.txt"});
         assert_eq!(
             input_preview(&short),

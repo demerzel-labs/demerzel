@@ -68,6 +68,9 @@ def main() -> int:
     report = harness.base_report("memory-idle-repl", args.bin)
     report.update(
         {
+            # The default interface on a PTY is the full screen; the
+            # benchmark id predates the split and stays for the trend.
+            "interface": "tui",
             "runs": args.runs,
             "settle_s": args.settle,
             "samples_kb": samples,
@@ -83,8 +86,8 @@ def main() -> int:
     anon = report["stats_kb"]["anonymous_kb"]["median"]
     pss_median = report["stats_kb"]["pss_kb"]["median"]
     print(
-        f"idle REPL over {args.runs} launches: anonymous {anon} KiB median, "
-        f"PSS {pss_median} KiB median"
+        f"idle {report['interface']} session over {args.runs} launches: "
+        f"anonymous {anon} KiB median, PSS {pss_median} KiB median"
     )
     print(f"raw data: {out_path}")
     return 0

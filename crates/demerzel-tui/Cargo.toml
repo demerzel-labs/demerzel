@@ -9,9 +9,9 @@ repository.workspace = true
 [dependencies]
 demerzel-core = { workspace = true }
 ratatui = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "time"] }
 unicode-width = { workspace = true }
 
 [dev-dependencies]
+rustyline = { workspace = true, features = ["with-file-history"] }
 tempfile = { workspace = true }

@@ -588,7 +588,7 @@ version = "0.1.0"
 dependencies = [
  "demerzel-core",
  "ratatui",
- "serde_json",
+ "rustyline",
  "tempfile",
  "tokio",
  "unicode-width",

@@ -6,20 +6,28 @@
 //! at an approval question it stops the turn. Ctrl-D on an empty line
 //! ends the session.
 
+use std::future::poll_fn;
 use std::io;
+use std::time::Duration;
 
 use demerzel_core::ApprovalAnswer;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
-use crate::events::{ApprovalRequest, ChannelApprover, DisplayEvent, EventSender};
+use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::input::Input;
 use crate::render::{self, View};
 use crate::terminal::Guard;
 use crate::transcript::{Kind, Transcript};
-use crate::{Options, Submission, TurnFuture};
+use crate::{Options, PROMPT, Submission, TurnFuture};
+
+/// Shortest span between two frames. Wakes inside the span mark the
+/// interface dirty; the frame timer draws at the deadline. This caps
+/// draw cost during fast streams without adding idle wakeups.
+const FRAME: Duration = Duration::from_millis(16);
 
 /// What a handled key asks the loop to do.
 enum Action {
@@ -56,6 +64,9 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
             return Ok(());
         };
         app.history.record(&line);
+        app.transcript
+            .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
+        app.dirty = true;
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
@@ -81,6 +92,9 @@ struct App {
     sigint: Signal,
     /// Transcript viewport height from the last frame: the page unit.
     page: u16,
+    /// State changed since the last frame.
+    dirty: bool,
+    last_draw: Instant,
 }
 
 impl App {
@@ -109,6 +123,9 @@ impl App {
             approval_tx,
             sigint,
             page: 0,
+            dirty: true,
+            // Seeded in the past, so the first draw runs at once.
+            last_draw: Instant::now() - FRAME,
         })
     }
 
@@ -116,8 +133,8 @@ impl App {
         EventSender::new(self.display_tx.clone())
     }
 
-    fn approver(&self) -> ChannelApprover {
-        ChannelApprover::new(self.approval_tx.clone())
+    fn approver(&self) -> ApprovalChannel {
+        ApprovalChannel::new(self.approval_tx.clone())
     }
 
     /// Wait at the prompt. `None` means the session ends.
@@ -125,16 +142,30 @@ impl App {
         loop {
             let action = tokio::select! {
                 event = self.keys.recv() => match event {
-                    Some(event) => self.terminal_event(event, Phase::Idle),
+                    Some(event) => {
+                        self.dirty = true;
+                        self.terminal_event(event, Phase::Idle)
+                    }
                     // The input thread died; without keys the session
                     // cannot continue.
                     None => Action::Exit,
                 },
-                _ = self.sigint.recv() => self.ctrl_c(Phase::Idle),
-                event = self.displays.recv() => {
-                    if let Some(event) = event {
+                _ = self.sigint.recv() => {
+                    self.dirty = true;
+                    self.ctrl_c(Phase::Idle)
+                }
+                event = self.displays.recv() => match event {
+                    Some(event) => {
                         self.display(event);
+                        self.dirty = true;
+                        Action::None
                     }
+                    // The loop holds a sender, so this cannot happen;
+                    // exit instead of spinning if a refactor breaks
+                    // that.
+                    None => Action::Exit,
+                },
+                _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => {
                     Action::None
                 }
             };
@@ -152,6 +183,10 @@ impl App {
     /// Dropping the future is the abort path, the same contract the
     /// REPL relies on.
     async fn run_turn(&mut self, mut turn: TurnFuture<'_>) -> io::Result<()> {
+        // The signal listener is long-lived, so a signal from between
+        // turns may still be queued; drop it instead of aborting this
+        // turn with it.
+        drain_signal(&mut self.sigint).await;
         let mut aborted = false;
         loop {
             enum Wake {
@@ -160,6 +195,7 @@ impl App {
                 Signal,
                 Display(Option<DisplayEvent>),
                 Approval(Option<ApprovalRequest>),
+                Frame,
             }
             let wake = tokio::select! {
                 _ = &mut turn => Wake::Done,
@@ -167,21 +203,28 @@ impl App {
                 _ = self.sigint.recv() => Wake::Signal,
                 event = self.displays.recv() => Wake::Display(event),
                 request = self.approvals.recv() => Wake::Approval(request),
+                _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => Wake::Frame,
             };
             let action = match wake {
                 Wake::Done => break,
-                Wake::Key(Some(event)) => self.terminal_event(event, Phase::Turn),
+                Wake::Frame => Action::None,
+                Wake::Key(Some(event)) => {
+                    self.dirty = true;
+                    self.terminal_event(event, Phase::Turn)
+                }
                 Wake::Key(None) | Wake::Signal => self.ctrl_c(Phase::Turn),
-                Wake::Display(event) => {
-                    if let Some(event) = event {
-                        self.display(event);
-                    }
+                // The loop holds senders for both channels, so `None`
+                // cannot happen; abort instead of spinning if a
+                // refactor breaks that.
+                Wake::Display(None) | Wake::Approval(None) => Action::AbortTurn,
+                Wake::Display(Some(event)) => {
+                    self.display(event);
+                    self.dirty = true;
                     Action::None
                 }
-                Wake::Approval(request) => {
-                    if let Some(request) = request {
-                        self.show_approval(request);
-                    }
+                Wake::Approval(Some(request)) => {
+                    self.show_approval(request);
+                    self.dirty = true;
                     Action::None
                 }
             };
@@ -193,13 +236,19 @@ impl App {
             self.draw()?;
         }
         drop(turn);
-        // A question the dropped turn never collected dies with it.
+        // Questions the dropped turn never collected die with it: an
+        // abort can leave one queued, and it must not haunt the next
+        // turn as a dead prompt.
+        while self.approvals.try_recv().is_ok() {}
         self.mode = Mode::Edit;
+        // Apply what the turn streamed before the notice, so an
+        // aborted line does not split around it.
+        self.drain_displays();
         self.transcript.close();
         if aborted {
             self.transcript.push_line(Kind::Notice, "[turn aborted]");
         }
-        self.drain_displays();
+        self.dirty = true;
         self.draw()
     }
 
@@ -208,6 +257,7 @@ impl App {
     fn drain_displays(&mut self) {
         while let Ok(event) = self.displays.try_recv() {
             self.display(event);
+            self.dirty = true;
         }
     }
 
@@ -357,13 +407,19 @@ impl App {
         match phase {
             Phase::Idle => {
                 self.input.take();
+                self.history.reset();
                 Action::None
             }
             Phase::Turn => Action::AbortTurn,
         }
     }
 
+    /// Draw the next frame when one is due. Inside the frame span the
+    /// state stays dirty and the loops' frame timer finishes the job.
     fn draw(&mut self) -> io::Result<()> {
+        if !self.dirty || Instant::now() < self.last_draw + FRAME {
+            return Ok(());
+        }
         let question = match &self.mode {
             Mode::Edit => None,
             Mode::Approval { tool, .. } => Some(format!("approve {tool}? [y]es / [a]lways / [N]o")),
@@ -385,8 +441,19 @@ impl App {
                 },
             );
         })?;
+        self.dirty = false;
+        self.last_draw = Instant::now();
         Ok(())
     }
+}
+
+/// Discard queued signal notifications.
+async fn drain_signal(sigint: &mut Signal) {
+    poll_fn(|cx| {
+        while let std::task::Poll::Ready(Some(())) = sigint.poll_recv(cx) {}
+        std::task::Poll::Ready(())
+    })
+    .await;
 }
 
 /// One thread owns terminal input and forwards every event. It parks

@@ -30,6 +30,13 @@ pub fn wrap(line: &str, width: u16) -> Vec<&str> {
             start = break_at;
             last_space = None;
             cols = display_width(&line[start..index]) + ch_cols;
+            // A space break can carry a tail that itself overflows
+            // when the current char is wide; break once more.
+            if cols > width && index > start {
+                rows.push(&line[start..index]);
+                start = index;
+                cols = ch_cols;
+            }
         } else {
             cols += ch_cols;
         }
@@ -80,10 +87,35 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_char_after_a_space_break_cannot_overflow_the_row() {
+        // The tail after the space break carries nine narrow chars;
+        // the wide char must move to its own row, not overflow.
+        let rows = wrap(" abcdefghi日xyz", 10);
+        assert_eq!(rows, vec![" ", "abcdefghi", "日xyz"]);
+        for row in &rows {
+            assert!(display_width(row) <= 10, "{row:?} overflows");
+        }
+    }
+
+    #[test]
     fn rows_rejoin_to_the_original_line() {
         let line = "fn main() { println!(\"日本語 output with spaces\"); }";
         for width in 1..20u16 {
             assert_eq!(wrap(line, width).concat(), line, "width {width}");
+        }
+    }
+
+    #[test]
+    fn no_row_exceeds_the_width_for_mixed_content() {
+        let line = " a日 bcd日ef 日日日 ghi";
+        for width in 2..12u16 {
+            for row in wrap(line, width) {
+                assert!(
+                    display_width(row) <= usize::from(width),
+                    "width {width}: {row:?}"
+                );
+            }
+            assert_eq!(wrap(line, width).concat(), line);
         }
     }
 }

@@ -2,12 +2,16 @@
 //! lives in `demerzel-tui`; this module is its driver: it opens the
 //! session on the first prompt, runs turns, and maps commands and
 //! outcomes to messages. The REPL and this driver share the command
-//! parsing and the message wording.
+//! parsing, the preview, and the message wording. The driver builds
+//! the approval preview, so the interface crate needs no knowledge of
+//! tools.
 
-use demerzel_core::{Engine, TurnOutcome};
-use demerzel_tui::{ChannelApprover, Driver, EventSender, Options, Submission};
+use demerzel_core::{ApprovalAnswer, Approver, BoxFuture, Engine, TurnOutcome};
+use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
+use serde_json::Value;
 
-use crate::repl::{slash_command, unknown_command};
+use crate::commands::{slash_command, unknown_command};
+use crate::preview::input_preview;
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
 /// Run the full-screen interface to completion. The caller owns the
@@ -41,12 +45,24 @@ struct TuiDriver<'r> {
     engine: Option<Engine<'r>>,
 }
 
+/// The engine's approver over the interface's question channel. The
+/// preview is built here, next to the tools.
+struct TuiApprover {
+    channel: ApprovalChannel,
+}
+
+impl Approver for TuiApprover {
+    fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer> {
+        Box::pin(async move { self.channel.ask(tool, input_preview(input)).await })
+    }
+}
+
 impl Driver for TuiDriver<'_> {
     fn submit(
         &mut self,
         line: String,
         events: EventSender,
-        mut approvals: ChannelApprover,
+        approvals: ApprovalChannel,
     ) -> Submission<'_> {
         if let Some(command) = slash_command(&line) {
             return match command {
@@ -74,7 +90,8 @@ impl Driver for TuiDriver<'_> {
                 }
             }
             let engine = self.engine.as_mut().expect("engine opened above");
-            match engine.user_turn(line, &events, &mut approvals).await {
+            let mut approver = TuiApprover { channel: approvals };
+            match engine.user_turn(line, &events, &mut approver).await {
                 Ok(TurnOutcome::Completed) => {}
                 Ok(TurnOutcome::Aborted) => events.notice("[turn stopped]"),
                 Ok(TurnOutcome::MaxTokens) => events.error(

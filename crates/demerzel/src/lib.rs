@@ -4,9 +4,11 @@
 //! [`Runtime`] holds the long-lived pieces; the REPL and one-shot mode
 //! build engines over it.
 
+mod commands;
 pub mod config;
 pub mod doctor;
 pub mod login;
+mod preview;
 pub mod repl;
 pub mod tui;
 

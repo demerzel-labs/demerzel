@@ -7,7 +7,7 @@
 //! [`Driver`] that turns a submitted line into work:
 //!
 //! - The driver receives an [`EventSender`] to use as the engine's
-//!   event sink, and a [`ChannelApprover`] to use as its approver.
+//!   event sink, and an [`ApprovalChannel`] to ask questions through.
 //! - The interface loop draws what arrives and answers approval
 //!   questions at the keyboard.
 //! - Dropping the returned turn future aborts the turn; the loop does
@@ -17,7 +17,6 @@ mod app;
 mod events;
 mod history;
 mod input;
-mod preview;
 mod render;
 mod terminal;
 mod transcript;
@@ -27,13 +26,18 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-pub use events::{ChannelApprover, EventSender};
+pub use events::{ApprovalChannel, EventSender};
+
+/// The input prompt, shared with the REPL. The bench probe waits for
+/// these bytes on the output stream, so the spelling is load-bearing.
+pub const PROMPT: &str = "dmz> ";
 
 /// One user turn as the driver runs it. Not `Send`: the interface
 /// drives it on its own single-threaded loop.
 pub type TurnFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
 /// What one submitted line becomes.
+#[non_exhaustive]
 pub enum Submission<'a> {
     /// End the session.
     Exit,
@@ -45,14 +49,16 @@ pub enum Submission<'a> {
 }
 
 /// The binary crate's side of the interface: commands and turns. The
-/// interface loop owns everything visual.
+/// interface loop owns everything visual; the driver owns what a
+/// question shows, through the preview it passes to
+/// [`ApprovalChannel::ask`].
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
     fn submit(
         &mut self,
         line: String,
         events: EventSender,
-        approvals: ChannelApprover,
+        approvals: ApprovalChannel,
     ) -> Submission<'_>;
 }
 

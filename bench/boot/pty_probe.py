@@ -32,12 +32,15 @@ import harness
 
 def measure_once(
     bin_path: str, env: dict[str, str], cold: bool, argv: list[str] | None
-) -> float:
+) -> tuple[float, float]:
+    """One run: milliseconds to the ready marker, and to the input
+    prompt. The prompt time also covers the interface setup."""
     if cold:
         harness.evict_verified(bin_path)
-    pid, master, elapsed_ns, seen = harness.spawn_ready(bin_path, env, argv)
+    pid, master, ready_ns, seen = harness.spawn_ready(bin_path, env, argv)
+    prompt_extra_ns, seen = harness.wait_prompt(master, seen)
     harness.shutdown(pid, master, seen)
-    return elapsed_ns / 1e6
+    return ready_ns / 1e6, (ready_ns + prompt_extra_ns) / 1e6
 
 
 def main() -> int:
@@ -77,10 +80,12 @@ def main() -> int:
         # first cold sample is not the only unwarmed one.
         for _ in range(args.warmup):
             measure_once(args.bin, env, cold=args.cold, argv=argv)
-        samples = [
+        pairs = [
             measure_once(args.bin, env, cold=args.cold, argv=argv)
             for _ in range(args.runs)
         ]
+    ready_samples = [ready for ready, _ in pairs]
+    prompt_samples = [prompt for _, prompt in pairs]
 
     report = harness.base_report("pty-time-to-interactive", args.bin)
     report.update(
@@ -91,8 +96,10 @@ def main() -> int:
             "runs": args.runs,
             "env_size": len(env),
             "spawn_floor_ms": floor,
-            "samples_ms": [round(s, 3) for s in samples],
-            "stats_ms": harness.stats(samples),
+            "samples_ms": [round(s, 3) for s in ready_samples],
+            "stats_ms": harness.stats(ready_samples),
+            "prompt_samples_ms": [round(s, 3) for s in prompt_samples],
+            "prompt_stats_ms": harness.stats(prompt_samples),
         }
     )
     suffix = "-plain" if args.plain else ""
@@ -103,8 +110,9 @@ def main() -> int:
     )
     harness.write_report(out_path, report)
     print(
-        f"{mode}: median {report['stats_ms']['median']} ms over {args.runs} runs "
-        f"(spawn floor {floor['median']} ms)"
+        f"{mode} {interface}: ready median {report['stats_ms']['median']} ms, "
+        f"prompt median {report['prompt_stats_ms']['median']} ms over "
+        f"{args.runs} runs (spawn floor {floor['median']} ms)"
     )
     print(f"raw data: {out_path}")
     return 0

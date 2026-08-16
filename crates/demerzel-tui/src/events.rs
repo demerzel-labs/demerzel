@@ -5,11 +5,8 @@
 //! approval questions travel over channels instead, the same
 //! one-owner rule the plain REPL applies to stdin.
 
-use demerzel_core::{ApprovalAnswer, Approver, BoxFuture, EngineEvent, EventSink, Usage};
-use serde_json::Value;
+use demerzel_core::{ApprovalAnswer, EngineEvent, EventSink, Usage};
 use tokio::sync::{mpsc, oneshot};
-
-use crate::preview::input_preview;
 
 /// One owned display event, decoupled from the engine's borrowed
 /// [`EngineEvent`].
@@ -91,31 +88,30 @@ pub(crate) struct ApprovalRequest {
     pub reply: oneshot::Sender<ApprovalAnswer>,
 }
 
-/// Asks the user through the interface loop. The driver hands it to
-/// the engine as its [`Approver`].
-pub struct ChannelApprover {
+/// Asks the user one question through the interface loop. The driver
+/// builds the preview — what the question shows is its call — and
+/// implements the engine's approver over this channel.
+pub struct ApprovalChannel {
     tx: mpsc::UnboundedSender<ApprovalRequest>,
 }
 
-impl ChannelApprover {
+impl ApprovalChannel {
     pub(crate) fn new(tx: mpsc::UnboundedSender<ApprovalRequest>) -> Self {
         Self { tx }
     }
-}
 
-impl Approver for ChannelApprover {
-    fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer> {
-        Box::pin(async move {
-            let (reply, answer) = oneshot::channel();
-            let request = ApprovalRequest {
-                tool: tool.to_string(),
-                preview: input_preview(input),
-                reply,
-            };
-            if self.tx.send(request).is_err() {
-                return ApprovalAnswer::Abort;
-            }
-            answer.await.unwrap_or(ApprovalAnswer::Abort)
-        })
+    /// Show the question and wait for the answer. A dead interface
+    /// answers abort.
+    pub async fn ask(&mut self, tool: &str, preview: String) -> ApprovalAnswer {
+        let (reply, answer) = oneshot::channel();
+        let request = ApprovalRequest {
+            tool: tool.to_string(),
+            preview,
+            reply,
+        };
+        if self.tx.send(request).is_err() {
+            return ApprovalAnswer::Abort;
+        }
+        answer.await.unwrap_or(ApprovalAnswer::Abort)
     }
 }

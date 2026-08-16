@@ -11,15 +11,21 @@ use std::collections::VecDeque;
 /// Logical lines the transcript keeps. Old lines beyond the cap drop.
 const MAX_LINES: usize = 5_000;
 
+/// Byte cap for one logical line. The renderer wraps a visible line
+/// from its start, so an uncapped line grows every frame's cost.
+const MAX_ENTRY_BYTES: usize = 8 * 1024;
+
 /// How a line renders. Kinds map to terminal-native styles in M2;
 /// theming is M3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// The user's submitted line, echoed with the prompt.
+    Prompt,
     /// Model text.
     Text,
     /// Reasoning summary, dim.
     Reasoning,
-    /// One tool call, updated in place when the call ends.
+    /// A tool-call line or an approval header.
     Status,
     /// Interface message, dim: usage, session notes, approval echoes.
     Notice,
@@ -64,6 +70,8 @@ impl Transcript {
 
     /// Append streamed text of `kind`. Consecutive deltas of one kind
     /// extend the same line; a kind switch or a full line closes it.
+    /// A line that reaches the byte cap closes too, so one endless
+    /// stream line cannot grow render cost without bound.
     pub fn push_delta(&mut self, kind: Kind, delta: &str) {
         if delta.is_empty() {
             return;
@@ -71,14 +79,11 @@ impl Transcript {
         if self.open != Some(kind) {
             self.open = None;
         }
+        // The trailing newline ends the last line; it opens no empty
+        // one.
         let closes = delta.ends_with('\n');
-        let mut parts: Vec<&str> = delta.split('\n').collect();
-        if closes {
-            // The trailing newline ends the last line; it opens no
-            // empty one.
-            parts.pop();
-        }
-        for (index, part) in parts.iter().enumerate() {
+        let body = delta.strip_suffix('\n').unwrap_or(delta);
+        for (index, part) in body.split('\n').enumerate() {
             if index == 0
                 && self.open == Some(kind)
                 && let Some(last) = self.entries.back_mut()
@@ -88,7 +93,11 @@ impl Transcript {
                 self.push_entry(kind, part);
             }
         }
-        self.open = if closes { None } else { Some(kind) };
+        let full = self
+            .entries
+            .back()
+            .is_some_and(|last| last.text.len() >= MAX_ENTRY_BYTES);
+        self.open = if closes || full { None } else { Some(kind) };
     }
 
     /// Append whole lines. A newline inside `text` splits it.
@@ -126,9 +135,11 @@ impl Transcript {
         }
     }
 
-    /// Close any line that still streams.
+    /// End-of-turn cleanup: close any line that still streams and
+    /// forget call ids the turn never answered.
     pub fn close(&mut self) {
         self.open = None;
+        self.tool_lines.clear();
     }
 
     fn push_entry(&mut self, kind: Kind, text: &str) {
@@ -247,6 +258,27 @@ mod tests {
         assert_eq!(t.entries().len(), MAX_LINES);
         let last = t.entries().last().unwrap();
         assert_eq!(last.text, "· bash: ok");
+    }
+
+    #[test]
+    fn a_line_at_the_byte_cap_closes_and_the_stream_continues() {
+        let mut t = Transcript::new();
+        t.push_delta(Kind::Text, &"x".repeat(MAX_ENTRY_BYTES));
+        t.push_delta(Kind::Text, "overflow");
+        let all: Vec<_> = t.entries().collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].text.len(), MAX_ENTRY_BYTES);
+        assert_eq!(all[1].text, "overflow");
+    }
+
+    #[test]
+    fn close_forgets_unanswered_call_ids() {
+        let mut t = Transcript::new();
+        t.tool_start("call_1", "bash");
+        t.close();
+        // A late end for a forgotten id appends; it rewrites nothing.
+        t.tool_end("call_1", "late", false);
+        assert_eq!(t.entries().len(), 2);
     }
 
     #[test]
