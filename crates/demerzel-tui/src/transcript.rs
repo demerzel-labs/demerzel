@@ -89,6 +89,10 @@ impl Transcript {
                 && let Some(last) = self.entries.back_mut()
             {
                 push_sanitized(&mut last.text, part);
+                let tail = split_at_cap(&mut last.text);
+                if let Some(tail) = tail {
+                    self.push_entry(kind, &tail);
+                }
             } else {
                 self.push_entry(kind, part);
             }
@@ -143,14 +147,36 @@ impl Transcript {
     }
 
     fn push_entry(&mut self, kind: Kind, text: &str) {
-        let mut clean = String::with_capacity(text.len());
+        let mut clean = String::with_capacity(text.len().min(MAX_ENTRY_BYTES));
         push_sanitized(&mut clean, text);
-        self.entries.push_back(Entry { kind, text: clean });
-        while self.entries.len() > MAX_LINES {
-            self.entries.pop_front();
-            self.dropped += 1;
+        // A pushed line obeys the same byte cap as a streamed one: a
+        // pasted prompt must not make every later frame wrap it whole.
+        loop {
+            let rest = split_at_cap(&mut clean);
+            self.entries.push_back(Entry { kind, text: clean });
+            while self.entries.len() > MAX_LINES {
+                self.entries.pop_front();
+                self.dropped += 1;
+            }
+            match rest {
+                Some(tail) => clean = tail,
+                None => break,
+            }
         }
     }
+}
+
+/// When `text` exceeds the cap, cut it at the last char boundary
+/// inside the cap and return the tail.
+fn split_at_cap(text: &mut String) -> Option<String> {
+    if text.len() <= MAX_ENTRY_BYTES {
+        return None;
+    }
+    let mut cut = MAX_ENTRY_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(text.split_off(cut))
 }
 
 /// Append `text` with control characters neutralized: tabs become
@@ -269,6 +295,27 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].text.len(), MAX_ENTRY_BYTES);
         assert_eq!(all[1].text, "overflow");
+    }
+
+    #[test]
+    fn oversized_lines_split_at_the_cap_on_every_path() {
+        // One pushed line, as a pasted prompt echoes it.
+        let mut t = Transcript::new();
+        t.push_line(Kind::Prompt, &"é".repeat(MAX_ENTRY_BYTES));
+        assert!(t.entries().len() >= 2);
+        let joined: String = t.entries().map(|e| e.text.as_str()).collect();
+        assert_eq!(joined, "é".repeat(MAX_ENTRY_BYTES));
+        for entry in t.entries() {
+            assert!(entry.text.len() <= MAX_ENTRY_BYTES);
+        }
+
+        // One giant delta onto an open line.
+        let mut t = Transcript::new();
+        t.push_delta(Kind::Text, "start");
+        t.push_delta(Kind::Text, &"y".repeat(2 * MAX_ENTRY_BYTES));
+        for entry in t.entries() {
+            assert!(entry.text.len() <= MAX_ENTRY_BYTES);
+        }
     }
 
     #[test]

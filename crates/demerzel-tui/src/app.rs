@@ -71,6 +71,7 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
                 app.transcript.push_line(Kind::Notice, &text);
+                app.dirty = true;
                 app.draw()?;
             }
             Submission::Run(turn) => app.run_turn(turn).await?,

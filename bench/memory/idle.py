@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Idle-session memory scenario: Layer 1 measurement.
 
-The driver launches the REPL in a pseudo-terminal N times. For each
-launch it waits for the ready marker, lets the process settle, and
-samples `/proc/<pid>/smaps_rollup`.
+The driver launches an interactive session in a pseudo-terminal N
+times. For each launch it waits for the ready marker, lets the
+process settle, and samples `/proc/<pid>/smaps_rollup`. The report
+names the interface the run measured.
 
 Anonymous memory is the headline: it is the harness's own heap and
 stacks, and it is stable across runs. PSS and USS also count clean

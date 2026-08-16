@@ -38,7 +38,7 @@ def measure_once(
     if cold:
         harness.evict_verified(bin_path)
     pid, master, ready_ns, seen = harness.spawn_ready(bin_path, env, argv)
-    prompt_extra_ns, seen = harness.wait_prompt(master, seen)
+    prompt_extra_ns, seen = harness.wait_prompt(pid, master, seen)
     harness.shutdown(pid, master, seen)
     return ready_ns / 1e6, (ready_ns + prompt_extra_ns) / 1e6
 

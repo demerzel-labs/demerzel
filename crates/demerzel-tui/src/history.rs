@@ -49,7 +49,7 @@ impl History {
         let mut rewrite = false;
         let mut file_lines = 0;
         if let Some(path) = &path
-            && let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(raw) = read_locked(path)
         {
             let v2;
             (entries, v2) = parse(&raw);
@@ -204,9 +204,22 @@ fn append(path: &std::path::Path, line: &str) -> std::io::Result<()> {
     (&file).write_all(payload.as_bytes())
 }
 
+/// Read the whole file under a shared lock, so a rewrite in another
+/// session cannot hand back a cut file.
+fn read_locked(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    file.lock_shared()?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
 /// Replace the file with the in-memory entries: format upgrade and
 /// compaction share this path. In place under the lock, so another
-/// session's open handle stays valid.
+/// session's open handle stays valid. Known trade: entries another
+/// session appended after this session loaded do not survive the
+/// rewrite. History is best effort; the append path keeps them.
 fn rewrite_file(path: &std::path::Path, entries: &[String]) -> std::io::Result<()> {
     let file = open_history_file(path, true)?;
     file.lock()?;
@@ -238,6 +251,19 @@ fn open_history_file(path: &std::path::Path, write: bool) -> std::io::Result<std
 mod tests {
     use super::*;
 
+    /// The interop test drives the REPL's line editor, whose save
+    /// path flips the process umask for a moment. A temp directory
+    /// another test creates inside that window loses its search bit
+    /// and every file call in it fails. One lock serializes the
+    /// file-backed tests, so the window overlaps nothing.
+    static FILE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn file_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        FILE_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn navigation_walks_entries_and_restores_the_draft() {
         let mut h = History::load(None);
@@ -264,6 +290,7 @@ mod tests {
 
     #[test]
     fn the_file_round_trips_with_escaping() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         let mut h = History::load(Some(path.clone()));
@@ -280,6 +307,7 @@ mod tests {
 
     #[test]
     fn a_headerless_file_reads_as_plain_lines() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         std::fs::write(&path, "first\nsecond\n").unwrap();
@@ -290,6 +318,7 @@ mod tests {
 
     #[test]
     fn the_first_write_upgrades_a_headerless_file() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         std::fs::write(&path, "old entry\n").unwrap();
@@ -305,6 +334,7 @@ mod tests {
 
     #[test]
     fn a_missing_final_newline_cannot_merge_entries() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         std::fs::write(&path, "#V2\npartial").unwrap();
@@ -318,6 +348,7 @@ mod tests {
 
     #[test]
     fn the_line_budget_compacts_the_file() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         let mut h = History::load(Some(path.clone()));
@@ -351,6 +382,7 @@ mod tests {
     /// files: they share one history path.
     #[test]
     fn interop_with_the_repl_line_editor() {
+        let _guard = file_test_guard();
         use rustyline::history::History as _;
 
         let dir = tempfile::tempdir().unwrap();
@@ -384,6 +416,7 @@ mod tests {
 
     #[test]
     fn the_load_cap_keeps_the_tail() {
+        let _guard = file_test_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history");
         let mut body = String::from("#V2\n");
@@ -401,6 +434,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_created_file_is_owner_only() {
+        let _guard = file_test_guard();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("history");

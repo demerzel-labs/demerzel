@@ -176,17 +176,19 @@ def spawn_ready(
     return pid, master, elapsed_ns, buf
 
 
-def wait_prompt(master: int, seen: bytes) -> tuple[int, bytes]:
+def wait_prompt(pid: int, master: int, seen: bytes) -> tuple[int, bytes]:
     """Continue reading after the ready marker until the input prompt.
     Returns the extra nanoseconds and the full output. The prompt
     covers what the marker does not: the screen switch, the history
-    load, and the first frame."""
+    load, and the first frame. On failure the child is cleaned up
+    before the error raises."""
     if PROMPT_MARKER in seen:
         return 0, seen
     start = time.perf_counter_ns()
     status, buf = _read_until(master, PROMPT_MARKER, PROMPT_TIMEOUT_S)
     elapsed_ns = time.perf_counter_ns() - start
     if status != "found":
+        shutdown(pid, master, wait_prompt=False)
         raise RuntimeError(
             f"{status} before the prompt; output: {buf.decode(errors='replace')!r}"
         )

@@ -95,12 +95,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
 }
 
 /// The prompt and the buffer, windowed so the cursor stays visible.
-/// Cost is bounded by the row width, never by the buffer length, so
-/// a large paste cannot slow every later frame.
+/// Cost is bounded by the window, not the buffer length, so a large
+/// paste cannot slow every later frame. Zero-width chars never fill
+/// the window; only a long unbroken run of them can extend the walk.
 fn draw_input(frame: &mut Frame, area: Rect, input: &Input) {
     let width = usize::from(area.width);
     // One column stays free so the cursor can sit past the last char.
-    let avail_before = width - 1;
+    let avail_before = width.saturating_sub(1);
 
     // Walk back from the cursor to find the window start.
     let mut before_cols = 0usize;
@@ -138,7 +139,7 @@ fn draw_input(frame: &mut Frame, area: Rect, input: &Input) {
         text.push(shown);
         used += cols;
     }
-    let cursor_x = cursor_x.unwrap_or(used).min(width - 1);
+    let cursor_x = cursor_x.unwrap_or(used).min(width.saturating_sub(1));
 
     frame.render_widget(Paragraph::new(text), area);
     frame.set_cursor_position((area.x + cursor_x as u16, area.y));
