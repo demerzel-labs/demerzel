@@ -66,15 +66,25 @@ pub struct ApprovalRequest<'a> {
     pub input: &'a serde_json::Value,
 }
 
-/// The approval policy for one session: the mode, plus the tools the
-/// user granted for the rest of the session. Per-tool overrides and
+/// The approval policy for one session: the mode, plus the grants the
+/// user gave for the rest of the session. Per-tool overrides and
 /// path rules land here as later fields.
+///
+/// Grant scope follows the access class (step-6 decision). A write
+/// grant covers the tool by name. An execute grant covers only the
+/// exact input it was given for: one "always" on bash must not approve
+/// every later bash command in the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPolicy {
     pub mode: ApprovalMode,
-    /// Tools the user answered "allow for this session" for. A granted
-    /// tool skips later ask prompts; it never overrides a `Deny`.
+    /// Write tools the user answered "allow for this session" for. A
+    /// granted tool skips later ask prompts; it never overrides a
+    /// `Deny`.
     grants: std::collections::BTreeSet<String>,
+    /// Execute grants, keyed by tool name and the serialized input.
+    /// `serde_json` orders object keys, so the key is stable for one
+    /// input value.
+    input_grants: std::collections::BTreeSet<(String, String)>,
 }
 
 impl ApprovalPolicy {
@@ -82,22 +92,47 @@ impl ApprovalPolicy {
         Self {
             mode,
             grants: std::collections::BTreeSet::new(),
+            input_grants: std::collections::BTreeSet::new(),
         }
     }
 
     /// Decide one tool call before dispatch.
     pub fn decide(&self, request: &ApprovalRequest<'_>) -> ApprovalDecision {
         let decision = self.mode.decide(request.access);
-        if decision == ApprovalDecision::AskUser && self.grants.contains(request.tool) {
+        if decision == ApprovalDecision::AskUser && self.granted(request) {
             return ApprovalDecision::Allow;
         }
         decision
     }
 
-    /// Grant the tool for the rest of the session.
-    pub fn grant(&mut self, tool: &str) {
-        self.grants.insert(tool.to_string());
+    fn granted(&self, request: &ApprovalRequest<'_>) -> bool {
+        match request.access {
+            ToolAccess::Execute => self
+                .input_grants
+                .contains(&(request.tool.to_string(), input_key(request.input))),
+            _ => self.grants.contains(request.tool),
+        }
     }
+
+    /// Grant the call for the rest of the session, at the scope its
+    /// access class sets: the exact input for execute tools, the tool
+    /// name otherwise.
+    pub fn grant(&mut self, request: &ApprovalRequest<'_>) {
+        match request.access {
+            ToolAccess::Execute => {
+                self.input_grants
+                    .insert((request.tool.to_string(), input_key(request.input)));
+            }
+            _ => {
+                self.grants.insert(request.tool.to_string());
+            }
+        }
+    }
+}
+
+/// The grant key for one input value.
+fn input_key(input: &serde_json::Value) -> String {
+    input.to_string()
 }
 
 #[cfg(test)]
@@ -133,6 +168,71 @@ mod tests {
             input: &input,
         };
         assert_eq!(policy.decide(&request), AskUser);
+    }
+
+    #[test]
+    fn a_write_grant_covers_the_tool_by_name() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Ask);
+        let first = serde_json::json!({"path": "a.txt"});
+        let second = serde_json::json!({"path": "b.txt"});
+        let request = |input| ApprovalRequest {
+            tool: "edit",
+            access: ToolAccess::Write,
+            input,
+        };
+        policy.grant(&request(&first));
+        assert_eq!(policy.decide(&request(&first)), Allow);
+        assert_eq!(policy.decide(&request(&second)), Allow);
+    }
+
+    #[test]
+    fn an_execute_grant_covers_only_the_exact_input() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Ask);
+        let granted = serde_json::json!({"command": "cargo test"});
+        let same = serde_json::json!({"command": "cargo test"});
+        let other = serde_json::json!({"command": "rm -rf /"});
+        let request = |input| ApprovalRequest {
+            tool: "bash",
+            access: ToolAccess::Execute,
+            input,
+        };
+        policy.grant(&request(&granted));
+        assert_eq!(policy.decide(&request(&same)), Allow);
+        assert_eq!(policy.decide(&request(&other)), AskUser);
+    }
+
+    #[test]
+    fn grants_never_cross_tools_or_access_classes() {
+        let mut policy = ApprovalPolicy::new(ApprovalMode::Ask);
+        let input = serde_json::json!({"command": "ls"});
+        policy.grant(&ApprovalRequest {
+            tool: "bash",
+            access: ToolAccess::Execute,
+            input: &input,
+        });
+        // The same input under another tool name stays a question.
+        assert_eq!(
+            policy.decide(&ApprovalRequest {
+                tool: "shell",
+                access: ToolAccess::Execute,
+                input: &input,
+            }),
+            AskUser
+        );
+        // A name grant on a write tool leaves execute tools untouched.
+        policy.grant(&ApprovalRequest {
+            tool: "edit",
+            access: ToolAccess::Write,
+            input: &input,
+        });
+        assert_eq!(
+            policy.decide(&ApprovalRequest {
+                tool: "edit",
+                access: ToolAccess::Execute,
+                input: &serde_json::json!({"other": 1}),
+            }),
+            AskUser
+        );
     }
 
     #[test]

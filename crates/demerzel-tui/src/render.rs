@@ -16,10 +16,22 @@ use crate::input::Input;
 use crate::transcript::{Kind, Transcript};
 use crate::wrap::{display_width, wrap};
 
+/// What the status bar names: the model, the mode, the open session,
+/// and the session's token totals.
+pub(crate) struct Status {
+    pub model: String,
+    pub mode: String,
+    pub session: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+}
+
 /// What one frame shows.
 pub(crate) struct View<'a> {
     pub transcript: &'a mut Transcript,
     pub input: &'a Input,
+    pub status: &'a Status,
     /// An approval question replaces the input prompt.
     pub approval: Option<&'a str>,
 }
@@ -31,17 +43,28 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     if area.height == 0 || area.width == 0 {
         return 0;
     }
+    // The status bar takes one row when the screen has room for all
+    // three panes; a two-row screen keeps transcript and input.
+    let bar_rows = u16::from(area.height >= 3);
     let input_row = Rect {
         y: area.y + area.height - 1,
         height: 1,
         ..area
     };
     let transcript_area = Rect {
-        height: area.height - 1,
+        height: area.height - 1 - bar_rows,
         ..area
     };
 
     draw_transcript(frame, transcript_area, view.transcript);
+    if bar_rows > 0 {
+        let bar_row = Rect {
+            y: area.y + area.height - 2,
+            height: 1,
+            ..area
+        };
+        draw_status(frame, bar_row, view.status);
+    }
     match view.approval {
         Some(question) => {
             let line = Line::styled(question, Style::default().add_modifier(Modifier::BOLD));
@@ -50,6 +73,36 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         None => draw_input(frame, input_row, view.input),
     }
     transcript_area.height
+}
+
+/// One reversed row: model, mode, session, token totals, cut to the
+/// width from the right.
+fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
+    let mut text = format!(" {} · {}", status.model, status.mode);
+    if let Some(session) = &status.session {
+        text.push_str(" · ");
+        text.push_str(session);
+    }
+    text.push_str(&format!(
+        " · {} in · {} out · {} cached",
+        status.input_tokens, status.output_tokens, status.cached_tokens
+    ));
+
+    let width = usize::from(area.width);
+    let mut shown = String::with_capacity(width * 4);
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cols = ch.width().unwrap_or(0);
+        if used + cols > width {
+            break;
+        }
+        shown.push(ch);
+        used += cols;
+    }
+    // Pad to the full width so the whole row reads as one bar.
+    shown.extend(std::iter::repeat_n(' ', width - used));
+    let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn style(kind: Kind) -> Style {
@@ -161,6 +214,17 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    fn status() -> Status {
+        Status {
+            model: "test-model".into(),
+            mode: "ask".into(),
+            session: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+        }
+    }
+
     fn render(width: u16, height: u16, view: View<'_>) -> (Vec<String>, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut rows = 0;
@@ -181,20 +245,90 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_screen_shows_the_prompt() {
+    fn a_fresh_screen_shows_the_bar_and_the_prompt() {
         let mut transcript = Transcript::new();
         let input = Input::new();
+        let status = status();
         let (lines, rows) = render(
-            20,
+            30,
             4,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
-        assert_eq!(rows, 3);
+        assert_eq!(rows, 2);
+        assert!(lines[2].contains("test-model · ask"), "{:?}", lines[2]);
         assert_eq!(lines[3].trim_end(), "dmz> ".trim_end());
+    }
+
+    #[test]
+    fn the_status_bar_names_the_session_and_the_totals() {
+        let mut transcript = Transcript::new();
+        let input = Input::new();
+        let status = Status {
+            session: Some("s-9".into()),
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_tokens: 2,
+            ..status()
+        };
+        let (lines, _) = render(
+            60,
+            3,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+            },
+        );
+        assert!(
+            lines[1].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
+            "{:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn a_narrow_bar_cuts_from_the_right() {
+        let mut transcript = Transcript::new();
+        let input = Input::new();
+        let status = status();
+        let (lines, _) = render(
+            12,
+            3,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+            },
+        );
+        assert_eq!(lines[1], " test-model ");
+    }
+
+    #[test]
+    fn a_two_row_screen_drops_the_bar_and_keeps_the_prompt() {
+        let mut transcript = Transcript::new();
+        transcript.push_line(Kind::Text, "tail");
+        let input = Input::new();
+        let status = status();
+        let (lines, rows) = render(
+            20,
+            2,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+            },
+        );
+        assert_eq!(rows, 1);
+        assert_eq!(lines[0].trim_end(), "tail");
+        assert_eq!(lines[1].trim_end(), "dmz> ".trim_end());
     }
 
     #[test]
@@ -204,17 +338,19 @@ mod tests {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
         let input = Input::new();
+        let status = status();
         let (lines, _) = render(
             20,
             4,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
-        assert_eq!(lines[0].trim_end(), "line 7");
-        assert_eq!(lines[2].trim_end(), "line 9");
+        assert_eq!(lines[0].trim_end(), "line 8");
+        assert_eq!(lines[1].trim_end(), "line 9");
     }
 
     #[test]
@@ -225,16 +361,18 @@ mod tests {
         }
         transcript.scroll = 3;
         let input = Input::new();
+        let status = status();
         let (lines, _) = render(
             20,
             4,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
-        assert_eq!(lines[2].trim_end(), "line 6");
+        assert_eq!(lines[1].trim_end(), "line 6");
 
         transcript.scroll = 100;
         let (lines, _) = render(
@@ -243,11 +381,12 @@ mod tests {
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "line 0");
-        assert_eq!(transcript.scroll, 7);
+        assert_eq!(transcript.scroll, 8);
     }
 
     #[test]
@@ -255,12 +394,14 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.push_line(Kind::Text, "alpha beta gamma");
         let input = Input::new();
+        let status = status();
         let (lines, _) = render(
             8,
-            4,
+            5,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
@@ -274,12 +415,14 @@ mod tests {
         let mut transcript = Transcript::new();
         let mut input = Input::new();
         input.set(&"abcdefghij".repeat(3));
+        let status = status();
         let (lines, _) = render(
             10,
             2,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: None,
             },
         );
@@ -294,6 +437,7 @@ mod tests {
         let mut transcript = Transcript::new();
         let mut input = Input::new();
         input.set("日本日本日");
+        let status = status();
         terminal
             .draw(|frame| {
                 draw(
@@ -301,6 +445,7 @@ mod tests {
                     View {
                         transcript: &mut transcript,
                         input: &input,
+                        status: &status,
                         approval: None,
                     },
                 );
@@ -318,12 +463,14 @@ mod tests {
     fn an_approval_question_replaces_the_prompt() {
         let mut transcript = Transcript::new();
         let input = Input::new();
+        let status = status();
         let (lines, _) = render(
             40,
             2,
             View {
                 transcript: &mut transcript,
                 input: &input,
+                status: &status,
                 approval: Some("approve bash? [y]es / [a]lways / [N]o"),
             },
         );

@@ -202,14 +202,18 @@ impl Runtime {
         }
     }
 
-    /// Open the session for this run: the latest one when
-    /// `continue_last` asks for it and one matches this project, else
-    /// a fresh one. Resume appends a fresh meta record, so the file
-    /// names the model and provider that continue it.
-    pub fn open_session(&self) -> Result<(Session, Vec<Message>), RunError> {
-        if self.config.continue_last
-            && let Some(path) = self.store.latest(&self.config.project_dir)?
-        {
+    /// Open the session for this run: the latest one when `resume`
+    /// asks for it and one matches this project, else a fresh one.
+    /// Resume appends a fresh meta record, so the file names the
+    /// model and provider that continue it. The interfaces own the
+    /// session model — `/model` switches it — so it arrives as an
+    /// argument.
+    pub fn open_session(
+        &self,
+        resume: bool,
+        model: &str,
+    ) -> Result<(Session, Vec<Message>), RunError> {
+        if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
             let (mut session, replay) = Session::resume(&path)?;
             // A hash collision in the project directory name is the
             // only way another project's file lands here; refuse to
@@ -228,32 +232,33 @@ impl Runtime {
                 session.append_meta(&SessionMeta::now(
                     &self.config.project_dir,
                     self.provider.id(),
-                    &self.config.model,
+                    model,
                 ))?;
                 return Ok((session, replay.messages));
             }
         }
-        let session = self.store.create(
-            &self.config.project_dir,
-            self.provider.id(),
-            &self.config.model,
-        )?;
+        let session = self
+            .store
+            .create(&self.config.project_dir, self.provider.id(), model)?;
         Ok((session, Vec::new()))
     }
 
     /// Build the turn engine over an open session. A read-only run
-    /// advertises only the read tools.
-    pub fn engine(&self, session: Session, history: Vec<Message>) -> Engine<'_> {
+    /// advertises only the read tools. `model` is the interface's
+    /// current session model.
+    pub fn engine(&self, session: Session, history: Vec<Message>, model: &str) -> Engine<'_> {
         let registry = if self.config.approval == ApprovalMode::ReadOnly {
             &self.read_only_registry
         } else {
             &self.registry
         };
+        let mut engine_config = self.engine_config.clone();
+        engine_config.model = model.to_string();
         Engine::with_history(
             self.provider.as_ref(),
             registry,
             ApprovalPolicy::new(self.config.approval),
-            self.engine_config.clone(),
+            engine_config,
             session,
             history,
         )
@@ -266,8 +271,9 @@ impl Runtime {
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
-        let (session, history) = self.open_session()?;
-        let mut engine = self.engine(session, history);
+        let (session, history) =
+            self.open_session(self.config.continue_last, &self.config.model)?;
+        let mut engine = self.engine(session, history, &self.config.model);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
 }

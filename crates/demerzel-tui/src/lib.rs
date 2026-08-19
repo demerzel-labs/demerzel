@@ -70,6 +70,11 @@ pub struct Options {
     pub history_path: Option<PathBuf>,
     /// A dim line shown before the first prompt.
     pub banner: Option<String>,
+    /// The session model, shown on the status bar. The driver updates
+    /// it through [`EventSender::model`].
+    pub model: String,
+    /// The approval mode's display name, shown on the status bar.
+    pub mode: String,
 }
 
 /// Run the interface until the user ends the session.

@@ -27,6 +27,10 @@ pub(crate) enum DisplayEvent {
     Usage(Usage),
     Notice(String),
     Error(String),
+    /// The session model changed; the status bar follows.
+    Model(String),
+    /// A session opened or closed; the status bar names it.
+    Session(Option<String>),
 }
 
 /// Sends display events into the interface loop. The driver hands it
@@ -50,6 +54,16 @@ impl EventSender {
     /// A failure message.
     pub fn error(&self, text: impl Into<String>) {
         let _ = self.tx.send(DisplayEvent::Error(text.into()));
+    }
+
+    /// Name the session model on the status bar.
+    pub fn model(&self, name: impl Into<String>) {
+        let _ = self.tx.send(DisplayEvent::Model(name.into()));
+    }
+
+    /// Name the open session on the status bar; `None` clears it.
+    pub fn session(&self, id: Option<String>) {
+        let _ = self.tx.send(DisplayEvent::Session(id));
     }
 }
 

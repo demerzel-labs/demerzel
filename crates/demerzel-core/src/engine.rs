@@ -26,7 +26,7 @@ use serde_json::Value;
 use crate::approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{Capabilities, Provider, ProviderError, Request, StreamEvent};
-use crate::session::Session;
+use crate::session::{Session, SessionMeta};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
 /// The fixed base system prompt for M1. Config replaces it in M3.
@@ -236,6 +236,17 @@ impl<'a> Engine<'a> {
         (self.session, self.history)
     }
 
+    /// Switch the model for the turns that follow. The switch appends
+    /// a meta record, so the session file names the model that
+    /// continues it — the same rule a resume applies. `cwd` is the
+    /// project directory the session is scoped to.
+    pub fn set_model(&mut self, model: &str, cwd: &std::path::Path) -> Result<(), EngineError> {
+        self.session
+            .append_meta(&SessionMeta::now(cwd, self.provider.id(), model))?;
+        self.config.model = model.to_string();
+        Ok(())
+    }
+
     /// Run one user turn: repair the history if the last turn was cut,
     /// append the user message, then alternate model calls and tool
     /// calls until the model ends the turn or a limit stops it.
@@ -433,7 +444,11 @@ impl<'a> Engine<'a> {
                         asked.then_some(answer_name),
                     )?;
                     if answer == ApprovalAnswer::AllowForSession {
-                        self.policy.grant(&name);
+                        self.policy.grant(&ApprovalRequest {
+                            tool: &name,
+                            access,
+                            input: &input,
+                        });
                     }
                     if approved {
                         self.tools.run_approved(&name, input).await
@@ -625,13 +640,13 @@ mod tests {
         }
     }
 
-    /// Two tools: `note` is read-only, `write` writes. Any other name
-    /// is unknown.
+    /// Three tools: `note` is read-only, `write` writes, `exec`
+    /// executes. Any other name is unknown.
     struct FakeTools;
 
     impl ToolHost for FakeTools {
         fn definitions(&self) -> Vec<ToolDefinition> {
-            ["note", "write"]
+            ["note", "write", "exec"]
                 .into_iter()
                 .map(|name| ToolDefinition {
                     name: name.to_string(),
@@ -645,6 +660,7 @@ mod tests {
             match name {
                 "note" => Some(ToolAccess::ReadOnly),
                 "write" => Some(ToolAccess::Write),
+                "exec" => Some(ToolAccess::Execute),
                 _ => None,
             }
         }
@@ -654,7 +670,7 @@ mod tests {
                 ToolOutput::text(format!("{name} ran: {input}")).with_summary(format!("{name}: ok"))
             } else {
                 ToolOutput::error(format!(
-                    "unknown tool: {name}; available tools: note, write"
+                    "unknown tool: {name}; available tools: note, write, exec"
                 ))
             };
             Box::pin(std::future::ready(output))
@@ -1143,6 +1159,68 @@ mod tests {
         let raw = std::fs::read_to_string(engine.session().path()).unwrap();
         assert!(raw.contains(r#""decision":"ask_user""#));
         assert!(raw.contains(r#""decision":"allow""#));
+    }
+
+    #[test]
+    fn an_execute_grant_skips_the_same_command_and_asks_for_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            tool_call("call_1", "exec", json!({"command": "cargo test"})),
+            tool_call("call_2", "exec", json!({"command": "cargo test"})),
+            tool_call("call_3", "exec", json!({"command": "rm -rf /"})),
+            text_done("done"),
+        ]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
+
+        // Two scripted answers: the grant covers the repeat of the
+        // same command, and the new command asks again.
+        let mut approver = ScriptedApprover(VecDeque::from([
+            ApprovalAnswer::AllowForSession,
+            ApprovalAnswer::Deny,
+        ]));
+        let sink = noop_sink();
+        let outcome = block_on(engine.user_turn("go".into(), &sink, &mut approver)).unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
+
+        let result = |index: usize| {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &engine.history()[index].content[0]
+            else {
+                panic!("expected a tool result at message {index}");
+            };
+            (content.clone(), *is_error)
+        };
+        // The granted command ran twice; the new command was declined.
+        assert!(!result(2).1);
+        assert!(!result(4).1);
+        let (content, is_error) = result(6);
+        assert!(is_error, "the new command must not inherit the grant");
+        assert!(content.contains("declined"), "{content}");
+    }
+
+    #[test]
+    fn set_model_records_a_meta_and_later_requests_carry_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("first".into(), &sink, &mut ApproveAll)).unwrap();
+        engine.set_model("other-model", dir.path()).unwrap();
+        block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
+
+        let requests = provider.requests();
+        assert_eq!(requests[0].model, "test-model");
+        assert_eq!(requests[1].model, "other-model");
+
+        // The session file names the model that continues it.
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        assert!(raw.contains("other-model"), "missing the switch meta");
+        let replayed = replay(engine.session().path()).unwrap();
+        assert_eq!(replayed.messages, engine.history());
     }
 
     #[test]

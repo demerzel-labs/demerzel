@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::input::Input;
-use crate::render::{self, View};
+use crate::render::{self, Status, View};
 use crate::terminal::Guard;
 use crate::transcript::{Kind, Transcript};
 use crate::{Options, PROMPT, Submission, TurnFuture};
@@ -84,6 +84,7 @@ struct App {
     transcript: Transcript,
     input: Input,
     history: History,
+    status: Status,
     mode: Mode,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
@@ -116,6 +117,14 @@ impl App {
             transcript,
             input: Input::new(),
             history: History::load(options.history_path),
+            status: Status {
+                model: options.model,
+                mode: options.mode,
+                session: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: 0,
+            },
             mode: Mode::Edit,
             keys,
             displays,
@@ -278,22 +287,33 @@ impl App {
                 let summary = summary.unwrap_or(name);
                 self.transcript.tool_end(&id, &summary, is_error);
             }
-            DisplayEvent::Usage(usage) => self.transcript.push_line(
-                Kind::Notice,
-                &format!(
-                    "· {} in · {} out · {} cached",
-                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                ),
-            ),
+            DisplayEvent::Usage(usage) => {
+                self.status.input_tokens += usage.input_tokens;
+                self.status.output_tokens += usage.output_tokens;
+                self.status.cached_tokens += usage.cache_read_tokens;
+                self.transcript.push_line(
+                    Kind::Notice,
+                    &format!(
+                        "· {} in · {} out · {} cached",
+                        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
+                    ),
+                );
+            }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
+            DisplayEvent::Model(name) => self.status.model = name,
+            DisplayEvent::Session(id) => self.status.session = id,
         }
     }
 
     fn show_approval(&mut self, request: ApprovalRequest) {
-        self.transcript
-            .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
-        self.transcript.push_line(Kind::Notice, &request.preview);
+        // A call whose preview the transcript already carries — the
+        // driver passes it empty — gets only the question row.
+        if !request.preview.is_empty() {
+            self.transcript
+                .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
+            self.transcript.push_line(Kind::Notice, &request.preview);
+        }
         self.mode = Mode::Approval {
             tool: request.tool,
             reply: request.reply,
@@ -429,6 +449,7 @@ impl App {
             guard,
             transcript,
             input,
+            status,
             page,
             ..
         } = self;
@@ -438,6 +459,7 @@ impl App {
                 View {
                     transcript,
                     input,
+                    status,
                     approval: question.as_deref(),
                 },
             );
