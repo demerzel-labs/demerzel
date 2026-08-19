@@ -254,19 +254,22 @@ fn openpty() -> (OwnedFd, OwnedFd) {
     let mut slave: libc::c_int = 0;
     // A fresh PTY reports zero rows and columns; give it a real
     // window or the interface has nothing to draw into.
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 30,
         ws_col: 100,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // The window parameter is `*const` on Linux and `*mut` on macOS;
+    // a raw mutable pointer coerces to both without tripping the
+    // Linux-side unnecessary-mut lint.
     let result = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &size,
+            &raw mut size,
         )
     };
     assert_eq!(result, 0, "openpty failed");
