@@ -1,7 +1,7 @@
 //! The `anthropic` adapter: the native Messages API with an API key.
 //!
 //! Contract reference: the Anthropic Messages API
-//! (https://platform.claude.com/docs/en/api/messages). The endpoint is
+//! (<https://platform.claude.com/docs/en/api/messages>). The endpoint is
 //! public and versioned; the version header below pins the wire shape.
 //! The parser still ignores unknown events and fields, so additive
 //! server changes never break a session.

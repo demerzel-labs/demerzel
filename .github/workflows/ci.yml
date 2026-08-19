@@ -19,6 +19,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # The PTY tests park in blocking reads when something hangs; a
+    # bounded job cannot eat the six-hour runner default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Update the stable toolchain
@@ -27,6 +30,28 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update the stable toolchain
+        run: rustup update stable --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the documentation
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Build the release binary
+        run: cargo build --release --locked
+      # The Layer-1 gate from docs/plan.md: the stripped release
+      # binary stays under 25 MB. The release profile strips.
+      - name: Check the binary size
+        run: |
+          size=$(stat -c%s target/release/demerzel)
+          echo "binary: ${size} bytes; gate: 25000000 bytes"
+          test "$size" -lt 25000000
