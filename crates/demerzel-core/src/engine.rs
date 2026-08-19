@@ -107,9 +107,10 @@ where
 pub enum ApprovalAnswer {
     /// Run this call.
     Allow,
-    /// Run this call, and stop asking for this tool for the rest of
-    /// this run. The grant lives in the engine's policy; it does not
-    /// survive a resume.
+    /// Run this call, and grant it for the rest of this run at the
+    /// scope the policy sets: the exact input for an execute tool,
+    /// the tool name otherwise. The grant lives in the engine's
+    /// policy; it does not survive a resume.
     AllowForSession,
     /// Refuse this call; the turn continues.
     Deny,

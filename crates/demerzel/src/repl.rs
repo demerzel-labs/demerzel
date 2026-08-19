@@ -168,8 +168,10 @@ pub struct Renderer {
     dim: bool,
     line_open: AtomicU8,
     /// Started tool calls awaiting their end event, as id and name.
-    /// An aborted turn leaves entries; `finish` marks them not run,
-    /// so a rendered preview cannot read like an applied change.
+    /// An aborted turn leaves entries; `finish` marks them
+    /// interrupted, so a rendered preview cannot read like an
+    /// applied change. Interrupted, not absent: a dropped turn can
+    /// cut an approved call mid-run.
     pending_calls: std::sync::Mutex<Vec<(String, String)>>,
 }
 
@@ -186,11 +188,11 @@ impl Renderer {
     }
 
     /// Close any line the stream left open, and mark every call the
-    /// turn never answered as not run.
+    /// turn never answered as interrupted.
     pub fn finish(&self) {
         let pending = std::mem::take(&mut *self.pending_calls.lock().unwrap());
         for (_, name) in pending {
-            self.status_line(&format!("✗ {name}: not run"));
+            self.status_line(&format!("✗ {name}: interrupted"));
         }
         self.close_line();
     }

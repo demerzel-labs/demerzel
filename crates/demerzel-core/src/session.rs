@@ -240,7 +240,9 @@ impl Session {
     /// single call, so a reader never sees a torn record boundary.
     pub fn append(&mut self, record: &SessionRecord) -> io::Result<()> {
         let record = match record {
-            SessionRecord::Meta(meta) => RecordRef::Meta(meta),
+            // Through `append_meta`, so the session adopts the
+            // meta's cwd on every path a meta record can enter.
+            SessionRecord::Meta(meta) => return self.append_meta(meta),
             SessionRecord::Message(message) => RecordRef::Message(message),
             SessionRecord::Approval {
                 tool,

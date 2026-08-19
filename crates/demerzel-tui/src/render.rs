@@ -79,31 +79,43 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
 /// One reversed row: model, mode, session, token totals, cut to the
 /// width from the right.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
-    let mut text = format!(" {} · {}", status.model, status.mode);
-    if let Some(session) = &status.session {
-        text.push_str(" · ");
-        text.push_str(session);
-    }
-    text.push_str(&format!(
+    let totals = format!(
         " · {} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
-    ));
+    );
+    let session = status.session.as_deref().unwrap_or("");
+    let separator = if status.session.is_some() { " · " } else { "" };
+    let segments = [
+        " ",
+        status.model.as_str(),
+        " · ",
+        status.mode.as_str(),
+        separator,
+        session,
+        totals.as_str(),
+    ];
 
+    // The walk stops at the width, so this frame-rate path never
+    // copies a segment whole — an oversized model name costs its
+    // visible columns, nothing more.
     let width = usize::from(area.width);
     let mut shown = String::with_capacity(width * 4);
     let mut used = 0usize;
-    for ch in text.chars() {
-        // The model name comes from config and `/model`; an escape
-        // byte must never reach the frame, the transcript's rule.
-        if ch.is_control() {
-            continue;
+    'segments: for segment in segments {
+        for ch in segment.chars() {
+            // The model name comes from config and `/model`; an
+            // escape byte must never reach the frame, the
+            // transcript's rule.
+            if ch.is_control() {
+                continue;
+            }
+            let cols = ch.width().unwrap_or(0);
+            if used + cols > width {
+                break 'segments;
+            }
+            shown.push(ch);
+            used += cols;
         }
-        let cols = ch.width().unwrap_or(0);
-        if used + cols > width {
-            break;
-        }
-        shown.push(ch);
-        used += cols;
     }
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));

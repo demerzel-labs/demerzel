@@ -47,7 +47,8 @@ pub struct Transcript {
     /// The kind of the last line while it still streams.
     open: Option<Kind>,
     /// Tool call id to the absolute index of its status line and the
-    /// tool name, kept so an unanswered call can close as not run.
+    /// tool name, kept so an unanswered call can close as
+    /// interrupted.
     tool_lines: HashMap<String, (usize, String)>,
     /// Wrapped rows scrolled up from the bottom. The renderer clamps
     /// it against the real row count.
@@ -142,8 +143,11 @@ impl Transcript {
     }
 
     /// End-of-turn cleanup: close any line that still streams, and
-    /// mark every unanswered call as not run — an aborted turn must
-    /// not leave a pending line that reads like an applied change.
+    /// mark every unanswered call as interrupted — an aborted turn
+    /// must not leave a pending line that reads like an applied
+    /// change. The marker claims interruption, not absence: a
+    /// dropped turn can cut an approved call mid-run, so whether the
+    /// call changed anything is unknown here.
     pub fn close(&mut self) {
         self.open = None;
         for (index, name) in self.tool_lines.values() {
@@ -153,7 +157,7 @@ impl Transcript {
                 // The name is model-controlled: sanitize and cap it
                 // the way every other entry write does.
                 let mut text = String::new();
-                push_sanitized(&mut text, &format!("✗ {name}: not run"));
+                push_sanitized(&mut text, &format!("✗ {name}: interrupted"));
                 let mut text = text.replace('\n', " ");
                 let _ = split_at_cap(&mut text);
                 self.entries[offset].text = text;
@@ -335,24 +339,25 @@ mod tests {
     }
 
     #[test]
-    fn close_marks_unanswered_calls_as_not_run_and_forgets_them() {
+    fn close_marks_unanswered_calls_as_interrupted_and_forgets_them() {
         let mut t = Transcript::new();
         t.tool_start("call_1", "bash");
         t.close();
-        // The pending line says the call never ran.
-        assert_eq!(lines(&t), vec![(Kind::Status, "✗ bash: not run")]);
+        // The pending line claims interruption, never absence: the
+        // call may have run partway before the turn dropped.
+        assert_eq!(lines(&t), vec![(Kind::Status, "✗ bash: interrupted")]);
         // A late end for a forgotten id appends; it rewrites nothing.
         t.tool_end("call_1", "late", false);
         assert_eq!(t.entries().len(), 2);
     }
 
     #[test]
-    fn the_not_run_marker_sanitizes_a_hostile_tool_name() {
+    fn the_interrupted_marker_sanitizes_a_hostile_tool_name() {
         let mut t = Transcript::new();
         t.tool_start("call_1", "ba\x1b[2Jsh\nSECOND");
         t.close();
         let last = t.entries().last().unwrap();
-        assert_eq!(last.text, "✗ ba[2Jsh SECOND: not run");
+        assert_eq!(last.text, "✗ ba[2Jsh SECOND: interrupted");
     }
 
     #[test]

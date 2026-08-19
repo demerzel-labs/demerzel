@@ -72,6 +72,8 @@ struct PreviewLines {
     lines: Vec<String>,
     bytes: usize,
     skipped: usize,
+    /// A line ran past the byte budget and was cut short.
+    cut: bool,
 }
 
 impl PreviewLines {
@@ -80,6 +82,7 @@ impl PreviewLines {
             lines: Vec::new(),
             bytes: 0,
             skipped: 0,
+            cut: false,
         }
     }
 
@@ -96,17 +99,22 @@ impl PreviewLines {
 
     /// One preview line, sanitized: tabs become spaces, other control
     /// characters drop. An escape byte must never reach the terminal,
-    /// where it could redraw or hide the approval prompt. The line is
-    /// cut at the byte cap, so one giant line never materializes.
+    /// where it could redraw or hide the approval prompt. The line
+    /// spends only the remaining byte budget, and a cut is always
+    /// visible: an approval prompt that shows a prefix as the whole
+    /// input invites abuse.
     fn push_prefixed(&mut self, prefix: &str, line: &str) {
         if self.full() {
             self.skipped += 1;
             return;
         }
-        let mut clean = String::with_capacity((prefix.len() + line.len()).min(PREVIEW_TOTAL_BYTES));
+        let budget = PREVIEW_TOTAL_BYTES - self.bytes;
+        let mut clean = String::with_capacity((prefix.len() + line.len()).min(budget));
         clean.push_str(prefix);
         for ch in line.chars() {
-            if clean.len() >= PREVIEW_TOTAL_BYTES {
+            if clean.len() >= budget {
+                clean.push('…');
+                self.cut = true;
                 break;
             }
             if ch == '\t' {
@@ -140,6 +148,10 @@ impl PreviewLines {
         if self.skipped > 0 {
             let word = if self.skipped == 1 { "line" } else { "lines" };
             self.lines.push(format!("… {} more {word}", self.skipped));
+        }
+        if self.cut {
+            self.lines
+                .push("… a line is cut at the preview cap".to_string());
         }
         self.lines.join("\n")
     }
@@ -325,6 +337,42 @@ mod tests {
         let preview = run_preview("create", &input).unwrap();
         assert!(preview.lines().count() <= 26);
         assert!(preview.ends_with("more lines"), "{preview}");
+    }
+
+    #[test]
+    fn a_cut_line_is_always_visible() {
+        // A long single line must not pass for the whole input: the
+        // cut gets an in-line marker and a trailer, and the hidden
+        // tail never renders.
+        let long = format!("echo {}; echo hidden-tail", "x".repeat(8000));
+        let input = json!({"command": long});
+        let preview = run_preview("bash", &input).unwrap();
+        assert!(
+            preview.len() <= PREVIEW_TOTAL_BYTES + 128,
+            "{}",
+            preview.len()
+        );
+        let mut lines = preview.lines();
+        let first = lines.next().unwrap();
+        assert!(first.ends_with('…'), "a cut line must end with the marker");
+        assert_eq!(lines.next().unwrap(), "… a line is cut at the preview cap");
+        assert!(!preview.contains("hidden-tail"));
+    }
+
+    #[test]
+    fn lines_share_one_byte_budget() {
+        // Every line spends the remaining budget, so the whole
+        // preview stays near the byte cap instead of line-count
+        // times the cap.
+        let content = format!("{}\n{}\n", "a".repeat(3000), "b".repeat(3000));
+        let input = json!({"path": "big.txt", "content": content});
+        let preview = run_preview("create", &input).unwrap();
+        assert!(
+            preview.len() <= PREVIEW_TOTAL_BYTES + 128,
+            "{}",
+            preview.len()
+        );
+        assert!(preview.contains("… a line is cut at the preview cap"));
     }
 
     #[test]

@@ -74,11 +74,16 @@ pub(crate) fn dispatch(line: &str, current_model: &str) -> Option<Effect> {
         "exit" | "quit" => Effect::Exit,
         "help" => Effect::Note(help_text()),
         "new" => Effect::NewSession,
-        "model" => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Effect::Note(model_note(current_model)),
-            [model] => Effect::SetModel((*model).to_string()),
-            _ => Effect::Note("usage: /model [name]".to_string()),
-        },
+        "model" => {
+            // Two probes decide the shape; a pasted flood of tokens
+            // must not build a vector of itself.
+            let mut tokens = args.split_whitespace();
+            match (tokens.next(), tokens.next()) {
+                (None, _) => Effect::Note(model_note(current_model)),
+                (Some(model), None) => Effect::SetModel(model.to_string()),
+                _ => Effect::Note("usage: /model [name]".to_string()),
+            }
+        }
         other => Effect::Note(unknown_command(other)),
     };
     Some(effect)
