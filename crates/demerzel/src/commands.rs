@@ -1,12 +1,14 @@
 //! The slash-command registry shared by the REPL and the TUI driver.
 //! One table names the commands; both interfaces dispatch through
 //! [`dispatch`] and apply the returned effect, so the wording and the
-//! behavior stay identical. M3 file-based custom commands extend the
-//! same table.
+//! behavior stay identical. M3 file-based custom commands need a
+//! runtime-built table beside this constant one; the dispatch seam
+//! stays.
 
-/// One command in the registry: its argument shape and the help line.
-/// The `dispatch` match is the name-to-handler map; M3 custom
-/// commands grow both together.
+/// One command in the registry: its argument shape and the help
+/// line. The usage line starts with the command name; the `dispatch`
+/// match is the name-to-handler map, and a test pins every table row
+/// to a match arm.
 struct Command {
     usage: &'static str,
     help: &'static str,
@@ -31,6 +33,14 @@ const COMMANDS: &[Command] = &[
         help: "end the session (alias: /quit)",
     },
 ];
+
+/// The note both interfaces show after `/new`.
+pub(crate) const NEW_SESSION_NOTE: &str = "the next prompt starts a fresh session";
+
+/// The note both interfaces show for the current or switched model.
+pub(crate) fn model_note(model: &str) -> String {
+    format!("model: {model}")
+}
 
 /// What one command asks the interface to do.
 pub(crate) enum Effect {
@@ -65,7 +75,7 @@ pub(crate) fn dispatch(line: &str, current_model: &str) -> Option<Effect> {
         "help" => Effect::Note(help_text()),
         "new" => Effect::NewSession,
         "model" => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Effect::Note(format!("model: {current_model}")),
+            [] => Effect::Note(model_note(current_model)),
             [model] => Effect::SetModel((*model).to_string()),
             _ => Effect::Note("usage: /model [name]".to_string()),
         },
@@ -87,7 +97,7 @@ fn help_text() -> String {
     }
     out.push_str(
         "\napproval keys: y runs the call, a grants it for the session \
-         (bash grants cover only the exact command), n declines",
+         (a command grant covers only that exact call), n declines",
     );
     out
 }
@@ -147,5 +157,22 @@ mod tests {
             panic!("expected the unknown reply");
         };
         assert!(note.contains("/help"));
+    }
+
+    #[test]
+    fn every_table_row_has_a_dispatch_arm() {
+        // The table feeds /help; the match feeds behavior. A row
+        // without an arm would advertise a command that answers
+        // "unknown command".
+        for command in COMMANDS {
+            let line = command.usage.split_whitespace().next().unwrap();
+            let effect = dispatch(line, "m").expect("a table row must parse");
+            if let Effect::Note(note) = &effect {
+                assert!(
+                    !note.contains("unknown command"),
+                    "{line} is in the table but not in the dispatch match"
+                );
+            }
+        }
     }
 }

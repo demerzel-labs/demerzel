@@ -17,7 +17,8 @@ use crate::transcript::{Kind, Transcript};
 use crate::wrap::{display_width, wrap};
 
 /// What the status bar names: the model, the mode, the open session,
-/// and the session's token totals.
+/// and the open session's token totals, counted from this run's
+/// start. A session change restarts the totals.
 pub(crate) struct Status {
     pub model: String,
     pub mode: String,
@@ -92,6 +93,11 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
     let mut shown = String::with_capacity(width * 4);
     let mut used = 0usize;
     for ch in text.chars() {
+        // The model name comes from config and `/model`; an escape
+        // byte must never reach the frame, the transcript's rule.
+        if ch.is_control() {
+            continue;
+        }
         let cols = ch.width().unwrap_or(0);
         if used + cols > width {
             break;

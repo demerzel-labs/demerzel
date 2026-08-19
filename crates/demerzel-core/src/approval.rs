@@ -82,8 +82,9 @@ pub struct ApprovalPolicy {
     /// `Deny`.
     grants: std::collections::BTreeSet<String>,
     /// Execute grants, keyed by tool name and the serialized input.
-    /// `serde_json` orders object keys, so the key is stable for one
-    /// input value.
+    /// `serde_json` orders object keys while `preserve_order` stays
+    /// off, so the key is stable for one input value. A key mismatch
+    /// fails closed: the call asks again.
     input_grants: std::collections::BTreeSet<(String, String)>,
 }
 

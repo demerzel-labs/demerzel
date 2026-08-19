@@ -329,6 +329,19 @@ Each step is one PR with its own verify line.
   dogfood review flagged. On a write tool the grant keeps the tool
   name as its scope: every edit input differs, so a per-input grant
   there would never match again. `/help` states the rule.
+- `/model` and the session file — decided in step 6. A switch
+  appends a meta record as an audit trail; a resume still takes its
+  model from config, because config cannot tell a default from an
+  explicit choice yet. A real switch drops the sealed reasoning
+  payloads from the in-memory history — a sealed payload is bound to
+  the model that produced it. Known gap, present since M1: a resume
+  with a different model still replays the file's sealed payloads.
+  The M3 fix is a model field on the sealed payload, which also lets
+  a resume adopt the session's own model.
+- One model seam for M3 — noted in step 6 review. The interfaces own
+  the session model, so `Runtime::open_session` and `Runtime::engine`
+  both take it. Per-role routing in M3 must fold these into one
+  call with a routing struct, not widen both signatures again.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

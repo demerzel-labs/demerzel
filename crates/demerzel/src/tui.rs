@@ -11,7 +11,7 @@ use demerzel_core::{
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
 use serde_json::Value;
 
-use crate::commands::{Effect, dispatch};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
@@ -74,18 +74,18 @@ impl EventSink for PreviewSink {
 }
 
 /// The engine's approver over the interface's question channel. A
-/// call whose preview [`PreviewSink`] already rendered sends an empty
-/// preview: the question row is enough.
+/// call whose preview [`PreviewSink`] already rendered sends no
+/// preview: the question row is enough. This pairing is the
+/// contract: a turn that uses this approver must use [`PreviewSink`]
+/// as its sink, or a covered call would ask with nothing on screen.
+/// The PTY tests pin both halves.
 struct TuiApprover {
     channel: ApprovalChannel,
 }
 
 impl Approver for TuiApprover {
     fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer> {
-        Box::pin(async move {
-            let preview = ask_preview(tool, input).unwrap_or_default();
-            self.channel.ask(tool, preview).await
-        })
+        Box::pin(async move { self.channel.ask(tool, ask_preview(tool, input)).await })
     }
 }
 
@@ -103,17 +103,17 @@ impl Driver for TuiDriver<'_> {
                 self.engine = None;
                 self.resume = false;
                 events.session(None);
-                return Submission::Note("the next prompt starts a fresh session".to_string());
+                return Submission::Note(NEW_SESSION_NOTE.to_string());
             }
             Some(Effect::SetModel(name)) => {
                 if let Some(engine) = self.engine.as_mut()
-                    && let Err(error) = engine.set_model(&name, &self.runtime.config().project_dir)
+                    && let Err(error) = engine.set_model(&name)
                 {
-                    return Submission::Note(format!("demerzel: {error}"));
+                    return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.model = name.clone();
                 events.model(name);
-                return Submission::Note(format!("model: {}", self.model));
+                return Submission::Note(model_note(&self.model));
             }
             None => {}
         }

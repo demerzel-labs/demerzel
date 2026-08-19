@@ -7,11 +7,13 @@
 //! secrets into it; auth tokens live only in the auth store.
 //!
 //! Layout: `<data root>/projects/<project-id>/sessions/<id>.jsonl`.
-//! The first record is metadata. Every later record is one event:
-//! a message, an approval decision, or a usage report. Readers skip
-//! record types they do not know, so old binaries read new files.
-//! A torn final line — a crash mid-append — is dropped on replay and
-//! truncated away on resume.
+//! The first record is metadata. A later meta record marks a resume
+//! or a model switch; the last meta record describes the current
+//! run. Every other record is one event: a message, an approval
+//! decision, or a usage report. Readers skip record types they do
+//! not know, so old binaries read new files. A torn final line — a
+//! crash mid-append — is dropped on replay and truncated away on
+//! resume.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -28,8 +30,9 @@ use crate::paths;
 /// Version of the session-file schema, written into every meta record.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The metadata record that opens every session file. Resume appends a
-/// fresh one, so the last meta record describes the current run.
+/// The metadata record that opens every session file. A resume and a
+/// model switch append a fresh one, so the last meta record describes
+/// the current run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub schema: u32,
@@ -173,6 +176,7 @@ impl SessionStore {
             id,
             path,
             file,
+            cwd: project.to_path_buf(),
             buf: Vec::new(),
         };
         session.append_meta(&SessionMeta::now(project, provider, model))?;
@@ -209,6 +213,10 @@ pub struct Session {
     id: String,
     path: PathBuf,
     file: File,
+    /// The project directory the session is scoped to, kept so a
+    /// mid-run meta record — a model switch — names the same project
+    /// as the one that opened the file.
+    cwd: PathBuf,
     /// Reused serialization buffer, so appends allocate nothing steady
     /// state.
     buf: Vec<u8>,
@@ -217,6 +225,11 @@ pub struct Session {
 impl Session {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The project directory the session is scoped to.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     pub fn path(&self) -> &Path {
@@ -301,11 +314,20 @@ impl Session {
             .unwrap_or_default()
             .to_string();
         let file = OpenOptions::new().append(true).open(path)?;
+        // The stored cwd is already canonical, so a later meta append
+        // names the same spelling. A file without a meta record is
+        // outside the format; an empty cwd keeps the append total.
+        let cwd = replay
+            .meta
+            .as_ref()
+            .map(|meta| PathBuf::from(&meta.cwd))
+            .unwrap_or_default();
         Ok((
             Self {
                 id,
                 path: path.to_path_buf(),
                 file,
+                cwd,
                 buf: Vec::new(),
             },
             replay,

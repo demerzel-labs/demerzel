@@ -74,6 +74,11 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
                 app.dirty = true;
                 app.draw()?;
             }
+            Submission::Error(text) => {
+                app.transcript.push_line(Kind::Error, &text);
+                app.dirty = true;
+                app.draw()?;
+            }
             Submission::Run(turn) => app.run_turn(turn).await?,
         }
     }
@@ -302,18 +307,28 @@ impl App {
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
             DisplayEvent::Model(name) => self.status.model = name,
-            DisplayEvent::Session(id) => self.status.session = id,
+            DisplayEvent::Session(id) => {
+                // The totals belong to the open session; a session
+                // change restarts them.
+                self.status.session = id;
+                self.status.input_tokens = 0;
+                self.status.output_tokens = 0;
+                self.status.cached_tokens = 0;
+            }
         }
     }
 
     fn show_approval(&mut self, request: ApprovalRequest) {
         // A call whose preview the transcript already carries — the
-        // driver passes it empty — gets only the question row.
-        if !request.preview.is_empty() {
+        // driver passes `None` — gets only the question row.
+        if let Some(preview) = &request.preview {
             self.transcript
                 .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
-            self.transcript.push_line(Kind::Notice, &request.preview);
+            self.transcript.push_line(Kind::Notice, preview);
         }
+        // A question needs its call visible: jump to the bottom, where
+        // the preview and the question row are.
+        self.transcript.scroll = 0;
         self.mode = Mode::Approval {
             tool: request.tool,
             reply: request.reply,

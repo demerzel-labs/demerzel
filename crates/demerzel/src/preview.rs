@@ -83,15 +83,28 @@ impl PreviewLines {
         }
     }
 
+    /// Both caps reached? The callers stop building lines here, so
+    /// the cost of a preview follows the caps, not the input size —
+    /// the input is model-sized and lands inside the frame loop.
+    fn full(&self) -> bool {
+        self.lines.len() >= PREVIEW_LINES || self.bytes >= PREVIEW_TOTAL_BYTES
+    }
+
+    fn push(&mut self, line: &str) {
+        self.push_prefixed("", line);
+    }
+
     /// One preview line, sanitized: tabs become spaces, other control
     /// characters drop. An escape byte must never reach the terminal,
-    /// where it could redraw or hide the approval prompt.
-    fn push(&mut self, line: &str) {
-        if self.lines.len() >= PREVIEW_LINES || self.bytes >= PREVIEW_TOTAL_BYTES {
+    /// where it could redraw or hide the approval prompt. The line is
+    /// cut at the byte cap, so one giant line never materializes.
+    fn push_prefixed(&mut self, prefix: &str, line: &str) {
+        if self.full() {
             self.skipped += 1;
             return;
         }
-        let mut clean = String::with_capacity(line.len().min(PREVIEW_TOTAL_BYTES));
+        let mut clean = String::with_capacity((prefix.len() + line.len()).min(PREVIEW_TOTAL_BYTES));
+        clean.push_str(prefix);
         for ch in line.chars() {
             if clean.len() >= PREVIEW_TOTAL_BYTES {
                 break;
@@ -106,14 +119,20 @@ impl PreviewLines {
         self.lines.push(clean);
     }
 
-    /// The `+`-prefixed lines of one op's content.
+    /// The `+`-prefixed lines of one op's content. Past the caps only
+    /// the remaining lines are counted — a cheap scan, no building.
     fn push_content(&mut self, content: &str) {
         let body = content.strip_suffix('\n').unwrap_or(content);
         if body.is_empty() {
             return;
         }
-        for line in body.split('\n') {
-            self.push(&format!("+ {line}"));
+        let mut lines = body.split('\n');
+        while let Some(line) = lines.next() {
+            if self.full() {
+                self.skipped += 1 + lines.count();
+                break;
+            }
+            self.push_prefixed("+ ", line);
         }
     }
 
@@ -138,17 +157,34 @@ fn range(start: u64, end: u64) -> String {
 fn bash_preview(input: &Value) -> Option<String> {
     let command = input.get("command")?.as_str()?;
     let mut out = PreviewLines::new();
-    for (index, line) in command.lines().enumerate() {
-        if index == 0 {
-            out.push(&format!("$ {line}"));
-        } else {
-            out.push(&format!("  {line}"));
-        }
-    }
     if command.is_empty() {
         out.push("$");
+        return Some(out.finish());
+    }
+    let mut lines = command.lines();
+    let mut prefix = "$ ";
+    while let Some(line) = lines.next() {
+        if out.full() {
+            out.skipped += 1 + lines.count();
+            break;
+        }
+        out.push_prefixed(prefix, line);
+        prefix = "  ";
     }
     Some(out.finish())
+}
+
+/// The line count one skipped op adds to the truncation trailer. A
+/// cheap scan without validation: ops past the caps only count.
+fn op_lines(op: &Value) -> usize {
+    let content = op.get("content").and_then(Value::as_str).unwrap_or("");
+    let body = content.strip_suffix('\n').unwrap_or(content);
+    let content_lines = if body.is_empty() {
+        0
+    } else {
+        body.split('\n').count()
+    };
+    1 + content_lines
 }
 
 fn edit_preview(input: &Value) -> Option<String> {
@@ -156,7 +192,14 @@ fn edit_preview(input: &Value) -> Option<String> {
     let edits = input.get("edits")?.as_array()?;
     let mut out = PreviewLines::new();
     out.push(&format!("edit {path}"));
-    for op in edits {
+    let mut ops = edits.iter();
+    while let Some(op) = ops.next() {
+        // Ops past the caps are counted, not validated: the tool
+        // still rejects a malformed op, and the preview stays capped.
+        if out.full() {
+            out.skipped += op_lines(op) + ops.map(op_lines).sum::<usize>();
+            break;
+        }
         let object = op.as_object()?;
         let field = |name: &str| object.get(name).and_then(Value::as_u64);
         let content = || object.get("content").and_then(Value::as_str);
@@ -291,6 +334,57 @@ mod tests {
             run_preview("bash", &input).unwrap(),
             "$ echo [2Jhi    there"
         );
+    }
+
+    #[test]
+    fn the_preview_reads_only_fields_the_tool_schemas_declare() {
+        // The preview hardcodes tool and field names; this pins them
+        // to the registry, so a schema rename cannot silently turn
+        // every diff preview into the JSON fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = demerzel_tools::Registry::full(dir.path());
+        let definitions = registry.definitions();
+        let schema = |tool: &str| {
+            definitions
+                .iter()
+                .find(|definition| definition.name == tool)
+                .unwrap_or_else(|| panic!("the registry lost the {tool} tool"))
+                .input_schema
+                .clone()
+        };
+
+        let has =
+            |schema: &serde_json::Value, field: &str| schema["properties"].get(field).is_some();
+        let bash = schema("bash");
+        assert!(has(&bash, "command"));
+
+        let create = schema("create");
+        assert!(has(&create, "path"));
+        assert!(has(&create, "content"));
+
+        let edit = schema("edit");
+        assert!(has(&edit, "path"));
+        assert!(has(&edit, "edits"));
+        let variants = edit["properties"]["edits"]["items"]["oneOf"]
+            .as_array()
+            .expect("edit ops are a oneOf list");
+        let ops: Vec<&str> = variants
+            .iter()
+            .flat_map(|variant| variant["properties"]["op"]["enum"].as_array())
+            .flat_map(|names| names.iter().filter_map(serde_json::Value::as_str))
+            .collect();
+        for op in ["replace", "insert_before", "insert_after", "delete"] {
+            assert!(ops.contains(&op), "the edit schema lost the {op} op");
+        }
+        for variant in variants {
+            let fields = variant["properties"].as_object().unwrap();
+            for field in fields.keys() {
+                assert!(
+                    ["op", "start", "end", "line", "content"].contains(&field.as_str()),
+                    "the preview does not know the {field} field"
+                );
+            }
+        }
     }
 
     #[test]

@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, dispatch};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
@@ -167,6 +167,10 @@ pub struct Renderer {
     show_reasoning: bool,
     dim: bool,
     line_open: AtomicU8,
+    /// Started tool calls awaiting their end event, as id and name.
+    /// An aborted turn leaves entries; `finish` marks them not run,
+    /// so a rendered preview cannot read like an applied change.
+    pending_calls: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Renderer {
@@ -177,11 +181,17 @@ impl Renderer {
             show_reasoning,
             dim,
             line_open: AtomicU8::new(LINE_NONE),
+            pending_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    /// Close any line the stream left open.
+    /// Close any line the stream left open, and mark every call the
+    /// turn never answered as not run.
     pub fn finish(&self) {
+        let pending = std::mem::take(&mut *self.pending_calls.lock().unwrap());
+        for (_, name) in pending {
+            self.status_line(&format!("✗ {name}: not run"));
+        }
         self.close_line();
     }
 
@@ -251,22 +261,34 @@ impl EventSink for Renderer {
                 };
                 self.line_open.store(open, Ordering::Relaxed);
             }
-            EngineEvent::ToolStart { name, .. } => {
+            EngineEvent::ToolStart { id, name } => {
+                self.pending_calls
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), name.to_string()));
                 self.status_line(&format!("· {name} …"));
             }
             EngineEvent::ToolRun { name, input, .. } => {
-                if let Some(preview) = run_preview(name, input) {
+                // One-shot mode hides previews with the reasoning; an
+                // interactive session shows them.
+                if self.show_reasoning
+                    && let Some(preview) = run_preview(name, input)
+                {
                     self.close_line();
                     self.write_err(&self.dimmed(&preview));
                     self.write_err("\n");
                 }
             }
             EngineEvent::ToolEnd {
+                id,
                 name,
                 summary,
                 is_error,
-                ..
             } => {
+                self.pending_calls
+                    .lock()
+                    .unwrap()
+                    .retain(|(pending, _)| pending != id);
                 let mark = if is_error { "✗" } else { "·" };
                 self.status_line(&format!("{mark} {}", summary.unwrap_or(name)));
             }
@@ -360,19 +382,18 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     Some(Effect::NewSession) => {
                         engine = None;
                         resume = false;
-                        eprintln!("the next prompt starts a fresh session");
+                        eprintln!("{NEW_SESSION_NOTE}");
                         continue;
                     }
                     Some(Effect::SetModel(name)) => {
                         if let Some(engine) = engine.as_mut()
-                            && let Err(error) =
-                                engine.set_model(&name, &runtime.config().project_dir)
+                            && let Err(error) = engine.set_model(&name)
                         {
                             eprintln!("demerzel: {error}");
                             continue;
                         }
                         model = name;
-                        eprintln!("model: {model}");
+                        eprintln!("{}", model_note(&model));
                         continue;
                     }
                     None => {}

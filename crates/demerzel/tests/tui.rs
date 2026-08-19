@@ -412,20 +412,50 @@ async fn an_edit_call_previews_as_a_diff_before_the_question() {
 
     pty.wait_for(PROMPT);
     pty.send(b"change it\r");
+    // The diff preview reaches the screen before the question; its
+    // exact vocabulary is pinned by the preview unit tests.
     pty.wait_for("edit demo.txt");
-    pty.wait_for("@ replace lines 1-2");
-    pty.wait_for("+ one");
-    pty.wait_for("+ two");
     pty.wait_for("approve edit? [y]es / [a]lways / [N]o");
     pty.send(b"n");
     pty.wait_for("approve edit? no");
     pty.wait_for("understood");
     pty.send(CTRL_D);
-    pty.wait_exit();
+    let raw = pty.wait_exit();
 
+    // The question adds no second copy of the call: the "wants to
+    // run" header appears only when no preview rendered.
+    assert!(
+        !contains_marker(&raw, "edit wants to run:"),
+        "a covered call must not render twice"
+    );
     // The declined call went back to the model as an error result.
     let second = mock.received()[1].body.to_string();
     assert!(second.contains("declined"), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_without_a_dispatch_preview_asks_with_its_input() {
+    // An input shape the preview does not know: the question falls
+    // back to the JSON input, so nothing is approved blind.
+    let mock = MockServer::start(
+        vec![
+            tool_turn("bash", json!({"cmd": "mystery"})),
+            text_turn("done"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"go\r");
+    pty.wait_for("bash wants to run:");
+    pty.wait_for("mystery");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"n");
+    pty.wait_for("done");
+    pty.send(CTRL_D);
+    pty.wait_exit();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -539,7 +569,11 @@ async fn the_plain_flag_keeps_the_line_interface() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_plain_interface_shares_the_command_registry() {
-    let mock = MockServer::start(vec![text_turn("plain reply")], Vec::new()).await;
+    let mock = MockServer::start(
+        vec![text_turn("plain reply"), text_turn("fresh reply")],
+        Vec::new(),
+    )
+    .await;
     let mut pty = Pty::spawn(&mock.url(), &["--plain"]);
 
     pty.wait_for(PROMPT);
@@ -552,10 +586,21 @@ async fn the_plain_interface_shares_the_command_registry() {
     pty.send(b"hello\r");
     pty.wait_for("plain reply");
     pty.wait_for(PROMPT);
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.wait_for(PROMPT);
+    pty.send(b"again\r");
+    pty.wait_for("fresh reply");
+    pty.wait_for(PROMPT);
     pty.send(CTRL_D);
     pty.wait_exit();
 
-    // The switch happened before the session opened.
-    let first = mock.received()[0].body.to_string();
+    // The switch happened before the session opened, and the fresh
+    // session dropped the first exchange.
+    let requests = mock.received();
+    let first = requests[0].body.to_string();
+    let second = requests[1].body.to_string();
     assert!(first.contains("gpt-test"), "{first}");
+    assert!(second.contains("again"), "{second}");
+    assert!(!second.contains("hello"), "{second}");
 }

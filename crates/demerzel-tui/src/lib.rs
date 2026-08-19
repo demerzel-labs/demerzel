@@ -43,6 +43,9 @@ pub enum Submission<'a> {
     Exit,
     /// A message instead of a turn: unknown commands and such.
     Note(String),
+    /// A failure message instead of a turn: a command that could not
+    /// apply.
+    Error(String),
     /// One user turn. The future reports through the sender it was
     /// given and returns when the turn is over.
     Run(TurnFuture<'a>),

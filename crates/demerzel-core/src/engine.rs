@@ -238,11 +238,26 @@ impl<'a> Engine<'a> {
 
     /// Switch the model for the turns that follow. The switch appends
     /// a meta record, so the session file names the model that
-    /// continues it — the same rule a resume applies. `cwd` is the
-    /// project directory the session is scoped to.
-    pub fn set_model(&mut self, model: &str, cwd: &std::path::Path) -> Result<(), EngineError> {
-        self.session
-            .append_meta(&SessionMeta::now(cwd, self.provider.id(), model))?;
+    /// continues it — an audit trail; resume still takes its model
+    /// from config. A real switch also drops the sealed reasoning
+    /// payloads from the in-memory history: a sealed payload is bound
+    /// to the model that produced it, and resending it to another
+    /// model fails every later turn. The readable summaries stay.
+    pub fn set_model(&mut self, model: &str) -> Result<(), EngineError> {
+        self.session.append_meta(&SessionMeta::now(
+            self.session.cwd(),
+            self.provider.id(),
+            model,
+        ))?;
+        if model != self.config.model {
+            for message in &mut self.history {
+                for block in &mut message.content {
+                    if let ContentBlock::Reasoning { sealed, .. } = block {
+                        *sealed = None;
+                    }
+                }
+            }
+        }
         self.config.model = model.to_string();
         Ok(())
     }
@@ -1209,18 +1224,73 @@ mod tests {
 
         let sink = noop_sink();
         block_on(engine.user_turn("first".into(), &sink, &mut ApproveAll)).unwrap();
-        engine.set_model("other-model", dir.path()).unwrap();
+        engine.set_model("other-model").unwrap();
         block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
 
         let requests = provider.requests();
         assert_eq!(requests[0].model, "test-model");
         assert_eq!(requests[1].model, "other-model");
 
-        // The session file names the model that continues it.
+        // The session file names the model that continues it, under
+        // the same project the session opened with.
         let raw = std::fs::read_to_string(engine.session().path()).unwrap();
         assert!(raw.contains("other-model"), "missing the switch meta");
         let replayed = replay(engine.session().path()).unwrap();
         assert_eq!(replayed.messages, engine.history());
+        let canonical = dir.path().canonicalize().unwrap();
+        assert_eq!(replayed.meta.unwrap().cwd, canonical.display().to_string());
+    }
+
+    #[test]
+    fn a_model_switch_drops_sealed_reasoning_from_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("later")]);
+        let tools = FakeTools;
+        let history = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        summary: "thought".into(),
+                        sealed: Some(SealedPayload {
+                            provider: "scripted".into(),
+                            data: json!({"sig": "model-a-only"}),
+                        }),
+                    },
+                    ContentBlock::Text { text: "hey".into() },
+                ],
+            },
+        ];
+        let mut engine = Engine::with_history(
+            &provider,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            EngineConfig::new("model-a"),
+            session_in(&dir),
+            history,
+        );
+
+        // A switch to the same name keeps the payloads.
+        engine.set_model("model-a").unwrap();
+        assert!(matches!(
+            &engine.history()[1].content[0],
+            ContentBlock::Reasoning {
+                sealed: Some(_),
+                ..
+            }
+        ));
+
+        // A real switch drops them; the summary stays readable.
+        engine.set_model("model-b").unwrap();
+        let ContentBlock::Reasoning { summary, sealed } = &engine.history()[1].content[0] else {
+            panic!("expected the reasoning block");
+        };
+        assert_eq!(summary, "thought");
+        assert!(sealed.is_none(), "a sealed payload crossed a model switch");
     }
 
     #[test]
