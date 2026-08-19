@@ -3,7 +3,7 @@
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-15)
+## Status (2026-08-19)
 
 M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
 config and `doctor`, PR #18) and the platform statement (PR #19) are
@@ -12,10 +12,10 @@ manual sessions from the step-3 build meet exit criterion 2: a
 multi-turn tool session, a Ctrl-C abort, and a `--continue` resume
 that replayed the full history all completed against the Anthropic
 API. Step 4 (`dmz login`, PR #23) is merged. Step 5 (the TUI
-foundation) is in review. Step 5 includes a minimal approval
-question, because ask mode is the interactive default and a session
-without it cannot approve a write. Step 6 keeps the richer prompt,
-the edit previews, the shared command registry, and the status bar.
+foundation, PR #24) is merged. Step 6 (TUI interaction) is in
+review: edit previews, command previews on approval, the shared
+command registry with `/help`, `/model`, and `/new`, the status bar,
+and per-input approval grants for execute tools.
 
 ## Goal
 
@@ -322,11 +322,33 @@ Each step is one PR with its own verify line.
   environment, and the user file. The `--base-url` flag and
   `DEMERZEL_BASE_URL` stay provider-agnostic and follow a provider
   switch; they are the user's own input, outside the trust rule.
-- Per-input approval grants (deferred from M1). Decide in step 6
-  whether `always` stays name-scoped or gains per-input granularity
-  for bash. A step-3 dogfood review flagged the name-scoped grant as
-  the largest injection surface: one `always` on bash approves every
-  later bash command in the session.
+- Per-input approval grants (deferred from M1) — decided in step 6.
+  An `always` answer scopes by access class. On an execute tool the
+  grant covers only the exact input, so one `always` on bash cannot
+  approve every later bash command — the injection surface a step-3
+  dogfood review flagged. On a write tool the grant keeps the tool
+  name as its scope: every edit input differs, so a per-input grant
+  there would never match again. `/help` states the rule.
+- `/model` and the session file — decided in step 6. A switch
+  appends a meta record as an audit trail; a resume still takes its
+  model from config, because config cannot tell a default from an
+  explicit choice yet. A real switch drops the sealed reasoning
+  payloads from the in-memory history — a sealed payload is bound to
+  the model that produced it. Known gap, present since M1: a resume
+  with a different model still replays the file's sealed payloads.
+  The M3 fix is a model field on the sealed payload, which also lets
+  a resume adopt the session's own model.
+- `/model` to a model outside the request shape — observed in the
+  step-6 live dogfood. The `anthropic` adapter requests adaptive
+  thinking by default, and a model without it rejects every turn
+  with the API's own 400 message; `/model` back restores the
+  session. This matches the step-3 rule for `--model`: an unknown or
+  mismatched name fails at the API with a clear error. Per-model
+  capability flags are M3 work, with the role tables.
+- One model seam for M3 — noted in step 6 review. The interfaces own
+  the session model, so `Runtime::open_session` and `Runtime::engine`
+  both take it. Per-role routing in M3 must fold these into one
+  call with a routing struct, not widen both signatures again.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

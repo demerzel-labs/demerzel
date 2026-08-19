@@ -99,8 +99,12 @@ impl Bed {
     /// One measured turn: build the engine and remove the session file
     /// outside the timed span; assert the workload really ran.
     async fn timed_turn(&self, expected_history: usize) -> Duration {
-        let (session, history) = self.runtime.open_session().unwrap();
-        let mut engine = self.runtime.engine(session, history);
+        let config = self.runtime.config();
+        let (session, history) = self
+            .runtime
+            .open_session(config.continue_last, &config.model)
+            .unwrap();
+        let mut engine = self.runtime.engine(session, history, &config.model);
         let start = Instant::now();
         let outcome = engine
             .user_turn("bench".into(), &noop, &mut NoPrompt)

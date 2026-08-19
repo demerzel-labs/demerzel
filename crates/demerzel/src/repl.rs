@@ -21,8 +21,8 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{slash_command, unknown_command};
-use crate::preview::input_preview;
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
+use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
 /// Byte cap for one history entry. A pasted document must not grow
@@ -167,6 +167,12 @@ pub struct Renderer {
     show_reasoning: bool,
     dim: bool,
     line_open: AtomicU8,
+    /// Started tool calls awaiting their end event, as id and name.
+    /// An aborted turn leaves entries; `finish` marks them
+    /// interrupted, so a rendered preview cannot read like an
+    /// applied change. Interrupted, not absent: a dropped turn can
+    /// cut an approved call mid-run.
+    pending_calls: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Renderer {
@@ -177,11 +183,17 @@ impl Renderer {
             show_reasoning,
             dim,
             line_open: AtomicU8::new(LINE_NONE),
+            pending_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    /// Close any line the stream left open.
+    /// Close any line the stream left open, and mark every call the
+    /// turn never answered as interrupted.
     pub fn finish(&self) {
+        let pending = std::mem::take(&mut *self.pending_calls.lock().unwrap());
+        for (_, name) in pending {
+            self.status_line(&format!("✗ {name}: interrupted"));
+        }
         self.close_line();
     }
 
@@ -251,15 +263,34 @@ impl EventSink for Renderer {
                 };
                 self.line_open.store(open, Ordering::Relaxed);
             }
-            EngineEvent::ToolStart { name, .. } => {
+            EngineEvent::ToolStart { id, name } => {
+                self.pending_calls
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), name.to_string()));
                 self.status_line(&format!("· {name} …"));
             }
+            EngineEvent::ToolRun { name, input, .. } => {
+                // One-shot mode hides previews with the reasoning; an
+                // interactive session shows them.
+                if self.show_reasoning
+                    && let Some(preview) = run_preview(name, input)
+                {
+                    self.close_line();
+                    self.write_err(&self.dimmed(&preview));
+                    self.write_err("\n");
+                }
+            }
             EngineEvent::ToolEnd {
+                id,
                 name,
                 summary,
                 is_error,
-                ..
             } => {
+                self.pending_calls
+                    .lock()
+                    .unwrap()
+                    .retain(|(pending, _)| pending != id);
                 let mark = if is_error { "✗" } else { "·" };
                 self.status_line(&format!("{mark} {}", summary.unwrap_or(name)));
             }
@@ -284,8 +315,12 @@ struct TerminalApprover {
 impl Approver for TerminalApprover {
     fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer> {
         Box::pin(async move {
-            eprintln!("\n{tool} wants to run:");
-            eprintln!("{}", input_preview(input));
+            // A call the dispatch preview already rendered needs only
+            // the question; anything else shows its input here.
+            if let Some(preview) = ask_preview(tool, input) {
+                eprintln!("\n{tool} wants to run:");
+                eprintln!("{preview}");
+            }
             match self
                 .reader
                 .read(&format!("approve {tool}? [y]es / [a]lways / [N]o "), false)
@@ -329,6 +364,10 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // Every session opens on the first submitted prompt — `-c` too —
     // so an idle boot reads and writes no session file.
     let mut engine: Option<Engine<'_>> = None;
+    // The interface owns the session model: `/model` switches it.
+    let mut model = runtime.config().model.clone();
+    // `/new` turns the next open into a fresh session, `-c` or not.
+    let mut resume = runtime.config().continue_last;
     loop {
         match reader.read(demerzel_tui::PROMPT, true).await {
             ReadOutcome::Line(line) => {
@@ -336,17 +375,33 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(command) = slash_command(line) {
-                    match command {
-                        "exit" | "quit" => break,
-                        other => {
-                            eprintln!("{}", unknown_command(other));
+                match dispatch(line, &model) {
+                    Some(Effect::Exit) => break,
+                    Some(Effect::Note(note)) => {
+                        eprintln!("{note}");
+                        continue;
+                    }
+                    Some(Effect::NewSession) => {
+                        engine = None;
+                        resume = false;
+                        eprintln!("{NEW_SESSION_NOTE}");
+                        continue;
+                    }
+                    Some(Effect::SetModel(name)) => {
+                        if let Some(engine) = engine.as_mut()
+                            && let Err(error) = engine.set_model(&name)
+                        {
+                            eprintln!("demerzel: {error}");
                             continue;
                         }
+                        model = name;
+                        eprintln!("{}", model_note(&model));
+                        continue;
                     }
+                    None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session()?;
+                    let (session, history) = runtime.open_session(resume, &model)?;
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
@@ -354,7 +409,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             history.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, history));
+                    engine = Some(runtime.engine(session, history, &model));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(engine, line.to_string(), &reader, &mut sigint).await;

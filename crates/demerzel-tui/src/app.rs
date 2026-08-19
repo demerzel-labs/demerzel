@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::input::Input;
-use crate::render::{self, View};
+use crate::render::{self, Status, View};
 use crate::terminal::Guard;
 use crate::transcript::{Kind, Transcript};
 use crate::{Options, PROMPT, Submission, TurnFuture};
@@ -74,6 +74,11 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
                 app.dirty = true;
                 app.draw()?;
             }
+            Submission::Error(text) => {
+                app.transcript.push_line(Kind::Error, &text);
+                app.dirty = true;
+                app.draw()?;
+            }
             Submission::Run(turn) => app.run_turn(turn).await?,
         }
     }
@@ -84,6 +89,7 @@ struct App {
     transcript: Transcript,
     input: Input,
     history: History,
+    status: Status,
     mode: Mode,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
@@ -116,6 +122,14 @@ impl App {
             transcript,
             input: Input::new(),
             history: History::load(options.history_path),
+            status: Status {
+                model: options.model,
+                mode: options.mode,
+                session: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: 0,
+            },
             mode: Mode::Edit,
             keys,
             displays,
@@ -278,22 +292,43 @@ impl App {
                 let summary = summary.unwrap_or(name);
                 self.transcript.tool_end(&id, &summary, is_error);
             }
-            DisplayEvent::Usage(usage) => self.transcript.push_line(
-                Kind::Notice,
-                &format!(
-                    "· {} in · {} out · {} cached",
-                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                ),
-            ),
+            DisplayEvent::Usage(usage) => {
+                self.status.input_tokens += usage.input_tokens;
+                self.status.output_tokens += usage.output_tokens;
+                self.status.cached_tokens += usage.cache_read_tokens;
+                self.transcript.push_line(
+                    Kind::Notice,
+                    &format!(
+                        "· {} in · {} out · {} cached",
+                        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
+                    ),
+                );
+            }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
+            DisplayEvent::Model(name) => self.status.model = name,
+            DisplayEvent::Session(id) => {
+                // The totals belong to the open session; a session
+                // change restarts them.
+                self.status.session = id;
+                self.status.input_tokens = 0;
+                self.status.output_tokens = 0;
+                self.status.cached_tokens = 0;
+            }
         }
     }
 
     fn show_approval(&mut self, request: ApprovalRequest) {
-        self.transcript
-            .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
-        self.transcript.push_line(Kind::Notice, &request.preview);
+        // A call whose preview the transcript already carries — the
+        // driver passes `None` — gets only the question row.
+        if let Some(preview) = &request.preview {
+            self.transcript
+                .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
+            self.transcript.push_line(Kind::Notice, preview);
+        }
+        // A question needs its call visible: jump to the bottom, where
+        // the preview and the question row are.
+        self.transcript.scroll = 0;
         self.mode = Mode::Approval {
             tool: request.tool,
             reply: request.reply,
@@ -429,6 +464,7 @@ impl App {
             guard,
             transcript,
             input,
+            status,
             page,
             ..
         } = self;
@@ -438,6 +474,7 @@ impl App {
                 View {
                     transcript,
                     input,
+                    status,
                     approval: question.as_deref(),
                 },
             );

@@ -2,16 +2,17 @@
 //! lives in `demerzel-tui`; this module is its driver: it opens the
 //! session on the first prompt, runs turns, and maps commands and
 //! outcomes to messages. The REPL and this driver share the command
-//! parsing, the preview, and the message wording. The driver builds
-//! the approval preview, so the interface crate needs no knowledge of
-//! tools.
+//! registry, the previews, and the message wording. The driver builds
+//! every preview, so the interface crate needs no knowledge of tools.
 
-use demerzel_core::{ApprovalAnswer, Approver, BoxFuture, Engine, TurnOutcome};
+use demerzel_core::{
+    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
+};
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
 use serde_json::Value;
 
-use crate::commands::{slash_command, unknown_command};
-use crate::preview::input_preview;
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
+use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
 /// Run the full-screen interface to completion. The caller owns the
@@ -25,13 +26,17 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let options = Options {
         history_path: config.history_path.clone(),
         banner: Some(format!(
-            "{} ({mode}) — /exit or Ctrl-D ends the session",
+            "{} ({mode}) — /help lists the commands; /exit or Ctrl-D ends the session",
             config.model
         )),
+        model: config.model.clone(),
+        mode: mode.to_string(),
     };
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,
+        model: config.model.clone(),
+        resume: config.continue_last,
     };
     demerzel_tui::run(&mut driver, options)
         .await
@@ -43,17 +48,44 @@ struct TuiDriver<'r> {
     /// Opens on the first submitted prompt, so an idle boot reads and
     /// writes no session file — the REPL rule.
     engine: Option<Engine<'r>>,
+    /// The session model. `/model` switches it.
+    model: String,
+    /// Whether the next open resumes the latest session. `/new`
+    /// clears it.
+    resume: bool,
 }
 
-/// The engine's approver over the interface's question channel. The
-/// preview is built here, next to the tools.
+/// The engine's event sink: it forwards every display event and
+/// renders the dispatch preview — the edit diff, the bash command —
+/// into the transcript. The preview is built here, next to the tools.
+struct PreviewSink {
+    events: EventSender,
+}
+
+impl EventSink for PreviewSink {
+    fn event(&self, event: EngineEvent<'_>) {
+        if let EngineEvent::ToolRun { name, input, .. } = &event
+            && let Some(preview) = run_preview(name, input)
+        {
+            self.events.notice(preview);
+        }
+        self.events.event(event);
+    }
+}
+
+/// The engine's approver over the interface's question channel. A
+/// call whose preview [`PreviewSink`] already rendered sends no
+/// preview: the question row is enough. This pairing is the
+/// contract: a turn that uses this approver must use [`PreviewSink`]
+/// as its sink, or a covered call would ask with nothing on screen.
+/// The PTY tests pin both halves.
 struct TuiApprover {
     channel: ApprovalChannel,
 }
 
 impl Approver for TuiApprover {
     fn approve<'a>(&'a mut self, tool: &'a str, input: &'a Value) -> BoxFuture<'a, ApprovalAnswer> {
-        Box::pin(async move { self.channel.ask(tool, input_preview(input)).await })
+        Box::pin(async move { self.channel.ask(tool, ask_preview(tool, input)).await })
     }
 }
 
@@ -64,16 +96,32 @@ impl Driver for TuiDriver<'_> {
         events: EventSender,
         approvals: ApprovalChannel,
     ) -> Submission<'_> {
-        if let Some(command) = slash_command(&line) {
-            return match command {
-                "exit" | "quit" => Submission::Exit,
-                other => Submission::Note(unknown_command(other)),
-            };
+        match dispatch(&line, &self.model) {
+            Some(Effect::Exit) => return Submission::Exit,
+            Some(Effect::Note(note)) => return Submission::Note(note),
+            Some(Effect::NewSession) => {
+                self.engine = None;
+                self.resume = false;
+                events.session(None);
+                return Submission::Note(NEW_SESSION_NOTE.to_string());
+            }
+            Some(Effect::SetModel(name)) => {
+                if let Some(engine) = self.engine.as_mut()
+                    && let Err(error) = engine.set_model(&name)
+                {
+                    return Submission::Error(format!("demerzel: {error}"));
+                }
+                self.model = name.clone();
+                events.model(name);
+                return Submission::Note(model_note(&self.model));
+            }
+            None => {}
         }
         Submission::Run(Box::pin(async move {
             if self.engine.is_none() {
-                match self.runtime.open_session() {
+                match self.runtime.open_session(self.resume, &self.model) {
                     Ok((session, history)) => {
+                        events.session(Some(session.id().to_string()));
                         if !history.is_empty() {
                             events.notice(format!(
                                 "continuing session {} ({} messages)",
@@ -81,7 +129,7 @@ impl Driver for TuiDriver<'_> {
                                 history.len()
                             ));
                         }
-                        self.engine = Some(self.runtime.engine(session, history));
+                        self.engine = Some(self.runtime.engine(session, history, &self.model));
                     }
                     Err(error) => {
                         events.error(format!("demerzel: {error}"));
@@ -90,8 +138,11 @@ impl Driver for TuiDriver<'_> {
                 }
             }
             let engine = self.engine.as_mut().expect("engine opened above");
+            let sink = PreviewSink {
+                events: events.clone(),
+            };
             let mut approver = TuiApprover { channel: approvals };
-            match engine.user_turn(line, &events, &mut approver).await {
+            match engine.user_turn(line, &sink, &mut approver).await {
                 Ok(TurnOutcome::Completed) => {}
                 Ok(TurnOutcome::Aborted) => events.notice("[turn stopped]"),
                 Ok(TurnOutcome::MaxTokens) => events.error(

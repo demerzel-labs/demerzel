@@ -27,6 +27,10 @@ pub(crate) enum DisplayEvent {
     Usage(Usage),
     Notice(String),
     Error(String),
+    /// The session model changed; the status bar follows.
+    Model(String),
+    /// A session opened or closed; the status bar names it.
+    Session(Option<String>),
 }
 
 /// Sends display events into the interface loop. The driver hands it
@@ -51,6 +55,16 @@ impl EventSender {
     pub fn error(&self, text: impl Into<String>) {
         let _ = self.tx.send(DisplayEvent::Error(text.into()));
     }
+
+    /// Name the session model on the status bar.
+    pub fn model(&self, name: impl Into<String>) {
+        let _ = self.tx.send(DisplayEvent::Model(name.into()));
+    }
+
+    /// Name the open session on the status bar; `None` clears it.
+    pub fn session(&self, id: Option<String>) {
+        let _ = self.tx.send(DisplayEvent::Session(id));
+    }
 }
 
 impl EventSink for EventSender {
@@ -74,7 +88,8 @@ impl EventSink for EventSender {
                 is_error,
             },
             EngineEvent::ModelUsage(usage) => DisplayEvent::Usage(usage),
-            // Edit previews render from this event in the next step.
+            // ToolRun stays with the driver: it renders the dispatch
+            // preview, so this crate needs no knowledge of tools.
             _ => return,
         };
         let _ = self.tx.send(owned);
@@ -84,7 +99,9 @@ impl EventSink for EventSender {
 /// One approval question on its way to the screen.
 pub(crate) struct ApprovalRequest {
     pub tool: String,
-    pub preview: String,
+    /// What the question shows above itself. `None` when the driver
+    /// already rendered the call into the transcript.
+    pub preview: Option<String>,
     pub reply: oneshot::Sender<ApprovalAnswer>,
 }
 
@@ -100,9 +117,10 @@ impl ApprovalChannel {
         Self { tx }
     }
 
-    /// Show the question and wait for the answer. A dead interface
-    /// answers abort.
-    pub async fn ask(&mut self, tool: &str, preview: String) -> ApprovalAnswer {
+    /// Show the question and wait for the answer. `preview` is what
+    /// the question shows above itself; pass `None` only when the
+    /// call is already on the screen. A dead interface answers abort.
+    pub async fn ask(&mut self, tool: &str, preview: Option<String>) -> ApprovalAnswer {
         let (reply, answer) = oneshot::channel();
         let request = ApprovalRequest {
             tool: tool.to_string(),

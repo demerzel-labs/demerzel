@@ -183,6 +183,42 @@ impl Pty {
         assert_eq!(written, bytes.len() as isize, "PTY write failed");
     }
 
+    /// Change the window size. The frame diff writes only changed
+    /// cells, so an assertion on an in-place update — the status bar —
+    /// needs the full repaint the next draw runs after a resize.
+    fn resize(&self, cols: u16, rows: u16) {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.master);
+        let result = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) };
+        assert_eq!(result, 0, "PTY resize failed");
+    }
+
+    /// The session-file stems this run created, across all projects.
+    fn session_files(&self) -> Vec<String> {
+        let projects = self._dirs.path().join("data/demerzel/projects");
+        let mut stems = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&projects) else {
+            return stems;
+        };
+        for project in entries.flatten() {
+            let sessions = project.path().join("sessions");
+            let Ok(files) = std::fs::read_dir(&sessions) else {
+                continue;
+            };
+            for file in files.flatten() {
+                if let Some(stem) = file.path().file_stem() {
+                    stems.push(stem.to_string_lossy().into_owned());
+                }
+            }
+        }
+        stems
+    }
+
     /// Wait for a clean exit and return the raw output.
     fn wait_exit(mut self) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -218,19 +254,22 @@ fn openpty() -> (OwnedFd, OwnedFd) {
     let mut slave: libc::c_int = 0;
     // A fresh PTY reports zero rows and columns; give it a real
     // window or the interface has nothing to draw into.
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 30,
         ws_col: 100,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // The window parameter is `*const` on Linux and `*mut` on macOS;
+    // a raw mutable pointer coerces to both without tripping the
+    // Linux-side unnecessary-mut lint.
     let result = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &size,
+            &raw mut size,
         )
     };
     assert_eq!(result, 0, "openpty failed");
@@ -283,6 +322,17 @@ fn strip_escapes(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Whether the stripped, space-free view of `raw` contains `marker`,
+/// the same comparison [`Pty::wait_for`] runs with a cursor.
+fn contains_marker(raw: &[u8], marker: &str) -> bool {
+    let needle: Vec<u8> = marker.bytes().filter(|byte| *byte != b' ').collect();
+    let haystack: Vec<u8> = strip_escapes(raw)
+        .into_iter()
+        .filter(|byte| *byte != b' ')
+        .collect();
+    find_after(&haystack, 0, &needle).is_some()
+}
+
 /// The offset after the first match at or past `from`.
 fn find_after(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || from >= haystack.len() {
@@ -317,7 +367,7 @@ async fn a_tui_session_boots_streams_and_exits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ask_mode_prompts_and_a_key_approves() {
+async fn ask_mode_previews_the_command_and_a_key_approves() {
     let mock = MockServer::start(
         vec![
             tool_turn("bash", json!({"command": "echo approved-ran"})),
@@ -330,8 +380,9 @@ async fn ask_mode_prompts_and_a_key_approves() {
 
     pty.wait_for(PROMPT);
     pty.send(b"run it\r");
-    pty.wait_for("bash wants to run:");
-    pty.wait_for("[y]es / [a]lways / [N]o");
+    // The dispatch preview shows the command; the question follows.
+    pty.wait_for("$ echo approved-ran");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
     pty.send(b"y");
     pty.wait_for("approve bash? yes");
     pty.wait_for("finished");
@@ -341,6 +392,145 @@ async fn ask_mode_prompts_and_a_key_approves() {
     // The tool ran: its output went back to the model.
     let second = mock.received()[1].body.to_string();
     assert!(second.contains("approved-ran"), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_call_previews_as_a_diff_before_the_question() {
+    let mock = MockServer::start(
+        vec![
+            tool_turn(
+                "edit",
+                json!({
+                    "path": "demo.txt",
+                    "tag": "t0",
+                    "edits": [{"op": "replace", "start": 1, "end": 2, "content": "one\ntwo\n"}],
+                }),
+            ),
+            text_turn("understood"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"change it\r");
+    // The diff preview reaches the screen before the question; its
+    // exact vocabulary is pinned by the preview unit tests.
+    pty.wait_for("edit demo.txt");
+    pty.wait_for("approve edit? [y]es / [a]lways / [N]o");
+    pty.send(b"n");
+    pty.wait_for("approve edit? no");
+    pty.wait_for("understood");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    // The question adds no second copy of the call: the "wants to
+    // run" header appears only when no preview rendered.
+    assert!(
+        !contains_marker(&raw, "edit wants to run:"),
+        "a covered call must not render twice"
+    );
+    // The declined call went back to the model as an error result.
+    let second = mock.received()[1].body.to_string();
+    assert!(second.contains("declined"), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_without_a_dispatch_preview_asks_with_its_input() {
+    // An input shape the preview does not know: the question falls
+    // back to the JSON input, so nothing is approved blind.
+    let mock = MockServer::start(
+        vec![
+            tool_turn("bash", json!({"cmd": "mystery"})),
+            text_turn("done"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"go\r");
+    pty.wait_for("bash wants to run:");
+    pty.wait_for("mystery");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"n");
+    pty.wait_for("done");
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
+    let mock = MockServer::start(
+        vec![text_turn("first reply"), text_turn("second reply")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"/help\r");
+    pty.wait_for("/model [name]");
+    pty.send(b"/model gpt-test\r");
+    pty.wait_for("model: gpt-test");
+    // A resize makes a later draw repaint the whole screen, so the
+    // updated status bar reaches the stream in full. Where it lands
+    // depends on frame timing, so the check runs on the whole output.
+    pty.resize(90, 30);
+    pty.send(b"hello\r");
+    pty.wait_for("first reply");
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.send(b"again\r");
+    pty.wait_for("second reply");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+    assert!(
+        contains_marker(&raw, "gpt-test · ask"),
+        "the bar never showed the switched model"
+    );
+
+    // The switch reached the requests; the fresh session dropped the
+    // first exchange from the second one.
+    let requests = mock.received();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].body.to_string();
+    let second = requests[1].body.to_string();
+    assert!(first.contains("gpt-test"), "{first}");
+    assert!(second.contains("gpt-test"), "{second}");
+    assert!(second.contains("again"), "{second}");
+    assert!(!second.contains("hello"), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_bar_names_the_session_from_the_first_prompt_on() {
+    let mock = MockServer::start(vec![text_turn("named reply")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("named reply");
+    // The session file exists now; its id shows only on the bar. A
+    // resize makes the next draw repaint the bar in full.
+    let sessions = pty.session_files();
+    assert_eq!(sessions.len(), 1);
+    let id = sessions[0].clone();
+    pty.resize(90, 30);
+    pty.send(b"x");
+    pty.wait_for(&id);
+    pty.send(CTRL_C);
+    // A fresh session restarts the totals: after the turn above the
+    // bar shows non-zero counts, so a later zero row is the reset.
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.resize(80, 30);
+    pty.send(b"y");
+    pty.wait_for("0 in · 0 out · 0 cached");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -386,4 +576,42 @@ async fn the_plain_flag_keeps_the_line_interface() {
         !text.contains(ENTER_ALT_SCREEN),
         "--plain must not switch screens"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_shares_the_command_registry() {
+    let mock = MockServer::start(
+        vec![text_turn("plain reply"), text_turn("fresh reply")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &["--plain"]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"/help\r");
+    pty.wait_for("/model [name]");
+    pty.wait_for(PROMPT);
+    pty.send(b"/model gpt-test\r");
+    pty.wait_for("model: gpt-test");
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("plain reply");
+    pty.wait_for(PROMPT);
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.wait_for(PROMPT);
+    pty.send(b"again\r");
+    pty.wait_for("fresh reply");
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    // The switch happened before the session opened, and the fresh
+    // session dropped the first exchange.
+    let requests = mock.received();
+    let first = requests[0].body.to_string();
+    let second = requests[1].body.to_string();
+    assert!(first.contains("gpt-test"), "{first}");
+    assert!(second.contains("again"), "{second}");
+    assert!(!second.contains("hello"), "{second}");
 }
