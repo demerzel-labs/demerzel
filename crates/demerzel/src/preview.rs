@@ -83,9 +83,9 @@ impl PreviewLines {
         }
     }
 
-    /// Both caps reached? The callers stop building lines here, so
-    /// the cost of a preview follows the caps, not the input size —
-    /// the input is model-sized and lands inside the frame loop.
+    /// Either cap reached? The callers stop building lines here, so
+    /// past the caps a preview drops to a cheap counting scan — the
+    /// input is model-sized and lands inside the frame loop.
     fn full(&self) -> bool {
         self.lines.len() >= PREVIEW_LINES || self.bytes >= PREVIEW_TOTAL_BYTES
     }

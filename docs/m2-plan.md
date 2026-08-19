@@ -338,6 +338,13 @@ Each step is one PR with its own verify line.
   with a different model still replays the file's sealed payloads.
   The M3 fix is a model field on the sealed payload, which also lets
   a resume adopt the session's own model.
+- `/model` to a model outside the request shape — observed in the
+  step-6 live dogfood. The `anthropic` adapter requests adaptive
+  thinking by default, and a model without it rejects every turn
+  with the API's own 400 message; `/model` back restores the
+  session. This matches the step-3 rule for `--model`: an unknown or
+  mismatched name fails at the API with a clear error. Per-model
+  capability flags are M3 work, with the role tables.
 - One model seam for M3 — noted in step 6 review. The interfaces own
   the session model, so `Runtime::open_session` and `Runtime::engine`
   both take it. Per-role routing in M3 must fold these into one

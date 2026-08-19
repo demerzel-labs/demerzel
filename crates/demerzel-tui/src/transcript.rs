@@ -150,7 +150,13 @@ impl Transcript {
             if let Some(offset) = index.checked_sub(self.dropped)
                 && offset < self.entries.len()
             {
-                self.entries[offset].text = format!("✗ {name}: not run");
+                // The name is model-controlled: sanitize and cap it
+                // the way every other entry write does.
+                let mut text = String::new();
+                push_sanitized(&mut text, &format!("✗ {name}: not run"));
+                let mut text = text.replace('\n', " ");
+                let _ = split_at_cap(&mut text);
+                self.entries[offset].text = text;
             }
         }
         self.tool_lines.clear();
@@ -338,6 +344,15 @@ mod tests {
         // A late end for a forgotten id appends; it rewrites nothing.
         t.tool_end("call_1", "late", false);
         assert_eq!(t.entries().len(), 2);
+    }
+
+    #[test]
+    fn the_not_run_marker_sanitizes_a_hostile_tool_name() {
+        let mut t = Transcript::new();
+        t.tool_start("call_1", "ba\x1b[2Jsh\nSECOND");
+        t.close();
+        let last = t.entries().last().unwrap();
+        assert_eq!(last.text, "✗ ba[2Jsh SECOND: not run");
     }
 
     #[test]

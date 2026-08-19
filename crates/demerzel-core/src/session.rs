@@ -265,7 +265,12 @@ impl Session {
     }
 
     pub fn append_meta(&mut self, meta: &SessionMeta) -> io::Result<()> {
-        self.append_ref(&RecordRef::Meta(meta))
+        self.append_ref(&RecordRef::Meta(meta))?;
+        // The session adopts the meta's canonical cwd, so a later
+        // meta append — a model switch — names the same project even
+        // when the file the session resumed had no meta record.
+        self.cwd = PathBuf::from(&meta.cwd);
+        Ok(())
     }
 
     pub fn append_message(&mut self, message: &Message) -> io::Result<()> {

@@ -168,8 +168,9 @@ mod tests {
             let line = command.usage.split_whitespace().next().unwrap();
             let effect = dispatch(line, "m").expect("a table row must parse");
             if let Effect::Note(note) = &effect {
-                assert!(
-                    !note.contains("unknown command"),
+                assert_ne!(
+                    note,
+                    &unknown_command(line.trim_start_matches('/')),
                     "{line} is in the table but not in the dispatch match"
                 );
             }

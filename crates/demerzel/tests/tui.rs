@@ -518,6 +518,14 @@ async fn the_status_bar_names_the_session_from_the_first_prompt_on() {
     pty.send(b"x");
     pty.wait_for(&id);
     pty.send(CTRL_C);
+    // A fresh session restarts the totals: after the turn above the
+    // bar shows non-zero counts, so a later zero row is the reset.
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.resize(80, 30);
+    pty.send(b"y");
+    pty.wait_for("0 in · 0 out · 0 cached");
+    pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
 }
