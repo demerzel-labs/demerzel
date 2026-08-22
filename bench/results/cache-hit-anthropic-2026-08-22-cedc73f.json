@@ -1,0 +1,411 @@
+{
+  "benchmark": "prompt-cache-hit-rate",
+  "bin": "target/release/examples/cache_replay",
+  "git_rev": "cedc73f",
+  "git_dirty": false,
+  "date": "2026-08-22",
+  "machine": "machine-2026-08-22.json",
+  "provider": "anthropic",
+  "model": "claude-sonnet-5",
+  "runs": 2,
+  "definition": "hit_rate = cache_read_tokens / input_tokens; input_tokens counts the cached part for both providers. first_call is the first model call of the session; steady_state is every call after it.",
+  "project": "this repository, read-only tools",
+  "prompts": [
+    "Read Cargo.toml at the repository root and list the workspace members, one per line.",
+    "Read crates/demerzel-core/src/provider.rs. Name each method of the Provider trait and its return type.",
+    "Use grep to find where the session file's record types are defined, then read that enum and list its variants.",
+    "Read crates/demerzel-core/src/engine.rs. In three sentences, say what happens when the user aborts a turn at an approval prompt.",
+    "Which crate owns the full-screen interface? Read its lib.rs and name the public items it exports.",
+    "Without reading any more files, summarize what you learned about this repository in five bullets."
+  ],
+  "summary": {
+    "session_hit_rates": [
+      0.8496,
+      0.7912
+    ],
+    "first_call_hit_rates": [
+      0.0,
+      0.0
+    ],
+    "steady_state_hit_rates": [
+      0.8582,
+      0.7959
+    ],
+    "turn_hit_rates": [
+      [
+        0.0,
+        0.5312,
+        0.8462,
+        0.8885,
+        0.9309,
+        0.9663
+      ],
+      [
+        0.0,
+        0.5312,
+        0.9024,
+        0.3735,
+        0.9734,
+        0.9865
+      ]
+    ],
+    "outcomes": [
+      "completed"
+    ]
+  },
+  "sessions": [
+    {
+      "session": "01M0NY393V7Z9Z1HNFJ1KN8SPV",
+      "model_calls": 13,
+      "input_tokens": 97618,
+      "cache_read_tokens": 82936,
+      "output_tokens": 2453,
+      "hit_rate": 0.8496,
+      "first_call_hit_rate": 0.0,
+      "steady_state_hit_rate": 0.8582,
+      "turns": [
+        {
+          "prompt": "Read Cargo.toml at the repository root and list the workspace members, one per line.",
+          "outcome": "completed",
+          "wall_ms": 4274.4,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 2839,
+          "cache_read_tokens": 0,
+          "output_tokens": 147,
+          "hit_rate": 0.0,
+          "calls": [
+            {
+              "cache_read_tokens": 0,
+              "input_tokens": 980,
+              "output_tokens": 64,
+              "hit_rate": 0.0
+            },
+            {
+              "cache_read_tokens": 0,
+              "input_tokens": 1859,
+              "output_tokens": 83,
+              "hit_rate": 0.0
+            }
+          ]
+        },
+        {
+          "prompt": "Read crates/demerzel-core/src/provider.rs. Name each method of the Provider trait and its return type.",
+          "outcome": "completed",
+          "wall_ms": 4968.7,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 7219,
+          "cache_read_tokens": 3835,
+          "output_tokens": 298,
+          "hit_rate": 0.5312,
+          "calls": [
+            {
+              "cache_read_tokens": 1857,
+              "input_tokens": 1980,
+              "output_tokens": 59,
+              "hit_rate": 0.9379
+            },
+            {
+              "cache_read_tokens": 1978,
+              "input_tokens": 5239,
+              "output_tokens": 239,
+              "hit_rate": 0.3776
+            }
+          ]
+        },
+        {
+          "prompt": "Use grep to find where the session file's record types are defined, then read that enum and list its variants.",
+          "outcome": "completed",
+          "wall_ms": 9411.4,
+          "tools": [
+            "grep",
+            "read"
+          ],
+          "model_calls": 3,
+          "input_tokens": 19372,
+          "cache_read_tokens": 16393,
+          "output_tokens": 473,
+          "hit_rate": 0.8462,
+          "calls": [
+            {
+              "cache_read_tokens": 5237,
+              "input_tokens": 5508,
+              "output_tokens": 76,
+              "hit_rate": 0.9508
+            },
+            {
+              "cache_read_tokens": 5506,
+              "input_tokens": 5652,
+              "output_tokens": 102,
+              "hit_rate": 0.9742
+            },
+            {
+              "cache_read_tokens": 5650,
+              "input_tokens": 8212,
+              "output_tokens": 295,
+              "hit_rate": 0.688
+            }
+          ]
+        },
+        {
+          "prompt": "Read crates/demerzel-core/src/engine.rs. In three sentences, say what happens when the user aborts a turn at an approval prompt.",
+          "outcome": "completed",
+          "wall_ms": 8353.4,
+          "tools": [
+            "grep",
+            "read"
+          ],
+          "model_calls": 3,
+          "input_tokens": 29560,
+          "cache_read_tokens": 26265,
+          "output_tokens": 384,
+          "hit_rate": 0.8885,
+          "calls": [
+            {
+              "cache_read_tokens": 8210,
+              "input_tokens": 8556,
+              "output_tokens": 88,
+              "hit_rate": 0.9596
+            },
+            {
+              "cache_read_tokens": 8554,
+              "input_tokens": 9503,
+              "output_tokens": 103,
+              "hit_rate": 0.9001
+            },
+            {
+              "cache_read_tokens": 9501,
+              "input_tokens": 11501,
+              "output_tokens": 193,
+              "hit_rate": 0.8261
+            }
+          ]
+        },
+        {
+          "prompt": "Which crate owns the full-screen interface? Read its lib.rs and name the public items it exports.",
+          "outcome": "completed",
+          "wall_ms": 8890.0,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 24948,
+          "cache_read_tokens": 23224,
+          "output_tokens": 529,
+          "hit_rate": 0.9309,
+          "calls": [
+            {
+              "cache_read_tokens": 11499,
+              "input_tokens": 11727,
+              "output_tokens": 97,
+              "hit_rate": 0.9806
+            },
+            {
+              "cache_read_tokens": 11725,
+              "input_tokens": 13221,
+              "output_tokens": 432,
+              "hit_rate": 0.8868
+            }
+          ]
+        },
+        {
+          "prompt": "Without reading any more files, summarize what you learned about this repository in five bullets.",
+          "outcome": "completed",
+          "wall_ms": 7255.1,
+          "tools": [],
+          "model_calls": 1,
+          "input_tokens": 13680,
+          "cache_read_tokens": 13219,
+          "output_tokens": 622,
+          "hit_rate": 0.9663,
+          "calls": [
+            {
+              "cache_read_tokens": 13219,
+              "input_tokens": 13680,
+              "output_tokens": 622,
+              "hit_rate": 0.9663
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "session": "01M0NY4K8CHRHW8PW2HY1NC8CA",
+      "model_calls": 12,
+      "input_tokens": 163684,
+      "cache_read_tokens": 129499,
+      "output_tokens": 2216,
+      "hit_rate": 0.7912,
+      "first_call_hit_rate": 0.0,
+      "steady_state_hit_rate": 0.7959,
+      "turns": [
+        {
+          "prompt": "Read Cargo.toml at the repository root and list the workspace members, one per line.",
+          "outcome": "completed",
+          "wall_ms": 7647.5,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 2839,
+          "cache_read_tokens": 0,
+          "output_tokens": 147,
+          "hit_rate": 0.0,
+          "calls": [
+            {
+              "cache_read_tokens": 0,
+              "input_tokens": 980,
+              "output_tokens": 64,
+              "hit_rate": 0.0
+            },
+            {
+              "cache_read_tokens": 0,
+              "input_tokens": 1859,
+              "output_tokens": 83,
+              "hit_rate": 0.0
+            }
+          ]
+        },
+        {
+          "prompt": "Read crates/demerzel-core/src/provider.rs. Name each method of the Provider trait and its return type.",
+          "outcome": "completed",
+          "wall_ms": 4550.0,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 7219,
+          "cache_read_tokens": 3835,
+          "output_tokens": 273,
+          "hit_rate": 0.5312,
+          "calls": [
+            {
+              "cache_read_tokens": 1857,
+              "input_tokens": 1980,
+              "output_tokens": 59,
+              "hit_rate": 0.9379
+            },
+            {
+              "cache_read_tokens": 1978,
+              "input_tokens": 5239,
+              "output_tokens": 214,
+              "hit_rate": 0.3776
+            }
+          ]
+        },
+        {
+          "prompt": "Use grep to find where the session file's record types are defined, then read that enum and list its variants.",
+          "outcome": "completed",
+          "wall_ms": 8239.6,
+          "tools": [
+            "grep",
+            "read"
+          ],
+          "model_calls": 3,
+          "input_tokens": 18084,
+          "cache_read_tokens": 16319,
+          "output_tokens": 447,
+          "hit_rate": 0.9024,
+          "calls": [
+            {
+              "cache_read_tokens": 5237,
+              "input_tokens": 5483,
+              "output_tokens": 51,
+              "hit_rate": 0.9551
+            },
+            {
+              "cache_read_tokens": 5481,
+              "input_tokens": 5603,
+              "output_tokens": 102,
+              "hit_rate": 0.9782
+            },
+            {
+              "cache_read_tokens": 5601,
+              "input_tokens": 6998,
+              "output_tokens": 294,
+              "hit_rate": 0.8004
+            }
+          ]
+        },
+        {
+          "prompt": "Read crates/demerzel-core/src/engine.rs. In three sentences, say what happens when the user aborts a turn at an approval prompt.",
+          "outcome": "completed",
+          "wall_ms": 6650.8,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 38380,
+          "cache_read_tokens": 14335,
+          "output_tokens": 226,
+          "hit_rate": 0.3735,
+          "calls": [
+            {
+              "cache_read_tokens": 6996,
+              "input_tokens": 7341,
+              "output_tokens": 59,
+              "hit_rate": 0.953
+            },
+            {
+              "cache_read_tokens": 7339,
+              "input_tokens": 31039,
+              "output_tokens": 167,
+              "hit_rate": 0.2364
+            }
+          ]
+        },
+        {
+          "prompt": "Which crate owns the full-screen interface? Read its lib.rs and name the public items it exports.",
+          "outcome": "completed",
+          "wall_ms": 9585.6,
+          "tools": [
+            "read"
+          ],
+          "model_calls": 2,
+          "input_tokens": 63977,
+          "cache_read_tokens": 62274,
+          "output_tokens": 522,
+          "hit_rate": 0.9734,
+          "calls": [
+            {
+              "cache_read_tokens": 31037,
+              "input_tokens": 31239,
+              "output_tokens": 102,
+              "hit_rate": 0.9935
+            },
+            {
+              "cache_read_tokens": 31237,
+              "input_tokens": 32738,
+              "output_tokens": 420,
+              "hit_rate": 0.9542
+            }
+          ]
+        },
+        {
+          "prompt": "Without reading any more files, summarize what you learned about this repository in five bullets.",
+          "outcome": "completed",
+          "wall_ms": 7358.0,
+          "tools": [],
+          "model_calls": 1,
+          "input_tokens": 33185,
+          "cache_read_tokens": 32736,
+          "output_tokens": 601,
+          "hit_rate": 0.9865,
+          "calls": [
+            {
+              "cache_read_tokens": 32736,
+              "input_tokens": 33185,
+              "output_tokens": 601,
+              "hit_rate": 0.9865
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

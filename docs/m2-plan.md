@@ -28,9 +28,29 @@ Exit criteria, checked at step 7:
    benches inside the gates after the TUI — the step-5 and step-6
    receipts. Done.
 
-Step-7 receipts (2026-08-22, raw data in `bench/results/`): see the
-step-7 entry under "Decisions to make during M2" until the numbers
-land here with the results commit.
+Step-7 receipts (2026-08-22, Ryzen 9 5900X; raw data and the machine
+spec sit in `bench/results/`):
+
+- Render, headless 120x40 screen over 2,000 history lines: one redraw
+  161 µs mean; 64 KiB of text in 16-byte deltas ingests in 281 µs
+  (234 MB/s); the same stream with a frame every 64 deltas takes
+  12.1 ms (5.4 MB/s). The stream number is frame-bound: 65 frames at
+  161 µs are 10.5 ms of it. At the 16 ms frame cap one frame costs
+  about 1% of its budget.
+- Prompt-cache hit rate, `anthropic` (`claude-sonnet-5`), two fresh
+  sessions of six read-only turns: 85% and 79% of all input tokens
+  read from cache, 97% and 99% on the last call. Every warm call read
+  the previous call's whole prompt: `cache_read` equals the previous
+  `input` minus 2 on 21 of 23 warm calls. The two exceptions follow
+  the first call of each session, whose 980-token prompt sits under
+  the model's 1,024-token minimum cacheable length. The same minimum
+  makes the cross-session first-call rate 0 here; the M3 system
+  prompt and the full tool set push the static prefix past it.
+- Prompt-cache hit rate, `openai-codex` (`gpt-5.6-sol`), same script:
+  39% and 23%. No call read the previous call's whole prompt; reads
+  arrived two to three calls after the write, in 128-token steps,
+  and dropped to zero mid-session. The adapter sends no
+  `prompt_cache_key`. See the step-7 decision below.
 
 ## Goal
 
@@ -401,6 +421,19 @@ Each step is one PR with its own verify line.
      record.
   The check is a test over a real session file
   (`the_session_file_carries_the_measurement_seams`).
+- Codex prompt-cache key — found in step 7, open. The `openai-codex`
+  adapter sends no `prompt_cache_key`. On the same six-turn script
+  the endpoint served 39% and 23% of the input from cache against
+  85% and 79% for the `anthropic` adapter, and no Codex call read its
+  predecessor's whole prompt. The Codex CLI sends a per-conversation
+  key, and the endpoint's documented routing uses it. Proposed as its
+  own pull request, the first item of the M4 prefix-stability work
+  pulled forward because the receipt is in hand: add an optional
+  cache key to the neutral `Request` (additive; the struct is
+  non-exhaustive), let the engine fill it with the session id, send
+  it as `prompt_cache_key`, and rerun
+  `bench/cache/replay.py --provider openai-codex`. It touches the
+  provider contract, so it does not ride in step 7.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.
