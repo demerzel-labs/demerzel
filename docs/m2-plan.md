@@ -3,19 +3,34 @@
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-19)
+## Status (2026-08-22)
 
-M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
-config and `doctor`, PR #18) and the platform statement (PR #19) are
-merged. Step 3 (the `anthropic` adapter, PR #20) is merged. Live
-manual sessions from the step-3 build meet exit criterion 2: a
-multi-turn tool session, a Ctrl-C abort, and a `--continue` resume
-that replayed the full history all completed against the Anthropic
-API. Step 4 (`dmz login`, PR #23) is merged. Step 5 (the TUI
-foundation, PR #24) is merged. Step 6 (TUI interaction) is in
-review: edit previews, command previews on approval, the shared
-command registry with `/help`, `/model`, and `/new`, the status bar,
-and per-input approval grants for execute tools.
+M1 is complete (PR #16). Steps 1 to 6 are merged: the plan (PR #17),
+layered config and `doctor` (PR #18) with the platform statement
+(PR #19), the `anthropic` adapter (PR #20), `dmz login` (PR #23), the
+TUI foundation (PR #24), and TUI interaction (PR #25). CI hardening
+landed between steps (PR #26). Step 7, the measurement pass, is in
+review: the render-throughput bench, the cache-hit measurement for
+both providers, the turn record that closes the measurement seams,
+and the receipts in `bench/results/`.
+
+Exit criteria, checked at step 7:
+
+1. TUI parity with the REPL — the step-6 dogfood (PR #25). Done.
+2. A live multi-turn tool session against the Anthropic API — step 3.
+   Done.
+3. `dmz login` against the real endpoint — step 4. Done.
+4. The cache-hit rate on a replayed session for both providers — step
+   7, numbers below. Done.
+5. Config precedence tests — step 2. Done.
+6. Hermetic adapter tests for both providers — steps 3 and 5. Done.
+7. `cargo fmt`, `cargo clippy`, and `cargo test` clean; the Layer-1
+   benches inside the gates after the TUI — the step-5 and step-6
+   receipts. Done.
+
+Step-7 receipts (2026-08-22, raw data in `bench/results/`): see the
+step-7 entry under "Decisions to make during M2" until the numbers
+land here with the results commit.
 
 ## Goal
 
@@ -238,16 +253,30 @@ A Layer-4 slice, pulled forward because it is the M2 exit criterion:
 
 - Replay a recorded session against each live provider twice. Report
   `cache_read_tokens / input_tokens` per turn and per session.
+  Step-7 shape: `bench/cache/replay.py` runs a fixed list of six
+  read-only user turns over this repository through the real engine
+  (`crates/demerzel/examples/cache_replay.rs`), as two fresh sessions
+  one after the other. The prompt list is the recorded session; it is
+  fixed so reports compare across milestones, and it carries no
+  machine paths. `input_tokens` counts the cached part for both
+  providers, so the ratio compares across them.
 - Commit the raw JSON to `bench/results/` with the provenance
   envelope.
 - Add a render-throughput bench for the TUI over the mock stream
-  (Layer 2).
+  (Layer 2). Step-7 shape: `crates/demerzel-tui/benches/render.rs`
+  drives the transcript and the frame renderer through a headless
+  screen (`demerzel_tui::bench::Screen`, hidden from the docs, not
+  interface contract) — the layout and the buffer diff of the live
+  interface, minus the terminal write. Three benches: one redraw, a
+  64 KiB text stream with no frames, and the stream with a frame per
+  64 deltas.
 - Measurement seams (evaluation-contract prework, see
   [`plan.md`](plan.md)): engine events and session records keep
   usage, cost, cache, tool-step, termination, environment, and
-  final-outcome fields. Step 7 checks that these fields are present.
-  The full evaluation runner waits for the M3 exit and does not
-  delay M2.
+  final-outcome fields. Step 7 checked the fields and added the one
+  that was missing; the inventory is a step-7 decision below. The
+  full evaluation runner waits for the M3 exit and does not delay
+  M2.
 
 ## Dependencies
 
@@ -349,6 +378,29 @@ Each step is one PR with its own verify line.
   the session model, so `Runtime::open_session` and `Runtime::engine`
   both take it. Per-role routing in M3 must fold these into one
   call with a routing struct, not widen both signatures again.
+- Measurement seams — checked in step 7. Where each field lives:
+  1. Usage and cache: the `ModelUsage` engine event and the `usage`
+     session record, with `cache_read_tokens` as the cached part of
+     `input_tokens`.
+  2. Tool steps: the `ToolStart`, `ToolRun`, and `ToolEnd` events;
+     the `tool_use` and `tool_result` blocks in the messages; the
+     `approval` record with the call id for every policy decision.
+  3. Environment: the meta record — project directory, provider,
+     model, creation time, schema version.
+  4. Termination and the per-turn outcome: the `turn` record, new in
+     step 7. The engine appends it when a user turn returns:
+     `outcome` is `completed`, `max_tokens`, `refused`, `call_limit`,
+     or `aborted`, or `error` with the provider's message. A dropped
+     turn future writes none, so a user turn without one was cut
+     off. Readers skip the record, so old binaries read new files.
+  5. Cost: derived from usage and the model the meta record names.
+     The harness carries no price table; prices change faster than
+     releases, and the evaluation runner owns pricing.
+  6. Final outcome: the task's final state belongs to the runner's
+     state oracle. The harness's final outcome per turn is the turn
+     record.
+  The check is a test over a real session file
+  (`the_session_file_carries_the_measurement_seams`).
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

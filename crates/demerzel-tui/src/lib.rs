@@ -14,6 +14,8 @@
 //!   this on Ctrl-C, the contract the engine documents.
 
 mod app;
+#[doc(hidden)]
+pub mod bench;
 mod events;
 mod history;
 mod input;

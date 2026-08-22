@@ -16,6 +16,10 @@
 //! call that was recorded but never answered is repaired at the start
 //! of the next turn with an error result, so a resumed history is
 //! always well-formed.
+//!
+//! Every turn that returns closes with a turn record in the session
+//! file: the outcome, or `error` with the provider's message. A
+//! dropped turn writes none, so a turn without one was cut off.
 
 use std::collections::HashMap;
 use std::future::poll_fn;
@@ -265,8 +269,28 @@ impl<'a> Engine<'a> {
 
     /// Run one user turn: repair the history if the last turn was cut,
     /// append the user message, then alternate model calls and tool
-    /// calls until the model ends the turn or a limit stops it.
+    /// calls until the model ends the turn or a limit stops it. The
+    /// session file closes the turn with a turn record: the outcome,
+    /// or `error` with the message of a provider failure. A session
+    /// failure has no record — the file is the failure.
     pub async fn user_turn(
+        &mut self,
+        text: String,
+        sink: &dyn EventSink,
+        approver: &mut dyn Approver,
+    ) -> Result<TurnOutcome, EngineError> {
+        let result = self.run_turn(text, sink, approver).await;
+        match &result {
+            Ok(outcome) => self.session.append_turn(outcome_name(*outcome), None)?,
+            Err(EngineError::Provider(error)) => self
+                .session
+                .append_turn("error", Some(&error.to_string()))?,
+            Err(EngineError::Session(_)) => {}
+        }
+        result
+    }
+
+    async fn run_turn(
         &mut self,
         text: String,
         sink: &dyn EventSink,
@@ -495,6 +519,17 @@ impl<'a> Engine<'a> {
             });
         }
         Ok((results, aborted))
+    }
+}
+
+/// The outcome's name in the session file's turn record.
+fn outcome_name(outcome: TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::Completed => "completed",
+        TurnOutcome::MaxTokens => "max_tokens",
+        TurnOutcome::Refused => "refused",
+        TurnOutcome::CallLimit => "call_limit",
+        TurnOutcome::Aborted => "aborted",
     }
 }
 
@@ -779,6 +814,21 @@ mod tests {
 
         let outcome = block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll));
         assert_eq!(outcome.unwrap(), TurnOutcome::Refused);
+        assert_eq!(turn_records(&engine), ["refused"]);
+    }
+
+    /// The `outcome` of every turn record in the session file, in
+    /// order; `error:<message>` for a failed turn.
+    fn turn_records(engine: &Engine<'_>) -> Vec<String> {
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["type"] == "turn")
+            .map(|record| match record.get("error") {
+                Some(error) => format!("{}:{}", record["outcome"].as_str().unwrap(), error),
+                None => record["outcome"].as_str().unwrap().to_string(),
+            })
+            .collect()
     }
 
     #[test]
@@ -811,6 +861,7 @@ mod tests {
 
         let replayed = replay(engine.session().path()).unwrap();
         assert_eq!(replayed.messages, engine.history());
+        assert_eq!(turn_records(&engine), ["completed"]);
     }
 
     #[test]
@@ -1029,6 +1080,7 @@ mod tests {
         let outcome = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
         assert_eq!(outcome, TurnOutcome::CallLimit);
         assert_eq!(provider.requests().len(), 2);
+        assert_eq!(turn_records(&engine), ["call_limit"]);
     }
 
     #[test]
@@ -1341,6 +1393,7 @@ mod tests {
         // The session replays to the same well-formed history.
         let replayed = replay(engine.session().path()).unwrap();
         assert_eq!(replayed.messages, engine.history());
+        assert_eq!(turn_records(&engine), ["aborted"]);
     }
 
     #[test]
@@ -1356,6 +1409,11 @@ mod tests {
         let sink = noop_sink();
         let error = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap_err();
         assert!(error.to_string().contains("without a tool call"));
+        // The failed turn still closes in the file, with the message.
+        let records = turn_records(&engine);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].starts_with("error:"), "{records:?}");
+        assert!(records[0].contains("without a tool call"));
     }
 
     #[test]

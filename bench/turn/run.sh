@@ -9,8 +9,6 @@ cargo bench -p demerzel --bench turn
 
 OUT="bench/results/turn-$(date +%F)-$(git rev-parse --short HEAD).json"
 python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" <<'EOF'
-import glob
-import json
 import os
 import subprocess
 import sys
@@ -30,29 +28,7 @@ report["note"] = (
     "transport_floor isolates it. Harness-added latency per turn is "
     "turn_text minus transport_floor."
 )
-report["benches"] = {}
-for est_path in sorted(glob.glob(f"{target}/criterion/*/new/estimates.json")):
-    name = est_path.split(os.sep)[-3]
-    if name == "report":
-        continue
-    with open(est_path) as f:
-        est = json.load(f)
-    entry = {
-        "mean_ns": round(est["mean"]["point_estimate"]),
-        "median_ns": round(est["median"]["point_estimate"]),
-        "stddev_ns": round(est["std_dev"]["point_estimate"]),
-        "mean_ci95_ns": [
-            round(est["mean"]["confidence_interval"]["lower_bound"]),
-            round(est["mean"]["confidence_interval"]["upper_bound"]),
-        ],
-    }
-    if est.get("slope"):
-        entry["slope_ns"] = round(est["slope"]["point_estimate"])
-    sample_path = est_path.replace("estimates.json", "sample.json")
-    if os.path.exists(sample_path):
-        with open(sample_path) as f:
-            entry["samples"] = json.load(f)
-    report["benches"][name] = entry
+report["benches"] = harness.criterion_benches(target)
 if not report["benches"]:
     sys.exit(f"no criterion estimates under {target}/criterion")
 harness.write_report(out, report)

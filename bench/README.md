@@ -26,9 +26,9 @@ data for each number goes into `results/`. The "Benchmark program" section of
 | Layer | Measures | Method | Status |
 |---|---|---|---|
 | 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
-| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark is here. iai-callgrind arrives with CI in M5. |
+| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark and the render benchmark are here. iai-callgrind arrives with CI in M5. |
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
-| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | Comes with M4 |
+| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | The cache-hit measurement is here. The rest comes with M4. |
 
 ## How to run
 
@@ -53,6 +53,14 @@ bench/memory/pss.py <pid> [pid...]
 
 # Layer 2: harness-added latency per turn, against the mock server.
 bench/turn/run.sh
+
+# Layer 2: frame cost and streamed-text throughput of the full screen.
+bench/render/run.sh
+
+# Layer 4: prompt-cache hit rate on a replayed session, live provider.
+# Needs credentials and network access, and it costs tokens.
+bench/cache/replay.py --provider anthropic
+bench/cache/replay.py --provider openai-codex
 ```
 
 The boot benchmark needs `hyperfine`. On Arch Linux, install it with
@@ -78,3 +86,17 @@ Method notes:
   Harness-added latency per turn is `turn_text` minus
   `transport_floor`. Session files land under the cargo target
   directory, so appends hit a real filesystem.
+- The render suite draws into a headless frame buffer: the layout and
+  the buffer diff are the live interface's work, the terminal write
+  is not. `frame` is one redraw with no new content; `ingest` pushes
+  64 KiB of text in 16-byte deltas with no frames; `stream` pushes
+  the same text with a frame every 64 deltas.
+- The cache-hit measurement runs a fixed list of read-only user turns
+  through the real engine against one live provider, as two fresh
+  sessions one after the other. It reports `cache_read_tokens /
+  input_tokens` per model call, per turn, and per session.
+  `input_tokens` counts the cached part for both providers. The first
+  call of the second session shares its whole prefix with the first
+  session's first call, so its rate shows that the prefix is stable
+  across sessions. Sessions land in a private temporary data root;
+  credentials resolve the way a session resolves them.
