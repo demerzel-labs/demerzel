@@ -152,7 +152,7 @@ def main() -> int:
         REPO_ROOT,
         "bench",
         "results",
-        f"metrics-{report['date']}-{report['git_rev']}.json",
+        f"metrics-{report['date']}-{report['git_rev']}-{report['os']}.json",
     )
     harness.write_report(out, report)
     print(f"lines {report['lines_total']}, pub items {report['pub_items_total']}, "

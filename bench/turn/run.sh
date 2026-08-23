@@ -8,19 +8,17 @@ cd "$(dirname "$0")/../.."
 START=$(date +%s)
 cargo bench -p demerzel --bench turn
 
-OUT="bench/results/turn-$(date +%F)-$(git rev-parse --short HEAD).json"
+SLUG="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.os_slug())')"
+OUT="bench/results/turn-$(date +%F)-$(git rev-parse --short HEAD)-$SLUG.json"
 python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.getcwd(), "bench"))
 import harness
 
 out, target, start = sys.argv[1], sys.argv[2], float(sys.argv[3])
-fs = subprocess.run(
-    ["findmnt", "-no", "FSTYPE", "--target", target], capture_output=True, text=True
-).stdout.strip()
+fs = harness.native.filesystem(os.path.abspath(target))
 report = harness.base_report("turn-latency-vs-local-mock", "target/release/demerzel")
 report["bin"] = "cargo bench --bench turn"
 report["data_filesystem"] = fs

@@ -60,6 +60,14 @@ def main() -> int:
         print(f"no binary at {args.bin} — run: cargo build --release", file=sys.stderr)
         return 1
 
+    if sys.platform != "linux":
+        print(
+            "the idle driver reads /proc and runs on Linux only; the macOS "
+            "footprint probe is step 3 of docs/bench-platforms.md",
+            file=sys.stderr,
+        )
+        return 1
+
     with tempfile.TemporaryDirectory(prefix="demerzel-bench-") as data_home:
         harness.write_auth_fixture(data_home)
         env = harness.bench_env(data_home)
@@ -81,7 +89,7 @@ def main() -> int:
     out_path = args.out or os.path.join(
         harness.REPO_ROOT,
         "bench/results",
-        f"memory-idle-{report['date']}-{report['git_rev']}.json",
+        f"memory-idle-{report['date']}-{report['git_rev']}-{report['os']}.json",
     )
     harness.write_report(out_path, report)
     anon = report["stats_kb"]["anonymous_kb"]["median"]

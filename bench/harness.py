@@ -17,19 +17,27 @@ Spawn notes:
   to raw mode.
 """
 
-import ctypes
 import fcntl
 import glob
 import json
-import mmap
 import os
 import select
 import signal
 import statistics
 import struct
 import subprocess
+import sys
 import termios
 import time
+
+# The native probe layer: page-cache reads, eviction, machine-spec
+# fields. Everything platform-specific lives behind this import.
+if sys.platform == "linux":
+    import platform_linux as native
+elif sys.platform == "darwin":
+    import platform_macos as native
+else:
+    raise ImportError(f"the bench suite supports Linux and macOS, not {sys.platform}")
 
 READY_MARKER = b"demerzel ready"
 # No trailing space: the full-screen interface draws the prompt cell
@@ -71,6 +79,19 @@ def git_dirty() -> bool:
     return bool(_git("status", "--porcelain", "-uno", "--", ".", ":(exclude)bench/results"))
 
 
+def os_slug() -> str:
+    """The OS-arch slug in result-file names, e.g. `linux-x86_64`,
+    `macos-aarch64`. Two reference machines produce receipts, so the
+    name must say which one."""
+    import platform
+
+    os_name = {"linux": "linux", "darwin": "macos"}[sys.platform]
+    arch = platform.machine()
+    if arch == "arm64":
+        arch = "aarch64"
+    return f"{os_name}-{arch}"
+
+
 def base_report(benchmark: str, bin_path: str) -> dict:
     """The envelope every result file shares."""
     return {
@@ -79,7 +100,8 @@ def base_report(benchmark: str, bin_path: str) -> dict:
         "git_rev": git_rev(),
         "git_dirty": git_dirty(),
         "date": time.strftime("%Y-%m-%d"),
-        "machine": f"machine-{time.strftime('%Y-%m-%d')}.json",
+        "os": os_slug(),
+        "machine": f"machine-{time.strftime('%Y-%m-%d')}-{os_slug()}.json",
     }
 
 
@@ -294,51 +316,22 @@ def spawn_floor_ms(env: dict[str, str], runs: int = 10) -> dict:
     return {"runs": runs, **stats(samples)}
 
 
-_libc = ctypes.CDLL("libc.so.6", use_errno=True)
-
-
 def resident_pages(path: str) -> int:
-    """Pages of `path` in the page cache, via mincore. The mapping is
-    read-only and unmapped before return, so it does not pin pages."""
-    size = os.path.getsize(path)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        # MAP_PRIVATE read-write: ctypes.from_buffer needs a writable
-        # buffer to take the address. Nothing writes to the mapping,
-        # so no page is copied and mincore sees the file pages.
-        mapped = mmap.mmap(
-            fd, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ | mmap.PROT_WRITE
-        )
-    finally:
-        os.close(fd)
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = (size + page - 1) // page
-        vec = (ctypes.c_ubyte * pages)()
-        buf = (ctypes.c_char * size).from_buffer(mapped)
-        rc = _libc.mincore(
-            ctypes.c_void_p(ctypes.addressof(buf)), ctypes.c_size_t(size), vec
-        )
-        del buf
-        if rc != 0:
-            raise OSError(ctypes.get_errno(), "mincore failed")
-        return sum(v & 1 for v in vec)
-    finally:
-        mapped.close()
+    """Pages of `path` in the page cache. The probe is native per
+    platform; both use mincore."""
+    return native.resident_pages(path)
 
 
 def evict_verified(path: str, attempts: int = 6) -> None:
     """Evict `path` from the page cache and verify with mincore.
-    One fadvise is advisory and often leaves recently referenced
-    pages resident; retry until zero pages remain."""
+    One eviction attempt is advisory and often leaves recently
+    referenced pages resident; retry until zero pages remain. On a
+    platform without eviction (`native.SUPPORTS_EVICT` is false) the
+    first attempt raises with the reason."""
     resident = -1
     for _ in range(attempts):
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-        finally:
-            os.close(fd)
-        resident = resident_pages(path)
+        native.evict_once(path)
+        resident = native.resident_pages(path)
         if resident == 0:
             return
         time.sleep(0.02)

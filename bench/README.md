@@ -17,8 +17,10 @@ data for each number goes into `results/`. The "Benchmark program" section of
    The cache-hit measurement is the exception: it runs two live sessions and
    keeps no interval. Its claim is the per-call ratio, not a timing.
 5. **Comparable.** When a report compares Demerzel with another agent, it uses
-   the same metric as that agent. For memory, the metric is PSS from
-   `/proc/<pid>/smaps_rollup`, the metric the comparison targets publish.
+   the same metric as that agent, on the same machine and OS. On Linux the
+   memory metric is PSS from `/proc/<pid>/smaps_rollup`, the metric the
+   comparison targets publish. On macOS it is physical footprint, the metric
+   Apple's tools report. Numbers never compare across operating systems.
    [`docs/plan.md`](../docs/plan.md) names the comparison targets.
 6. **Raw data included.** We commit the raw JSON output next to each published
    summary.
@@ -65,10 +67,18 @@ bench/cache/replay.py --provider anthropic
 bench/cache/replay.py --provider openai-codex
 ```
 
-The boot benchmark needs `hyperfine`. On Arch Linux, install it with
-`pacman -S hyperfine`. The PTY probe and the memory benchmarks work only on
-Linux and need Python 3.13 or newer. `bench/harness.py` holds the shared
-probe machinery.
+The suite runs on Linux and macOS, the two reference platforms
+([`docs/bench-platforms.md`](../docs/bench-platforms.md)). Result files
+carry an OS-arch slug, for example `boot-2026-08-23-abc1234-macos-aarch64.json`.
+Two gaps remain: the idle memory driver and cold mode run only on Linux
+until the macOS footprint probe (step 3) and the eviction decision
+(step 4) land.
+
+The boot benchmark needs `hyperfine`: `pacman -S hyperfine` on Arch,
+`brew install hyperfine` on macOS. The probes need Python 3.13 or newer;
+on macOS install it from Homebrew or python.org. `bench/harness.py`
+holds the shared probe machinery, and `platform_linux.py` and
+`platform_macos.py` hold the native probes.
 
 Method notes:
 

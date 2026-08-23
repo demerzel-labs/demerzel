@@ -9,7 +9,8 @@ cd "$(dirname "$0")/../.."
 START=$(date +%s)
 cargo bench -p demerzel-tui --bench render
 
-OUT="bench/results/render-$(date +%F)-$(git rev-parse --short HEAD).json"
+SLUG="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.os_slug())')"
+OUT="bench/results/render-$(date +%F)-$(git rev-parse --short HEAD)-$SLUG.json"
 python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
 import os
 import sys
