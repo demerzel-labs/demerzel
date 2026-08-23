@@ -31,25 +31,34 @@ Exit criteria, checked at step 7:
 Step-7 receipts (2026-08-22, Ryzen 9 5900X; raw data and the machine
 spec sit in `bench/results/`):
 
-- Render, headless 120x40 screen over 2,000 history lines: one redraw
-  161 µs mean; 64 KiB of text in 16-byte deltas ingests in 281 µs
-  (234 MB/s); the same stream with a frame every 64 deltas takes
-  12.1 ms (5.4 MB/s). The stream number is frame-bound: 65 frames at
-  161 µs are 10.5 ms of it. At the 16 ms frame cap one frame costs
-  about 1% of its budget.
+- Render, headless 120x40 screen over 200 history lines: one redraw
+  188 µs (criterion's typical estimate); 64 KiB of text in 16-byte
+  deltas ingests in 246 µs (254 MiB/s); the same stream with a frame
+  every 64 deltas takes 13.2 ms for 65 changed frames, 4,900 frames
+  per second. The stream number is frame-bound. At the 16 ms frame
+  cap one frame costs about 1% of its budget, and the cost does not
+  move with the history length: only the visible tail wraps.
+- Turn latency against the local mock, rerun because the turn record
+  adds one append per turn: `turn_text` 140 µs, `transport_floor`
+  42 µs, `turn_read_tool` 298 µs — level with the 2026-08-08 receipt
+  (140 / 42 / 302 µs). The append sits inside the noise.
 - Prompt-cache hit rate, `anthropic` (`claude-sonnet-5`), two fresh
-  sessions of six read-only turns: 85% and 79% of all input tokens
-  read from cache, 97% and 99% on the last call. Every warm call read
-  the previous call's whole prompt: `cache_read` equals the previous
-  `input` minus 2 on 21 of 23 warm calls. The two exceptions follow
-  the first call of each session, whose 980-token prompt sits under
-  the model's 1,024-token minimum cacheable length. The same minimum
-  makes the cross-session first-call rate 0 here; the M3 system
-  prompt and the full tool set push the static prefix past it.
+  sessions of six user turns, the full tool set advertised: 87% and
+  90% of all input tokens read from cache, 97% and 98% on the last
+  call. Every warm call read the previous call's whole prompt:
+  `cache_read` equals the previous `input` minus 2 on 25 of 25 warm
+  calls. The second session's first call read 2,054 of its 2,056
+  tokens from the first session's cache: the static prefix — system
+  prompt, tool definitions, first prompt — is byte-stable across
+  sessions. An earlier run in this step with the read-only tool set
+  had a 980-token static prefix, under the model's 1,024-token
+  minimum cacheable length, and read nothing across sessions; the
+  full tool block is the prefix a real session sends.
 - Prompt-cache hit rate, `openai-codex` (`gpt-5.6-sol`), same script:
-  39% and 23%. No call read the previous call's whole prompt; reads
-  arrived two to three calls after the write, in 128-token steps,
-  and dropped to zero mid-session. The adapter sends no
+  17% and 44%. No call read the previous call's whole prompt, the
+  second session's first call read nothing, and reads arrived late,
+  in 128-token steps, and fell back to zero — the last call of the
+  first session read 0 of 11,283 tokens. The adapter sends no
   `prompt_cache_key`. See the step-7 decision below.
 
 ## Goal
@@ -436,8 +445,8 @@ Each step is one PR with its own verify line.
   (`the_session_file_carries_the_measurement_seams`).
 - Codex prompt-cache key — found in step 7, open. The `openai-codex`
   adapter sends no `prompt_cache_key`. On the same six-turn script
-  the endpoint served 39% and 23% of the input from cache against
-  85% and 79% for the `anthropic` adapter, and no Codex call read its
+  the endpoint served 17% and 44% of the input from cache against
+  87% and 90% for the `anthropic` adapter, and no Codex call read its
   predecessor's whole prompt. The Codex CLI sends a per-conversation
   key, and the endpoint's documented routing uses it. Proposed as its
   own pull request, the first item of the M4 prefix-stability work
