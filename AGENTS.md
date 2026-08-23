@@ -8,8 +8,10 @@ current.
 
 - Demerzel is an open-source terminal coding agent written in Rust.
 - Read [`docs/plan.md`](docs/plan.md) for the product plan and milestones.
-- Read [`docs/m2-plan.md`](docs/m2-plan.md) for the current milestone.
-  [`docs/m1-plan.md`](docs/m1-plan.md) records the completed M1 work.
+- Read [`docs/m2.5-plan.md`](docs/m2.5-plan.md) for the current
+  milestone. [`docs/m1-plan.md`](docs/m1-plan.md) and
+  [`docs/m2-plan.md`](docs/m2-plan.md) record the completed
+  milestones; the M2 close-out runs before M2.5 step 2.
 
 ## Build workflow
 
