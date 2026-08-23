@@ -14,6 +14,8 @@ data for each number goes into `results/`. The "Benchmark program" section of
    filesystem.
 4. **Statistical.** Timing benchmarks use warmup runs and 50 or more measured
    runs. Each report keeps the confidence intervals that hyperfine calculates.
+   The cache-hit measurement is the exception: it runs two live sessions and
+   keeps no interval. Its claim is the per-call ratio, not a timing.
 5. **Comparable.** When a report compares Demerzel with another agent, it uses
    the same metric as that agent. For memory, the metric is PSS from
    `/proc/<pid>/smaps_rollup`, the metric the comparison targets publish.
@@ -26,9 +28,9 @@ data for each number goes into `results/`. The "Benchmark program" section of
 | Layer | Measures | Method | Status |
 |---|---|---|---|
 | 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
-| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark is here. iai-callgrind arrives with CI in M5. |
+| 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts for the turn benches. The render bench drives the transcript and the renderer in process. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark and the render benchmark are here. iai-callgrind arrives with CI in M5. |
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
-| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | Comes with M4 |
+| 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | The cache-hit measurement is here. The rest comes with M4. |
 
 ## How to run
 
@@ -53,6 +55,14 @@ bench/memory/pss.py <pid> [pid...]
 
 # Layer 2: harness-added latency per turn, against the mock server.
 bench/turn/run.sh
+
+# Layer 2: frame cost and streamed-text throughput of the full screen.
+bench/render/run.sh
+
+# Layer 4: prompt-cache hit rate on a replayed session, live provider.
+# Needs credentials and network access, and it costs tokens.
+bench/cache/replay.py --provider anthropic
+bench/cache/replay.py --provider openai-codex
 ```
 
 The boot benchmark needs `hyperfine`. On Arch Linux, install it with
@@ -78,3 +88,29 @@ Method notes:
   Harness-added latency per turn is `turn_text` minus
   `transport_floor`. Session files land under the cargo target
   directory, so appends hit a real filesystem.
+- The render suite draws into a headless frame buffer. The layout and
+  the buffer diff are the live interface's work; the terminal write is
+  not. Three benches:
+  1. `frame` is one redraw with no new content, the floor of a frame.
+  2. `ingest` pushes 64 KiB of text in 16-byte deltas with no frames.
+  3. `stream` pushes the same text with a frame every 64 deltas. It is
+     frame-bound, so its throughput is frames per second.
+- The cache-hit measurement replays the user side of one session: a
+  fixed list of user turns. It runs them through the real engine
+  against one live provider, as two fresh sessions one after the
+  other. The model side is live, so the two sessions differ in what
+  the model reads. The report gives `cache_read_tokens /
+  input_tokens` per model call, per turn, and per session.
+  `input_tokens` counts the cached parts for both providers. The
+  engine advertises the full tool set in `ask` mode with no approver,
+  so only the read tools run. Sessions land in a private temporary
+  data root that goes away with the run. Credentials resolve the way
+  a session resolves them. What to compare across milestones:
+  1. The per-call ratio. A warm call that reads its predecessor's
+     whole prompt shows a stable prefix.
+  2. The first call of the second session. It shares its whole prefix
+     with the first session's first call. A non-zero rate shows the
+     prefix holds across sessions; a zero can also mean the prefix is
+     under the provider's minimum cacheable length.
+  Session totals move with the model's tool choices, so they do not
+  compare.

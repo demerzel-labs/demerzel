@@ -3,19 +3,63 @@
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-19)
+## Status (2026-08-22)
 
-M1 is complete (PR #16). Step 1 landed as PR #17. Step 2 (layered
-config and `doctor`, PR #18) and the platform statement (PR #19) are
-merged. Step 3 (the `anthropic` adapter, PR #20) is merged. Live
-manual sessions from the step-3 build meet exit criterion 2: a
-multi-turn tool session, a Ctrl-C abort, and a `--continue` resume
-that replayed the full history all completed against the Anthropic
-API. Step 4 (`dmz login`, PR #23) is merged. Step 5 (the TUI
-foundation, PR #24) is merged. Step 6 (TUI interaction) is in
-review: edit previews, command previews on approval, the shared
-command registry with `/help`, `/model`, and `/new`, the status bar,
-and per-input approval grants for execute tools.
+M1 is complete (PR #16). Steps 1 to 6 are merged: the plan (PR #17),
+layered config and `doctor` (PR #18) with the platform statement
+(PR #19), the `anthropic` adapter (PR #20), `dmz login` (PR #23), the
+TUI foundation (PR #24), and TUI interaction (PR #25). CI hardening
+landed between steps (PR #26). Step 7, the measurement pass, is in
+review: the render-throughput bench, the cache-hit measurement for
+both providers, the turn record that closes the measurement seams,
+and the receipts in `bench/results/`.
+
+Exit criteria, checked at step 7:
+
+1. TUI parity with the REPL — the step-6 dogfood (PR #25). Done.
+2. A live multi-turn tool session against the Anthropic API — step 3.
+   Done.
+3. `dmz login` against the real endpoint — step 4. Done.
+4. The cache-hit rate on a replayed session for both providers — step
+   7, numbers below. Done.
+5. Config precedence tests — step 2. Done.
+6. Hermetic adapter tests for both providers — steps 3 and 5. Done.
+7. `cargo fmt`, `cargo clippy`, and `cargo test` clean; the Layer-1
+   benches inside the gates after the TUI — the step-5 and step-6
+   receipts. Done.
+
+Step-7 receipts (2026-08-22, Ryzen 9 5900X; raw data and the machine
+spec sit in `bench/results/`):
+
+- Render, headless 120x40 screen over 200 history lines: one redraw
+  188 µs (criterion's typical estimate); 64 KiB of text in 16-byte
+  deltas ingests in 246 µs (254 MiB/s); the same stream with a frame
+  every 64 deltas takes 13.2 ms for 65 changed frames, 4,900 frames
+  per second. The stream number is frame-bound. At the 16 ms frame
+  cap one frame costs about 1% of its budget, and the cost does not
+  move with the history length: only the visible tail wraps.
+- Turn latency against the local mock, rerun because the turn record
+  adds one append per turn: `turn_text` 140 µs, `transport_floor`
+  42 µs, `turn_read_tool` 298 µs — level with the 2026-08-08 receipt
+  (140 / 42 / 302 µs). The append sits inside the noise.
+- Prompt-cache hit rate, `anthropic` (`claude-sonnet-5`), two fresh
+  sessions of six user turns, the full tool set advertised: 87% and
+  90% of all input tokens read from cache, 97% and 98% on the last
+  call. Every warm call read the previous call's whole prompt:
+  `cache_read` equals the previous `input` minus 2 on 25 of 25 warm
+  calls. The second session's first call read 2,054 of its 2,056
+  tokens from the first session's cache: the static prefix — system
+  prompt, tool definitions, first prompt — is byte-stable across
+  sessions. An earlier run in this step with the read-only tool set
+  had a 980-token static prefix, under the model's 1,024-token
+  minimum cacheable length, and read nothing across sessions; the
+  full tool block is the prefix a real session sends.
+- Prompt-cache hit rate, `openai-codex` (`gpt-5.6-sol`), same script:
+  17% and 44%. No call read the previous call's whole prompt, the
+  second session's first call read nothing, and reads arrived late,
+  in 128-token steps, and fell back to zero — the last call of the
+  first session read 0 of 11,283 tokens. The adapter sends no
+  `prompt_cache_key`. See the step-7 decision below.
 
 ## Goal
 
@@ -238,16 +282,36 @@ A Layer-4 slice, pulled forward because it is the M2 exit criterion:
 
 - Replay a recorded session against each live provider twice. Report
   `cache_read_tokens / input_tokens` per turn and per session.
+  Step-7 shape: `bench/cache/replay.py` replays the user side of one
+  session, a fixed list of six user turns over this repository. It
+  runs them through the real engine
+  (`crates/demerzel/examples/cache_replay.rs`) as two fresh sessions,
+  one after the other. The model side is live, so the two sessions
+  differ in what the model reads and how many calls it makes. The
+  numbers that compare across milestones are the per-call ratios and
+  the first call of the second session, not the session totals. The
+  engine advertises the full tool set in `ask` mode with no approver,
+  the prefix a real session sends; only the read tools run. The
+  prompt list carries no machine paths. `input_tokens` counts the
+  cached parts for both providers, so the ratio compares across them.
 - Commit the raw JSON to `bench/results/` with the provenance
   envelope.
-- Add a render-throughput bench for the TUI over the mock stream
-  (Layer 2).
+- Add a render-throughput bench for the TUI (Layer 2). Step-7 shape:
+  `crates/demerzel-tui/benches/render.rs` drives the transcript and
+  the frame renderer through a headless screen over a synthetic delta
+  stream in process. The screen is `demerzel_tui::bench::Screen`,
+  hidden from the docs and not interface contract. The number is the
+  layout and the buffer diff of the live interface, minus the
+  terminal write; the mock transport stays outside, so it is render
+  cost alone. Three benches: one redraw, a 64 KiB text stream with no
+  frames, and the stream with a frame per 64 deltas.
 - Measurement seams (evaluation-contract prework, see
   [`plan.md`](plan.md)): engine events and session records keep
   usage, cost, cache, tool-step, termination, environment, and
-  final-outcome fields. Step 7 checks that these fields are present.
-  The full evaluation runner waits for the M3 exit and does not
-  delay M2.
+  final-outcome fields. Step 7 checked the fields and added the two
+  that were missing — the turn record and the cache-write count; the
+  inventory is a step-7 decision below. The full evaluation runner
+  waits for the M3 exit and does not delay M2.
 
 ## Dependencies
 
@@ -349,6 +413,50 @@ Each step is one PR with its own verify line.
   the session model, so `Runtime::open_session` and `Runtime::engine`
   both take it. Per-role routing in M3 must fold these into one
   call with a routing struct, not widen both signatures again.
+- Measurement seams — checked in step 7. Where each field lives:
+  1. Usage and cache: the `ModelUsage` engine event and the `usage`
+     session record. `input_tokens` is the whole prompt;
+     `cache_read_tokens` and `cache_creation_tokens` (new in step 7)
+     are the parts read from the cache and written into it. The
+     `anthropic` adapter had folded the write count into the input
+     total, which hid the cost split.
+  2. Tool steps: the `ToolStart`, `ToolRun`, and `ToolEnd` events;
+     the `tool_use` and `tool_result` blocks in the messages; the
+     `approval` record with the call id for every policy decision.
+  3. Environment: the meta record — project directory, provider,
+     model, creation time, schema version.
+  4. Termination and the per-turn outcome: the `turn` record, new in
+     step 7. The engine appends it when a user turn returns:
+     `outcome` is `completed`, `max_tokens`, `refused`, `call_limit`,
+     or `aborted` (`TurnOutcome::as_str`), or `error` with the
+     provider's message cut at 1 KiB. A dropped turn future, a
+     process exit mid-turn, and a session write failure write none,
+     so a user turn without one was cut off. Readers skip the record,
+     so old binaries read new files. The file carries no clock beyond
+     the meta record's creation time, so wall time per turn stays the
+     runner's to measure, as it does for the cache bench.
+  5. Cost: derived from the three usage parts and the model the meta
+     record names. The harness carries no price table; prices change
+     faster than releases, and the evaluation runner owns pricing.
+  6. Final outcome: the task's final state belongs to the runner's
+     state oracle. The harness's final outcome per turn is the turn
+     record.
+  The check is a test over a real session file
+  (`the_session_file_carries_the_measurement_seams`).
+- Codex prompt-cache key — found in step 7, open. The `openai-codex`
+  adapter sends no `prompt_cache_key`. On the same six-turn script
+  the endpoint served 17% and 44% of the input from cache against
+  87% and 90% for the `anthropic` adapter, and no Codex call read its
+  predecessor's whole prompt. The Codex CLI sends a per-conversation
+  key, and the endpoint's documented routing uses it. Proposed as its
+  own pull request, the first item of the M4 prefix-stability work,
+  pulled forward because the receipt is in hand:
+  1. Add an optional cache key to the neutral `Request`. The struct
+     is non-exhaustive, so the field is additive.
+  2. Let the engine fill it with the session id.
+  3. Send it as `prompt_cache_key` from the `openai-codex` adapter.
+  4. Rerun `bench/cache/replay.py --provider openai-codex`.
+  It touches the provider contract, so it does not ride in step 7.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

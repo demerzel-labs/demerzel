@@ -466,3 +466,74 @@ async fn one_shot_continue_resumes_the_latest_session() {
     assert!(second_body.contains("first"));
     assert!(second_body.contains("one"));
 }
+
+/// The measurement seams of the evaluation contract, as the session
+/// file carries them: the environment in the meta record, every tool
+/// step in the messages and the approval records, the token counts
+/// with the cached part in the usage records, and how each user turn
+/// ended in the turn records.
+#[tokio::test]
+async fn the_session_file_carries_the_measurement_seams() {
+    let bed = Bed::start(vec![
+        tool_turn(1, "read", json!({"path": "f.txt"})),
+        tool_turn(2, "bash", json!({"command": "true"})),
+        text_turn("done"),
+    ])
+    .await;
+    bed.write_file("f.txt", "alpha\n");
+    let mut engine = bed.engine(ApprovalMode::Auto);
+    let outcome = engine
+        .user_turn("look around".into(), &noop, &mut NoPrompt)
+        .await
+        .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+    let records: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let of = |kind: &str| -> Vec<&Value> {
+        records
+            .iter()
+            .filter(|record| record["type"] == kind)
+            .collect()
+    };
+
+    // Environment: the project directory, the provider, the model.
+    let meta = of("meta");
+    assert_eq!(meta.len(), 1);
+    for field in ["cwd", "provider", "model", "created", "schema"] {
+        assert!(meta[0].get(field).is_some(), "meta lacks {field}");
+    }
+    assert_eq!(meta[0]["provider"], "openai-codex");
+
+    // Tool steps: each call and its result, in the messages; the
+    // approval decision for each, with the call id.
+    let blocks: Vec<&Value> = of("message")
+        .into_iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .collect();
+    let uses = blocks.iter().filter(|b| b["type"] == "tool_use").count();
+    let results = blocks.iter().filter(|b| b["type"] == "tool_result").count();
+    assert_eq!((uses, results), (2, 2));
+    let approvals = of("approval");
+    assert_eq!(approvals.len(), 2);
+    assert!(approvals.iter().all(|a| a["tool_use_id"].is_string()));
+
+    // Usage with the cached part, one record per model call.
+    let usage = of("usage");
+    assert_eq!(usage.len(), 3);
+    for record in &usage {
+        for field in ["input_tokens", "output_tokens", "cache_read_tokens"] {
+            assert!(record[field].is_u64(), "usage lacks {field}");
+        }
+    }
+    assert_eq!(usage[0]["cache_read_tokens"], 2);
+
+    // Termination: the turn record closes the turn with its outcome.
+    let turns = of("turn");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["outcome"], "completed");
+    assert!(turns[0].get("error").is_none());
+}

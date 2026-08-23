@@ -8,14 +8,14 @@ use crate::MockResponse;
 
 /// A message_start event with fixed usage numbers. The wire
 /// `input_tokens` field excludes the cached parts, so the neutral
-/// input count is 8 + 0 + 2 = 10 — the same totals as the codex
-/// fixtures.
+/// input count is 7 + 1 + 2 = 10 — the same totals as the codex
+/// fixtures, with one token written into the cache.
 pub fn message_start() -> Value {
     json!({
         "type": "message_start",
         "message": {"usage": {
-            "input_tokens": 8,
-            "cache_creation_input_tokens": 0,
+            "input_tokens": 7,
+            "cache_creation_input_tokens": 1,
             "cache_read_input_tokens": 2,
             "output_tokens": 1,
         }},

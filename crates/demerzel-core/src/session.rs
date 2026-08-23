@@ -10,10 +10,22 @@
 //! The first record is metadata. A later meta record marks a resume
 //! or a model switch; the last meta record describes the current
 //! run. Every other record is one event: a message, an approval
-//! decision, or a usage report. Readers skip record types they do
-//! not know, so old binaries read new files. A torn final line — a
-//! crash mid-append — is dropped on replay and truncated away on
-//! resume.
+//! decision, a usage report, or a turn end. Readers skip record
+//! types they do not know, so old binaries read new files. A torn
+//! final line — a crash mid-append — is dropped on replay and
+//! truncated away on resume.
+//!
+//! The file is also the measurement trace for one session: the meta
+//! records carry the environment (project directory, provider,
+//! model), the messages carry every tool step, the usage records
+//! carry the token counts with the cached parts, and the turn records
+//! carry how each user turn ended. A user turn opens with a user
+//! message that holds a text block; the turn record that follows
+//! before the next one closes it. A turn without one was cut off:
+//! a dropped turn future (Ctrl-C in the interfaces), a process exit
+//! mid-turn, or a session write failure. The file carries no clock
+//! beyond the meta record's creation time; wall time per turn is the
+//! caller's to measure.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -61,9 +73,12 @@ impl SessionMeta {
 }
 
 /// One line of a session file. The serialized shape is part of the
-/// session-file format; changing it is a schema change.
+/// session-file format; changing it is a schema change. Non-exhaustive:
+/// a later record type is additive, and readers skip what they do not
+/// know.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SessionRecord {
     Meta(SessionMeta),
     Message(Message),
@@ -85,6 +100,16 @@ pub enum SessionRecord {
         answer: Option<String>,
     },
     Usage(Usage),
+    /// How one user turn ended. `outcome` is one of `completed`,
+    /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
+    /// the first five are the engine's turn outcomes by their
+    /// `as_str` names, and `error` marks a provider failure, with the
+    /// message in `error`, cut at 1 KiB.
+    Turn {
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// A record type from a newer schema. Replay skips it, so old
     /// binaries read new files. The harness never writes this variant.
     #[serde(other)]
@@ -110,6 +135,11 @@ enum RecordRef<'a> {
         answer: Option<&'a str>,
     },
     Usage(&'a Usage),
+    Turn {
+        outcome: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
 }
 
 /// The record type alone. Only the replay error path uses it, to name
@@ -260,6 +290,10 @@ impl Session {
                 answer: answer.as_deref(),
             },
             SessionRecord::Usage(usage) => RecordRef::Usage(usage),
+            SessionRecord::Turn { outcome, error } => RecordRef::Turn {
+                outcome,
+                error: error.as_deref(),
+            },
             // Replay-only marker; there is nothing to write.
             SessionRecord::Unknown => return Ok(()),
         };
@@ -300,6 +334,12 @@ impl Session {
 
     pub fn append_usage(&mut self, usage: &Usage) -> io::Result<()> {
         self.append_ref(&RecordRef::Usage(usage))
+    }
+
+    /// Close one user turn with its outcome. See
+    /// [`SessionRecord::Turn`] for the outcome vocabulary.
+    pub fn append_turn(&mut self, outcome: &str, error: Option<&str>) -> io::Result<()> {
+        self.append_ref(&RecordRef::Turn { outcome, error })
     }
 
     fn append_ref(&mut self, record: &RecordRef<'_>) -> io::Result<()> {
@@ -430,7 +470,9 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
                 out.meta = Some(meta);
             }
             SessionRecord::Message(message) => out.messages.push(message),
-            SessionRecord::Approval { .. } | SessionRecord::Usage(_) => {}
+            SessionRecord::Approval { .. }
+            | SessionRecord::Usage(_)
+            | SessionRecord::Turn { .. } => {}
             SessionRecord::Unknown => {}
         }
     }
@@ -552,6 +594,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 2,
                 cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             })
             .unwrap();
 
@@ -592,6 +635,21 @@ mod tests {
         let value = serde_json::to_value(&usage).unwrap();
         assert_eq!(value["type"], "usage");
         assert_eq!(value["input_tokens"], 0);
+
+        let turn = SessionRecord::Turn {
+            outcome: "completed".into(),
+            error: None,
+        };
+        let value = serde_json::to_value(&turn).unwrap();
+        assert_eq!(value["type"], "turn");
+        assert_eq!(value["outcome"], "completed");
+        assert!(value.get("error").is_none());
+        let failed = SessionRecord::Turn {
+            outcome: "error".into(),
+            error: Some("rate limited".into()),
+        };
+        let value = serde_json::to_value(&failed).unwrap();
+        assert_eq!(value["error"], "rate limited");
 
         // The borrowed append path serializes the identical shape.
         let dir = tempfile::tempdir().unwrap();
@@ -712,7 +770,16 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_read_tokens: 3,
+                cache_creation_tokens: 4,
             }),
+            SessionRecord::Turn {
+                outcome: "completed".into(),
+                error: None,
+            },
+            SessionRecord::Turn {
+                outcome: "error".into(),
+                error: Some("server error: 503".into()),
+            },
         ];
         for record in &records {
             session.append(record).unwrap();
