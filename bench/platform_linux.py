@@ -1,50 +1,35 @@
 """Linux-native probes for the bench harness.
 
 `harness.py` loads this module on Linux. It owns everything that
-reads `/proc` or `/sys`, the libc calls, and the Linux machine-spec
+reads `/proc` or `/sys`, the libc access, and the Linux machine-spec
 fields. The interface is the same as `platform_macos.py`:
-`resident_pages`, `evict_once`, `SUPPORTS_EVICT`, `filesystem`, and
-`machine_fields`.
+`resident_pages`, `evict_once`, `SUPPORTS_EVICT`,
+`SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 """
 
 import ctypes
-import mmap
 import os
 import subprocess
 
-SUPPORTS_EVICT = True
+import _mincore
 
-_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+SUPPORTS_EVICT = True
+SUPPORTS_PROC_MEMORY = True
+
+_libc_handle = None
+
+
+def _libc():
+    """The libc handle, loaded on first use so importing the harness
+    never depends on the soname."""
+    global _libc_handle
+    if _libc_handle is None:
+        _libc_handle = ctypes.CDLL("libc.so.6", use_errno=True)
+    return _libc_handle
 
 
 def resident_pages(path: str) -> int:
-    """Pages of `path` in the page cache, via mincore. The mapping is
-    read-only and unmapped before return, so it does not pin pages."""
-    size = os.path.getsize(path)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        # MAP_PRIVATE read-write: ctypes.from_buffer needs a writable
-        # buffer to take the address. Nothing writes to the mapping,
-        # so no page is copied and mincore sees the file pages.
-        mapped = mmap.mmap(
-            fd, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ | mmap.PROT_WRITE
-        )
-    finally:
-        os.close(fd)
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = (size + page - 1) // page
-        vec = (ctypes.c_ubyte * pages)()
-        buf = (ctypes.c_char * size).from_buffer(mapped)
-        rc = _libc.mincore(
-            ctypes.c_void_p(ctypes.addressof(buf)), ctypes.c_size_t(size), vec
-        )
-        del buf
-        if rc != 0:
-            raise OSError(ctypes.get_errno(), "mincore failed")
-        return sum(v & 1 for v in vec)
-    finally:
-        mapped.close()
+    return _mincore.resident_pages(_libc(), path)
 
 
 def evict_once(path: str) -> None:
@@ -57,14 +42,17 @@ def evict_once(path: str) -> None:
         os.close(fd)
 
 
+def _run(cmd: list[str]) -> str:
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return out.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
 def filesystem(path: str) -> str:
     """The filesystem type that holds `path`."""
-    out = subprocess.run(
-        ["findmnt", "-no", "FSTYPE", "--target", path],
-        capture_output=True,
-        text=True,
-    )
-    return out.stdout.strip()
+    return _run(["findmnt", "-no", "FSTYPE", "--target", path])
 
 
 def _read_first(path: str) -> str:
@@ -100,7 +88,8 @@ def _distro() -> str:
 
 def machine_fields(repo_root: str) -> dict:
     """The Linux entries of the machine spec. The shared fields —
-    date, cores, kernel, rustc, binary, git — stay in `machine.py`."""
+    date, os, cores, kernel, rustc, binary, git — stay in
+    `machine.py` and win on a key clash."""
     return {
         "cpu": _cpu_model(),
         "cpu_governor": _read_first(

@@ -1,50 +1,38 @@
 """macOS-native probes for the bench harness.
 
-`harness.py` loads this module on macOS. It owns the libSystem calls
+`harness.py` loads this module on macOS. It owns the libSystem access
 and the macOS machine-spec fields. The interface is the same as
 `platform_linux.py`: `resident_pages`, `evict_once`, `SUPPORTS_EVICT`,
-`filesystem`, and `machine_fields`.
+`SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 
 Cold-boot eviction is undecided on macOS: `purge` flushes the whole
 disk cache and needs root. The decision is step 4 of
-`docs/bench-platforms.md`; until it lands, `evict_once` refuses.
+`docs/bench-platforms.md`; until it lands, `evict_once` refuses. The
+per-process memory probe is step 3.
 """
 
 import ctypes
-import mmap
-import os
+import re
 import subprocess
 
-SUPPORTS_EVICT = False
+import _mincore
 
-_libc = ctypes.CDLL("libSystem.B.dylib", use_errno=True)
+SUPPORTS_EVICT = False
+SUPPORTS_PROC_MEMORY = False
+
+_libc_handle = None
+
+
+def _libc():
+    """The libSystem handle, loaded on first use."""
+    global _libc_handle
+    if _libc_handle is None:
+        _libc_handle = ctypes.CDLL("libSystem.B.dylib", use_errno=True)
+    return _libc_handle
 
 
 def resident_pages(path: str) -> int:
-    """Pages of `path` in the page cache, via mincore. Same shape as
-    the Linux probe; macOS sets bit 0 for a resident page too."""
-    size = os.path.getsize(path)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        mapped = mmap.mmap(
-            fd, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ | mmap.PROT_WRITE
-        )
-    finally:
-        os.close(fd)
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = (size + page - 1) // page
-        vec = (ctypes.c_ubyte * pages)()
-        buf = (ctypes.c_char * size).from_buffer(mapped)
-        rc = _libc.mincore(
-            ctypes.c_void_p(ctypes.addressof(buf)), ctypes.c_size_t(size), vec
-        )
-        del buf
-        if rc != 0:
-            raise OSError(ctypes.get_errno(), "mincore failed")
-        return sum(v & 1 for v in vec)
-    finally:
-        mapped.close()
+    return _mincore.resident_pages(_libc(), path)
 
 
 def evict_once(path: str) -> None:
@@ -64,15 +52,20 @@ def _run(cmd: list[str]) -> str:
 
 def filesystem(path: str) -> str:
     """The filesystem type that holds `path`, from the mount table.
-    `df` names the device; the mount line carries the type as the
-    first word in its parenthesized list."""
+    `df` names the mount point; the mount line carries the type as
+    the first word of its last parenthesized list."""
     df = _run(["df", "-P", path]).splitlines()
     if len(df) < 2:
         return ""
-    device = df[-1].split()[0]
+    # The mount point is everything after the capacity column; it can
+    # contain spaces, so split from the percent sign, not by fields.
+    match = re.search(r"\d+%\s+(.+)$", df[-1])
+    if not match:
+        return ""
+    mountpoint = match.group(1).strip()
     for line in _run(["mount"]).splitlines():
-        if line.startswith(device + " on "):
-            _, _, rest = line.partition(" (")
+        if f" on {mountpoint} (" in line:
+            _, _, rest = line.rpartition(" (")
             return rest.split(",")[0].rstrip(")")
     return ""
 
@@ -88,14 +81,14 @@ def _power_source() -> str:
     for line in _run(["pmset", "-g", "batt"]).splitlines():
         if "drawing from" in line:
             return line.partition("drawing from")[2].strip().strip("'")
-    return ""
+    return "unknown"
 
 
 def _low_power_mode() -> str:
     for line in _run(["pmset", "-g"]).splitlines():
         if "lowpowermode" in line:
             return line.split()[-1]
-    return ""
+    return "unknown"
 
 
 def _thermal_state() -> str:
@@ -105,13 +98,16 @@ def _thermal_state() -> str:
     pairs = [line.strip() for line in out.splitlines() if "=" in line]
     if pairs:
         return "; ".join(pairs)
-    return "nominal" if "No thermal warning" in out else out.strip()
+    if "No thermal warning" in out:
+        return "nominal"
+    return out.strip() or "unknown"
 
 
 def machine_fields(repo_root: str) -> dict:
     """The macOS entries of the machine spec. Power and thermal state
     stand in for the CPU-governor line: they are the conditions that
-    move numbers on this platform."""
+    move numbers on this platform. The shared fields stay in
+    `machine.py` and win on a key clash."""
     return {
         "cpu": _run(["sysctl", "-n", "machdep.cpu.brand_string"]),
         "mem_total_kb": int(_run(["sysctl", "-n", "hw.memsize"]) or 0) // 1024,

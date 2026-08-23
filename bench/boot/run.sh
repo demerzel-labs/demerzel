@@ -15,8 +15,9 @@ BIN="${BIN:-target/release/demerzel}"
     exit 1
 }
 
-SLUG="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.os_slug())')"
-OUT="bench/results/boot-$(date +%F)-$(git rev-parse --short HEAD)-$SLUG.json"
+# The result path comes from the shared template, so the name and
+# the envelope agree.
+OUT="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.result_path("boot"))')"
 # -N: no shell between hyperfine and the binary; the command is
 # sub-5 ms and shell startup would blur it.
 hyperfine -N --warmup 5 --runs "${RUNS:-50}" --export-json "$OUT" "$BIN --version"

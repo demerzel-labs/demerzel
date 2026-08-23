@@ -148,12 +148,7 @@ def main() -> int:
         }
     )
 
-    out = os.path.join(
-        REPO_ROOT,
-        "bench",
-        "results",
-        f"metrics-{report['date']}-{report['git_rev']}-{report['os']}.json",
-    )
+    out = harness.result_path("metrics")
     harness.write_report(out, report)
     print(f"lines {report['lines_total']}, pub items {report['pub_items_total']}, "
           f"deps {report['external_dep_count']}, binary {report['binary_bytes']} bytes")

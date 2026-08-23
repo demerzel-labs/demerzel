@@ -29,17 +29,21 @@ def run(cmd: list[str]) -> str:
 
 def main() -> int:
     binary = os.path.join(REPO_ROOT, "target/release/demerzel")
-    spec = {
-        "date": time.strftime("%Y-%m-%d"),
-        "os": harness.os_slug(),
-        **harness.native.machine_fields(REPO_ROOT),
-        "cores": os.cpu_count(),
-        "kernel": run(["uname", "-r"]),
-        "rustc": run(["rustc", "--version"]),
-        "binary_bytes": os.path.getsize(binary) if os.path.exists(binary) else None,
-        "git_rev": harness.git_rev(),
-        "git_dirty": harness.git_dirty(),
-    }
+    spec = harness.machine_fields()
+    # The shared fields land after the spread, so a platform module
+    # can never clobber them.
+    spec.update(
+        {
+            "date": time.strftime("%Y-%m-%d"),
+            "os": harness.os_slug(),
+            "cores": os.cpu_count(),
+            "kernel": run(["uname", "-r"]),
+            "rustc": run(["rustc", "--version"]),
+            "binary_bytes": os.path.getsize(binary) if os.path.exists(binary) else None,
+            "git_rev": harness.git_rev(),
+            "git_dirty": harness.git_dirty(),
+        }
+    )
     out_path = os.path.join(
         REPO_ROOT, "bench/results", f"machine-{spec['date']}-{spec['os']}.json"
     )

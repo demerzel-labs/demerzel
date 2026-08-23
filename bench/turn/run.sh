@@ -8,17 +8,16 @@ cd "$(dirname "$0")/../.."
 START=$(date +%s)
 cargo bench -p demerzel --bench turn
 
-SLUG="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.os_slug())')"
-OUT="bench/results/turn-$(date +%F)-$(git rev-parse --short HEAD)-$SLUG.json"
-python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
+python3 - "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.getcwd(), "bench"))
 import harness
 
-out, target, start = sys.argv[1], sys.argv[2], float(sys.argv[3])
-fs = harness.native.filesystem(os.path.abspath(target))
+target, start = sys.argv[1], float(sys.argv[2])
+out = harness.result_path("turn")
+fs = harness.filesystem(os.path.abspath(target))
 report = harness.base_report("turn-latency-vs-local-mock", "target/release/demerzel")
 report["bin"] = "cargo bench --bench turn"
 report["data_filesystem"] = fs
@@ -31,5 +30,5 @@ report["benches"] = harness.criterion_benches(target, since=start)
 if not report["benches"]:
     sys.exit(f"no criterion estimates under {target}/criterion")
 harness.write_report(out, report)
+print(f"raw data: {out}")
 EOF
-echo "raw data: $OUT"

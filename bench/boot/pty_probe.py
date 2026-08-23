@@ -69,7 +69,7 @@ def main() -> int:
         print(f"no binary at {args.bin} — run: cargo build --release", file=sys.stderr)
         return 1
 
-    if args.cold and not harness.native.SUPPORTS_EVICT:
+    if args.cold and not harness.supports_evict():
         print(
             "cold mode needs page-cache eviction, and this platform has none yet; "
             "the decision is step 4 of docs/bench-platforms.md",
@@ -111,11 +111,7 @@ def main() -> int:
         }
     )
     suffix = "-plain" if args.plain else ""
-    out_path = args.out or os.path.join(
-        harness.REPO_ROOT,
-        "bench/results",
-        f"pty-boot-{mode}{suffix}-{report['date']}-{report['git_rev']}-{report['os']}.json",
-    )
+    out_path = args.out or harness.result_path(f"pty-boot-{mode}{suffix}")
     harness.write_report(out_path, report)
     print(
         f"{mode} {interface}: ready median {report['stats_ms']['median']} ms, "

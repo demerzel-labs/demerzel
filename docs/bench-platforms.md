@@ -102,12 +102,15 @@ These already hold and become explicit requirements:
 ## Harness changes
 
 1. **Platform split.** `harness.py` keeps the shared logic: markers,
-   spawn, shutdown, stats, report envelope. The native probes move to
-   a platform module loaded at import: `platform_linux.py` and
-   `platform_macos.py`, each exporting `resident_pages`, `evict`,
-   `process_memory`, and the machine-spec fields. The eager
-   `ctypes.CDLL("libc.so.6")` load goes away; today it breaks every
-   import on macOS.
+   spawn, shutdown, stats, the report envelope, and the one
+   result-name template. The native probes move to a platform module
+   loaded at import: `platform_linux.py` and `platform_macos.py`,
+   each exporting `resident_pages`, `evict_once`, `filesystem`,
+   `machine_fields`, and the support flags (`SUPPORTS_EVICT`,
+   `SUPPORTS_PROC_MEMORY`); the per-process memory probe joins at
+   step 3. Callers reach the seam only through `harness` wrappers.
+   The eager `ctypes.CDLL("libc.so.6")` load becomes lazy; today it
+   breaks every import on macOS.
 2. **Machine slug in result names.** Result files gain an OS-arch
    slug: `boot-<date>-<rev>-linux-x86_64.json`,
    `machine-<date>-macos-aarch64.json`. Existing files keep their

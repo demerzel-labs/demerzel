@@ -29,7 +29,7 @@ data for each number goes into `results/`. The "Benchmark program" section of
 
 | Layer | Measures | Method | Status |
 |---|---|---|---|
-| 1 | Boot time, memory footprint, binary size | hyperfine; PSS and USS from `smaps_rollup`; cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
+| 1 | Boot time, memory footprint, binary size | hyperfine; on Linux, PSS and USS from `smaps_rollup` and cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
 | 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts for the turn benches. The render bench drives the transcript and the renderer in process. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark and the render benchmark are here. iai-callgrind arrives with CI in M5. |
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
 | 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | The cache-hit measurement is here. The rest comes with M4. |
@@ -70,14 +70,15 @@ bench/cache/replay.py --provider openai-codex
 The suite runs on Linux and macOS, the two reference platforms
 ([`docs/bench-platforms.md`](../docs/bench-platforms.md)). Result files
 carry an OS-arch slug, for example `boot-2026-08-23-abc1234-macos-aarch64.json`.
-Two gaps remain: the idle memory driver and cold mode run only on Linux
-until the macOS footprint probe (step 3) and the eviction decision
-(step 4) land.
+Three gaps remain on macOS. The idle memory driver and `pss.py` run
+only on Linux until the footprint probe lands (step 3). Cold mode runs
+only on Linux until the eviction decision lands (step 4).
 
-The boot benchmark needs `hyperfine`: `pacman -S hyperfine` on Arch,
-`brew install hyperfine` on macOS. The probes need Python 3.13 or newer;
-on macOS install it from Homebrew or python.org. `bench/harness.py`
-holds the shared probe machinery, and `platform_linux.py` and
+The boot benchmark needs `hyperfine`. On Arch, install it with
+`pacman -S hyperfine`. On macOS, install it with
+`brew install hyperfine`. The probes need Python 3.13 or newer. On
+macOS, install Python from Homebrew or python.org. `bench/harness.py`
+holds the shared probe machinery. `platform_linux.py` and
 `platform_macos.py` hold the native probes.
 
 Method notes:
@@ -86,7 +87,7 @@ Method notes:
   auth store. A run needs no login and makes no network call.
 - The probe records its own spawn floor, measured through the identical
   PTY path with `printf`. The floor sits inside every sample.
-- Cold mode evicts the binary from the page cache with `posix_fadvise`
+- Cold mode, on Linux, evicts the binary from the page cache with `posix_fadvise`
   and verifies the eviction with `mincore`. Shared libraries and
   metadata caches stay warm, so the cold number tracks the binary read
   and moves with binary size. A true cold start needs a fresh boot.
