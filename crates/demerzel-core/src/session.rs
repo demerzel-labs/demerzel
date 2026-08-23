@@ -18,10 +18,14 @@
 //! The file is also the measurement trace for one session: the meta
 //! records carry the environment (project directory, provider,
 //! model), the messages carry every tool step, the usage records
-//! carry the token counts with the cached part, and the turn records
-//! carry how each user turn ended. A user turn that no turn record
-//! closes before the next one opens was cut off: a dropped turn
-//! future or a process exit mid-turn.
+//! carry the token counts with the cached parts, and the turn records
+//! carry how each user turn ended. A user turn opens with a user
+//! message that holds a text block; the turn record that follows
+//! before the next one closes it. A turn without one was cut off:
+//! a dropped turn future (Ctrl-C in the interfaces), a process exit
+//! mid-turn, or a session write failure. The file carries no clock
+//! beyond the meta record's creation time; wall time per turn is the
+//! caller's to measure.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -69,9 +73,12 @@ impl SessionMeta {
 }
 
 /// One line of a session file. The serialized shape is part of the
-/// session-file format; changing it is a schema change.
+/// session-file format; changing it is a schema change. Non-exhaustive:
+/// a later record type is additive, and readers skip what they do not
+/// know.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SessionRecord {
     Meta(SessionMeta),
     Message(Message),
@@ -95,8 +102,9 @@ pub enum SessionRecord {
     Usage(Usage),
     /// How one user turn ended. `outcome` is one of `completed`,
     /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
-    /// the first five mirror the engine's turn outcomes, and `error`
-    /// marks a provider failure, with the message in `error`.
+    /// the first five are the engine's turn outcomes by their
+    /// `as_str` names, and `error` marks a provider failure, with the
+    /// message in `error`.
     Turn {
         outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -586,6 +594,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 2,
                 cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             })
             .unwrap();
 
@@ -761,6 +770,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_read_tokens: 3,
+                cache_creation_tokens: 4,
             }),
             SessionRecord::Turn {
                 outcome: "completed".into(),

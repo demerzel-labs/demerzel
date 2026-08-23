@@ -1,31 +1,41 @@
 //! Layer-2 benchmark: render throughput of the full-screen interface.
 //!
 //! Three benches decompose the number, all on a 120x40 screen over a
-//! transcript that already holds 2,000 lines of history:
+//! transcript that already holds more history than one screen:
 //! - `frame`: one redraw with no new content. The per-frame cost of
 //!   the layout: the visible tail wraps, the rest of the history does
-//!   not.
+//!   not, so the cost does not move with the history length. The
+//!   buffer diff finds nothing to change, so this is the floor of a
+//!   frame; `stream` carries the changed frames.
 //! - `ingest`: 64 KiB of model text pushed in 16-byte deltas, no
 //!   frames. The transcript's cost per streamed byte.
-//! - `stream`: the same 64 KiB with a frame every 64 deltas, the
-//!   batch a 16 ms frame cap makes of a fast stream. The throughput
-//!   the renderer sustains, in bytes per second.
+//! - `stream`: the same 64 KiB with a frame every 64 deltas: 65
+//!   changed frames. The frames are almost all of the time, so the
+//!   throughput is in frames per second; the bytes ride along. A
+//!   real stream arrives slower than the renderer draws, so arrival,
+//!   not the frame cap, sets the batch in use.
 //!
 //! The screen is headless: frames render into a buffer and diff
 //! against the last one, the same work the live interface does before
-//! the terminal write. The write itself is the terminal's cost, not
-//! the harness's, and it stays outside this number.
+//! the terminal write. Outside this number: the terminal-size query
+//! and the escape-sequence encoding of the changed cells on the live
+//! backend, and the write itself. The transcript stays under its line
+//! cap and its entry cap throughout, so the eviction paths are outside
+//! it too.
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use demerzel_tui::bench::Screen;
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
-const HISTORY_LINES: usize = 2_000;
+/// More than one 40-row screen, so the viewport never shows the start.
+const HISTORY_LINES: usize = 200;
 /// Bytes per streamed delta: a few tokens, the size adapters deliver.
 const DELTA: usize = 16;
 const STREAM: usize = 64 * 1024;
 const DELTAS_PER_FRAME: usize = 64;
+/// Frames in one `stream` iteration: one per batch, one at the end.
+const FRAMES: usize = STREAM / DELTA / DELTAS_PER_FRAME + 1;
 
 /// A history line; lengths cycle from one row to several wrapped rows.
 fn history_line(index: usize) -> String {
@@ -75,7 +85,12 @@ fn bench_render(c: &mut Criterion) {
 
     let mut screen = screen_with_history();
     group.bench_function("frame", |b| b.iter(|| screen.draw()));
+    assert_eq!(screen.lines(), HISTORY_LINES);
     drop(screen);
+
+    // Every streamed line lands as one transcript line, and the total
+    // stays under the cap, so the cap's drop path is not measured.
+    let streamed_lines = HISTORY_LINES + text.matches('\n').count() + 1;
 
     group.throughput(Throughput::Bytes(STREAM as u64));
     group.bench_function("ingest", |b| {
@@ -85,25 +100,30 @@ fn bench_render(c: &mut Criterion) {
                 for delta in &deltas {
                     screen.push_text(delta);
                 }
-                assert!(screen.lines() > HISTORY_LINES);
+                assert_eq!(screen.lines(), streamed_lines);
                 screen
             },
             BatchSize::LargeInput,
         )
     });
 
+    group.throughput(Throughput::Elements(FRAMES as u64));
     group.bench_function("stream", |b| {
         b.iter_batched(
             screen_with_history,
             |mut screen| {
+                let mut frames = 0;
                 for (index, delta) in deltas.iter().enumerate() {
                     screen.push_text(delta);
                     if index % DELTAS_PER_FRAME == DELTAS_PER_FRAME - 1 {
                         screen.draw();
+                        frames += 1;
                     }
                 }
                 screen.draw();
-                assert!(screen.lines() > HISTORY_LINES);
+                frames += 1;
+                assert_eq!(frames, FRAMES);
+                assert_eq!(screen.lines(), streamed_lines);
                 screen
             },
             BatchSize::LargeInput,

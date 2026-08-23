@@ -362,6 +362,8 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                     cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
                         .as_u64()
                         .unwrap_or(0),
+                    // The endpoint reports no cache-write count.
+                    cache_creation_tokens: 0,
                 })),
                 Ok(StreamEvent::Done(stop)),
             ]

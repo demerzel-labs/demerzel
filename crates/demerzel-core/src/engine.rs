@@ -169,6 +169,20 @@ pub enum TurnOutcome {
     Aborted,
 }
 
+impl TurnOutcome {
+    /// The outcome's name in the session file's turn record: one
+    /// source for the vocabulary the record documents.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TurnOutcome::Completed => "completed",
+            TurnOutcome::MaxTokens => "max_tokens",
+            TurnOutcome::Refused => "refused",
+            TurnOutcome::CallLimit => "call_limit",
+            TurnOutcome::Aborted => "aborted",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
@@ -269,10 +283,18 @@ impl<'a> Engine<'a> {
 
     /// Run one user turn: repair the history if the last turn was cut,
     /// append the user message, then alternate model calls and tool
-    /// calls until the model ends the turn or a limit stops it. The
-    /// session file closes the turn with a turn record: the outcome,
-    /// or `error` with the message of a provider failure. A session
-    /// failure has no record — the file is the failure.
+    /// calls until the model ends the turn or a limit stops it.
+    ///
+    /// The session file closes the turn with a turn record: the
+    /// outcome, or `error` with the message of a provider failure.
+    /// The record is an append like every other, so a turn that
+    /// completed returns the session error when that append fails —
+    /// the file is the source of truth, and the next append would
+    /// fail the same way. After a provider failure the append must
+    /// not hide the provider's message: its own failure is dropped
+    /// and surfaces on the next append. The message is cut at
+    /// [`MAX_TURN_ERROR_BYTES`]. A session failure writes no record;
+    /// the file is the failure.
     pub async fn user_turn(
         &mut self,
         text: String,
@@ -281,10 +303,13 @@ impl<'a> Engine<'a> {
     ) -> Result<TurnOutcome, EngineError> {
         let result = self.run_turn(text, sink, approver).await;
         match &result {
-            Ok(outcome) => self.session.append_turn(outcome_name(*outcome), None)?,
-            Err(EngineError::Provider(error)) => self
-                .session
-                .append_turn("error", Some(&error.to_string()))?,
+            Ok(outcome) => self.session.append_turn(outcome.as_str(), None)?,
+            Err(EngineError::Provider(error)) => {
+                let message = error.to_string();
+                let _ = self
+                    .session
+                    .append_turn("error", Some(capped(&message, MAX_TURN_ERROR_BYTES)));
+            }
             Err(EngineError::Session(_)) => {}
         }
         result
@@ -522,15 +547,21 @@ impl<'a> Engine<'a> {
     }
 }
 
-/// The outcome's name in the session file's turn record.
-fn outcome_name(outcome: TurnOutcome) -> &'static str {
-    match outcome {
-        TurnOutcome::Completed => "completed",
-        TurnOutcome::MaxTokens => "max_tokens",
-        TurnOutcome::Refused => "refused",
-        TurnOutcome::CallLimit => "call_limit",
-        TurnOutcome::Aborted => "aborted",
+/// Byte cap for the provider message in a turn record. A provider
+/// error can carry a whole server response; the file keeps its head,
+/// so one bad reply cannot grow every later replay.
+const MAX_TURN_ERROR_BYTES: usize = 1024;
+
+/// `text` cut to `cap` bytes at a char boundary.
+fn capped(text: &str, cap: usize) -> &str {
+    if text.len() <= cap {
+        return text;
     }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 struct ModelResponse {
@@ -796,6 +827,7 @@ mod tests {
                 input_tokens: 7,
                 output_tokens: 3,
                 cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             }),
             StreamEvent::Done(StopReason::EndTurn),
         ]
@@ -818,17 +850,46 @@ mod tests {
     }
 
     /// The `outcome` of every turn record in the session file, in
-    /// order; `error:<message>` for a failed turn.
+    /// order; `error:<message>` for a failed turn. Every line must
+    /// parse: a torn or malformed record fails the test.
     fn turn_records(engine: &Engine<'_>) -> Vec<String> {
         let raw = std::fs::read_to_string(engine.session().path()).unwrap();
         raw.lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .filter(|record| record["type"] == "turn")
-            .map(|record| match record.get("error") {
-                Some(error) => format!("{}:{}", record["outcome"].as_str().unwrap(), error),
-                None => record["outcome"].as_str().unwrap().to_string(),
+            .map(|record| {
+                let outcome = record["outcome"].as_str().unwrap();
+                match record["error"].as_str() {
+                    Some(error) => format!("{outcome}:{error}"),
+                    None => outcome.to_string(),
+                }
             })
             .collect()
+    }
+
+    #[test]
+    fn capped_cuts_at_a_char_boundary_and_keeps_short_text() {
+        assert_eq!(capped("short", 8), "short");
+        // Two-byte chars: a cut inside one steps back to the boundary.
+        let text = "ééééé";
+        assert_eq!(capped(text, 5), "éé");
+        assert_eq!(capped(text, 4), "éé");
+        assert_eq!(capped("", 0), "");
+    }
+
+    #[test]
+    fn a_token_limit_ends_the_turn_as_max_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamEvent::TextDelta("partial".into()),
+            StreamEvent::Done(StopReason::MaxTokens),
+        ]]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let outcome = block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll));
+        assert_eq!(outcome.unwrap(), TurnOutcome::MaxTokens);
+        assert_eq!(turn_records(&engine), ["max_tokens"]);
     }
 
     #[test]
@@ -1409,11 +1470,9 @@ mod tests {
         let sink = noop_sink();
         let error = block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap_err();
         assert!(error.to_string().contains("without a tool call"));
-        // The failed turn still closes in the file, with the message.
-        let records = turn_records(&engine);
-        assert_eq!(records.len(), 1);
-        assert!(records[0].starts_with("error:"), "{records:?}");
-        assert!(records[0].contains("without a tool call"));
+        // The failed turn still closes in the file, with the error's
+        // own message.
+        assert_eq!(turn_records(&engine), [format!("error:{error}")]);
     }
 
     #[test]

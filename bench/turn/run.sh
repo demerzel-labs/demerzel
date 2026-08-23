@@ -5,10 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+START=$(date +%s)
 cargo bench -p demerzel --bench turn
 
 OUT="bench/results/turn-$(date +%F)-$(git rev-parse --short HEAD).json"
-python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" <<'EOF'
+python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
 import os
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.getcwd(), "bench"))
 import harness
 
-out, target = sys.argv[1], sys.argv[2]
+out, target, start = sys.argv[1], sys.argv[2], float(sys.argv[3])
 fs = subprocess.run(
     ["findmnt", "-no", "FSTYPE", "--target", target], capture_output=True, text=True
 ).stdout.strip()
@@ -28,7 +29,7 @@ report["note"] = (
     "transport_floor isolates it. Harness-added latency per turn is "
     "turn_text minus transport_floor."
 )
-report["benches"] = harness.criterion_benches(target)
+report["benches"] = harness.criterion_benches(target, since=start)
 if not report["benches"]:
     sys.exit(f"no criterion estimates under {target}/criterion")
 harness.write_report(out, report)

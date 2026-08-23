@@ -370,13 +370,14 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             let usage = &value["message"]["usage"];
             let count = |field: &str| usage[field].as_u64().unwrap_or(0);
             // The wire `input_tokens` excludes the cached prompt parts.
-            // The neutral field is the whole prompt, like the codex
-            // adapter reports, with `cache_read_tokens` as the subset
-            // served from cache.
+            // The neutral count is the whole prompt, with the tokens
+            // read from the cache and the tokens written into it as
+            // its two cache parts.
             state.usage.input_tokens = count("input_tokens")
                 + count("cache_creation_input_tokens")
                 + count("cache_read_input_tokens");
             state.usage.cache_read_tokens = count("cache_read_input_tokens");
+            state.usage.cache_creation_tokens = count("cache_creation_input_tokens");
             state.usage.output_tokens = count("output_tokens");
             Vec::new()
         }

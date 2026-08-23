@@ -270,6 +270,7 @@ async fn assembles_the_stream_into_neutral_events() {
             assert_eq!(usage.input_tokens, 10);
             assert_eq!(usage.output_tokens, 20);
             assert_eq!(usage.cache_read_tokens, 2);
+            assert_eq!(usage.cache_creation_tokens, 1);
             assert_eq!(stop, &StopReason::ToolUse);
         }
         other => panic!("unexpected event sequence: {other:?}"),

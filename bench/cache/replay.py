@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
-"""Prompt-cache hit rate on a replayed session: Layer 4 measurement.
+"""Prompt-cache hit rate on a replayed prompt script: Layer 4.
 
-The script runs a fixed list of user turns through the harness
-against one live provider, as two fresh sessions one after the other,
-and reports `cache_read_tokens / input_tokens` per model call, per
-turn, and per session. The turns read this repository and nothing
-else: the engine advertises only the read tools.
+The script replays the user side of one session — a fixed list of
+user turns — through the harness against one live provider, as two
+fresh sessions one after the other. The model side is live, so the
+two sessions differ in what the model reads and how many calls it
+makes. The report gives `cache_read_tokens / input_tokens` per model
+call, per turn, and per session. The turns read this repository and
+nothing else.
 
 The Rust side (`crates/demerzel/examples/cache_replay.rs`) drives
 the real engine over the real adapter and prints the per-call usage;
 this script builds it, runs it, and writes the report with the
-provenance envelope. Sessions land in a private temporary data root.
-Credentials resolve the way a session resolves them: the environment
-(`ANTHROPIC_API_KEY`), then the default auth store (`dmz login`).
+provenance envelope. The engine advertises the full tool set in
+`ask` mode with no approver: the prefix a real session sends, with
+only the read tools able to run. Sessions land in a private temporary
+data root that goes away with the run. Credentials resolve the way a
+session resolves them: the environment (`ANTHROPIC_API_KEY`), then
+the default auth store (`dmz login`).
 
 What the numbers mean:
-- `input_tokens` counts the whole prompt, cached part included, for
-  both providers. The anthropic adapter sums the wire's uncached,
-  cache-creation, and cache-read counts; the Codex endpoint reports
-  cached tokens as a subset of its input count.
-- The first call of the first session is the cold reference. The
-  first call of the second session shares its full prefix with the
-  first session's first call — the system prompt, the tool
-  definitions, and the same first prompt — so its hit rate shows
-  that the prefix is byte-stable across sessions.
-- Later calls in a session hit on the history the earlier calls
-  sent. The steady-state rate is the ratio over every call after the
+- `input_tokens` counts the whole prompt, cached parts included, for
+  both providers. `cache_read_tokens` is the part served from the
+  cache; `cache_creation_tokens` the part written into it (the Codex
+  endpoint reports no write count).
+- The comparable numbers across milestones are the per-call ones: a
+  warm call that reads its predecessor's whole prompt shows a stable
+  prefix. Session totals move with the model's tool choices.
+- `first_call_hit_rate` is the first call of each session. In the
+  second session it shares its whole prefix with the first session's
+  first call, so a non-zero value there shows the prefix holds across
+  sessions. A provider caches only prompts past a minimum length, so
+  a zero can also mean the static prefix is still too short; the
+  per-call column tells the two apart.
+- `steady_state_hit_rate` is the ratio over every call after the
   first of each session.
 
-A live run costs tokens and needs network access. The prompt list is
-fixed so reports compare across milestones.
+A live run costs tokens and needs network access.
 """
 
 import argparse
@@ -43,10 +50,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import harness
 
 REPO_ROOT = harness.REPO_ROOT
-EXAMPLE = os.path.join(REPO_ROOT, "target", "release", "examples", "cache_replay")
+TARGET = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO_ROOT, "target")
+EXAMPLE = os.path.join(TARGET, "release", "examples", "cache_replay")
 
-# The recorded session: one read-only walk through this repository.
-# Fixed across milestones, so the reports compare.
+# The user side of the session: one read-only walk through this
+# repository. Fixed across milestones.
 PROMPTS = [
     "Read Cargo.toml at the repository root and list the workspace members, one per line.",
     "Read crates/demerzel-core/src/provider.rs. Name each method of the Provider trait "
@@ -71,7 +79,7 @@ def summarize(trace: dict) -> tuple[list[dict], dict]:
     sessions = []
     for session in trace["sessions"]:
         turns = []
-        s_input = s_cached = s_output = 0
+        s_input = s_cached = s_created = s_output = 0
         for turn in session["turns"]:
             calls = [
                 {
@@ -82,9 +90,11 @@ def summarize(trace: dict) -> tuple[list[dict], dict]:
             ]
             t_input = sum(c["input_tokens"] for c in calls)
             t_cached = sum(c["cache_read_tokens"] for c in calls)
+            t_created = sum(c.get("cache_creation_tokens", 0) for c in calls)
             t_output = sum(c["output_tokens"] for c in calls)
             s_input += t_input
             s_cached += t_cached
+            s_created += t_created
             s_output += t_output
             turns.append(
                 {
@@ -95,6 +105,7 @@ def summarize(trace: dict) -> tuple[list[dict], dict]:
                     "model_calls": len(calls),
                     "input_tokens": t_input,
                     "cache_read_tokens": t_cached,
+                    "cache_creation_tokens": t_created,
                     "output_tokens": t_output,
                     "hit_rate": ratio(t_cached, t_input),
                     "calls": calls,
@@ -111,6 +122,7 @@ def summarize(trace: dict) -> tuple[list[dict], dict]:
                 "model_calls": len(all_calls),
                 "input_tokens": s_input,
                 "cache_read_tokens": s_cached,
+                "cache_creation_tokens": s_created,
                 "output_tokens": s_output,
                 "hit_rate": ratio(s_cached, s_input),
                 "first_call_hit_rate": first["hit_rate"] if first else None,
@@ -147,12 +159,17 @@ def main() -> int:
     if args.model:
         command += ["--model", args.model]
     command += ["--", *PROMPTS]
-    run = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
-    sys.stderr.write(run.stderr)
+    # Progress streams on stderr while the run spends tokens; only
+    # the JSON trace on stdout is captured.
+    run = subprocess.run(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, text=True)
     if run.returncode != 0:
         print(f"cache_replay exited {run.returncode}", file=sys.stderr)
         return 1
-    trace = json.loads(run.stdout)
+    try:
+        trace = json.loads(run.stdout)
+    except json.JSONDecodeError as error:
+        print(f"cache_replay printed no JSON trace: {error}", file=sys.stderr)
+        return 1
     sessions, summary = summarize(trace)
 
     report = harness.base_report("prompt-cache-hit-rate", EXAMPLE)
@@ -163,10 +180,12 @@ def main() -> int:
             "runs": trace["runs"],
             "definition": (
                 "hit_rate = cache_read_tokens / input_tokens; input_tokens counts the "
-                "cached part for both providers. first_call is the first model call "
-                "of the session; steady_state is every call after it."
+                "cached parts for both providers. first_call is the first model call "
+                "of the session: in the second session it can read the first "
+                "session's prefix, but only once the prefix passes the provider's "
+                "minimum cacheable length. steady_state is every call after the first."
             ),
-            "project": "this repository, read-only tools",
+            "project": "this repository; full tool set in ask mode, read tools run",
             "prompts": PROMPTS,
             "summary": summary,
             "sessions": sessions,

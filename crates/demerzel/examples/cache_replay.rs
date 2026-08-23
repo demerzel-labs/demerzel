@@ -7,19 +7,25 @@
 //! Run: `cargo run --release -p demerzel --example cache_replay -- \
 //!   --provider anthropic --runs 2 -- "first prompt" "second prompt"`
 //!
-//! The run is read-only: the engine advertises only the read tools,
-//! and the project directory is the working directory. Sessions land
-//! in a private temporary data root. Credentials resolve the way a
+//! The run advertises the full tool set in `ask` mode with no
+//! approver, the prefix a real interactive session sends, and it
+//! executes only the read tools: every other call is declined
+//! without a prompt, and the turn goes on. The project directory is
+//! the working directory. Sessions land in a private temporary data
+//! root that goes away with the run. Credentials resolve the way a
 //! session resolves them: the environment, then the default auth
 //! store. A turn that fails ends the program with a non-zero exit;
 //! a partial trace is not a receipt.
+//!
+//! One `calls` entry per usage report; both shipped adapters report
+//! usage once per model call.
 
 use std::sync::Mutex;
 use std::time::Instant;
 
 use clap::Parser;
 use demerzel::{RunConfig, Runtime};
-use demerzel_core::{ApprovalMode, EngineEvent, EventSink, NoPrompt, TurnOutcome, Usage};
+use demerzel_core::{ApprovalMode, EngineEvent, EventSink, NoPrompt, Usage};
 use serde_json::{Value, json};
 
 #[derive(Debug, Parser)]
@@ -57,19 +63,15 @@ impl EventSink for Trace {
     }
 }
 
-fn outcome_name(outcome: TurnOutcome) -> &'static str {
-    match outcome {
-        TurnOutcome::Completed => "completed",
-        TurnOutcome::MaxTokens => "max_tokens",
-        TurnOutcome::Refused => "refused",
-        TurnOutcome::CallLimit => "call_limit",
-        TurnOutcome::Aborted => "aborted",
-        _ => "other",
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("cache_replay: {error}");
+        std::process::exit(1);
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let model = match args.model {
         Some(model) => model,
@@ -81,11 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = RunConfig::new(std::env::current_dir()?);
     config.provider = args.provider.clone();
     config.model = model.clone();
-    config.approval = ApprovalMode::ReadOnly;
+    config.approval = ApprovalMode::Ask;
     config.data_root = Some(data.path().to_path_buf());
     let runtime = Runtime::new(config)?;
 
-    let mut sessions = Vec::with_capacity(args.runs as usize);
+    let mut sessions = Vec::new();
     for run in 1..=args.runs {
         let (session, history) = runtime.open_session(false, &model)?;
         let session_id = session.id().to_string();
@@ -114,13 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             turns.push(json!({
                 "prompt": prompt,
-                "outcome": outcome_name(outcome),
+                "outcome": outcome.as_str(),
                 "wall_ms": (wall_ms * 10.0).round() / 10.0,
                 "tools": tools,
                 "calls": calls.iter().map(|u| json!({
                     "input_tokens": u.input_tokens,
                     "output_tokens": u.output_tokens,
                     "cache_read_tokens": u.cache_read_tokens,
+                    "cache_creation_tokens": u.cache_creation_tokens,
                 })).collect::<Vec<_>>(),
             }));
         }

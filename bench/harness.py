@@ -19,6 +19,7 @@ Spawn notes:
 
 import ctypes
 import fcntl
+import glob
 import json
 import mmap
 import os
@@ -117,19 +118,22 @@ def stats(samples: list[float]) -> dict:
     }
 
 
-def criterion_benches(target: str, group: str | None = None) -> dict:
+def criterion_benches(target: str, group: str | None = None, since: float = 0.0) -> dict:
     """Every criterion estimate under `target/criterion`, one entry per
     bench, raw samples included. `group` narrows to one benchmark
-    group; without it the ungrouped benches are collected. A bench
-    that declares a byte throughput also gets `bytes_per_second` from
-    its mean."""
-    import glob
-
+    group; without it the ungrouped benches are collected. `since` is
+    a Unix time: an estimate written before it is stale — a bench that
+    did not run this time — and stays out, so a report never carries
+    an old number under a new revision. A bench that declares a byte
+    throughput also gets `bytes_per_second` from criterion's typical
+    estimate — the slope when there is one, else the mean — the same
+    number the tool prints; an element throughput gets
+    `elements_per_second`."""
     pattern = os.path.join(target, "criterion", group or "", "*", "new", "estimates.json")
     benches = {}
     for est_path in sorted(glob.glob(pattern)):
         name = est_path.split(os.sep)[-3]
-        if name == "report":
+        if name == "report" or os.path.getmtime(est_path) < since:
             continue
         with open(est_path) as f:
             est = json.load(f)
@@ -149,10 +153,14 @@ def criterion_benches(target: str, group: str | None = None) -> dict:
         if os.path.exists(bench_path):
             with open(bench_path) as f:
                 throughput = json.load(f).get("throughput") or {}
+            typical_ns = (est.get("slope") or est["mean"])["point_estimate"]
             if "Bytes" in throughput:
                 entry["bytes"] = throughput["Bytes"]
-                entry["bytes_per_second"] = round(
-                    throughput["Bytes"] / (est["mean"]["point_estimate"] / 1e9)
+                entry["bytes_per_second"] = round(throughput["Bytes"] / (typical_ns / 1e9))
+            if "Elements" in throughput:
+                entry["elements"] = throughput["Elements"]
+                entry["elements_per_second"] = round(
+                    throughput["Elements"] / (typical_ns / 1e9)
                 )
         sample_path = os.path.join(new_dir, "sample.json")
         if os.path.exists(sample_path):

@@ -54,12 +54,19 @@ pub struct SealedPayload {
 
 /// Token counts for one model response. Fields default on read, so a
 /// session file written before a field existed still replays.
+///
+/// `input_tokens` is the whole prompt. The two cache counts are its
+/// parts: the tokens served from the prompt cache, and the tokens
+/// written into it. A provider without a write count reports zero.
+/// Cost derives from the three parts and the model; the harness
+/// carries no price table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
 }
 
 /// Why the model stopped. Non-exhaustive: a later milestone can add a
