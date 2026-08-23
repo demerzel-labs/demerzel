@@ -191,11 +191,7 @@ def main() -> int:
             "sessions": sessions,
         }
     )
-    out_path = args.out or os.path.join(
-        REPO_ROOT,
-        "bench/results",
-        f"cache-hit-{trace['provider']}-{report['date']}-{report['git_rev']}-{report['os']}.json",
-    )
+    out_path = args.out or harness.result_path(f"cache-hit-{trace['provider']}")
     harness.write_report(out_path, report)
     for index, session in enumerate(sessions, 1):
         print(
