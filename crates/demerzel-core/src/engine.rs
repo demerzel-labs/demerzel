@@ -293,8 +293,8 @@ impl<'a> Engine<'a> {
     /// fail the same way. After a provider failure the append must
     /// not hide the provider's message: its own failure is dropped
     /// and surfaces on the next append. The message is cut at
-    /// [`MAX_TURN_ERROR_BYTES`]. A session failure writes no record;
-    /// the file is the failure.
+    /// `MAX_TURN_ERROR_BYTES`, 1 KiB. A session failure writes no
+    /// record; the file is the failure.
     pub async fn user_turn(
         &mut self,
         text: String,

@@ -74,6 +74,28 @@ fn screen_with_history() -> Screen {
     screen
 }
 
+/// The `ingest` workload: every delta, no frames.
+fn ingest(screen: &mut Screen, deltas: &[&str]) {
+    for delta in deltas {
+        screen.push_text(delta);
+    }
+}
+
+/// The `stream` workload: every delta, a frame per batch and one at
+/// the end. Returns the frames drawn.
+fn stream(screen: &mut Screen, deltas: &[&str]) -> usize {
+    let mut frames = 0;
+    for (index, delta) in deltas.iter().enumerate() {
+        screen.push_text(delta);
+        if index % DELTAS_PER_FRAME == DELTAS_PER_FRAME - 1 {
+            screen.draw();
+            frames += 1;
+        }
+    }
+    screen.draw();
+    frames + 1
+}
+
 fn bench_render(c: &mut Criterion) {
     let text = stream_text();
     let deltas: Vec<&str> = text
@@ -83,24 +105,30 @@ fn bench_render(c: &mut Criterion) {
         .collect();
     let mut group = c.benchmark_group("render");
 
+    // Workload checks, once and outside the timed spans: every
+    // streamed line lands as one transcript line, the total stays
+    // under the cap so the drop path is not measured, and the stream
+    // draws the frame count the throughput names.
+    let streamed_lines = HISTORY_LINES + text.matches('\n').count() + 1;
+    let mut check = screen_with_history();
+    assert_eq!(check.lines(), HISTORY_LINES);
+    ingest(&mut check, &deltas);
+    assert_eq!(check.lines(), streamed_lines);
+    let mut check = screen_with_history();
+    assert_eq!(stream(&mut check, &deltas), FRAMES);
+    assert_eq!(check.lines(), streamed_lines);
+    drop(check);
+
     let mut screen = screen_with_history();
     group.bench_function("frame", |b| b.iter(|| screen.draw()));
-    assert_eq!(screen.lines(), HISTORY_LINES);
     drop(screen);
-
-    // Every streamed line lands as one transcript line, and the total
-    // stays under the cap, so the cap's drop path is not measured.
-    let streamed_lines = HISTORY_LINES + text.matches('\n').count() + 1;
 
     group.throughput(Throughput::Bytes(STREAM as u64));
     group.bench_function("ingest", |b| {
         b.iter_batched(
             screen_with_history,
             |mut screen| {
-                for delta in &deltas {
-                    screen.push_text(delta);
-                }
-                assert_eq!(screen.lines(), streamed_lines);
+                ingest(&mut screen, &deltas);
                 screen
             },
             BatchSize::LargeInput,
@@ -112,18 +140,7 @@ fn bench_render(c: &mut Criterion) {
         b.iter_batched(
             screen_with_history,
             |mut screen| {
-                let mut frames = 0;
-                for (index, delta) in deltas.iter().enumerate() {
-                    screen.push_text(delta);
-                    if index % DELTAS_PER_FRAME == DELTAS_PER_FRAME - 1 {
-                        screen.draw();
-                        frames += 1;
-                    }
-                }
-                screen.draw();
-                frames += 1;
-                assert_eq!(frames, FRAMES);
-                assert_eq!(screen.lines(), streamed_lines);
+                stream(&mut screen, &deltas);
                 screen
             },
             BatchSize::LargeInput,

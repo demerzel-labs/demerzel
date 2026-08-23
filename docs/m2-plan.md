@@ -283,27 +283,27 @@ A Layer-4 slice, pulled forward because it is the M2 exit criterion:
 - Replay a recorded session against each live provider twice. Report
   `cache_read_tokens / input_tokens` per turn and per session.
   Step-7 shape: `bench/cache/replay.py` replays the user side of one
-  session — a fixed list of six user turns over this repository —
-  through the real engine (`crates/demerzel/examples/cache_replay.rs`),
-  as two fresh sessions one after the other. The model side is live,
-  so the two sessions differ in what the model reads and how many
-  calls it makes; the numbers that compare across milestones are the
-  per-call ratios and the first call of the second session, not the
-  session totals. The engine advertises the full tool set in `ask`
-  mode with no approver — the prefix a real session sends — and only
-  the read tools run. The prompt list carries no machine paths.
-  `input_tokens` counts the cached parts for both providers, so the
-  ratio compares across them.
+  session, a fixed list of six user turns over this repository. It
+  runs them through the real engine
+  (`crates/demerzel/examples/cache_replay.rs`) as two fresh sessions,
+  one after the other. The model side is live, so the two sessions
+  differ in what the model reads and how many calls it makes. The
+  numbers that compare across milestones are the per-call ratios and
+  the first call of the second session, not the session totals. The
+  engine advertises the full tool set in `ask` mode with no approver,
+  the prefix a real session sends; only the read tools run. The
+  prompt list carries no machine paths. `input_tokens` counts the
+  cached parts for both providers, so the ratio compares across them.
 - Commit the raw JSON to `bench/results/` with the provenance
   envelope.
 - Add a render-throughput bench for the TUI (Layer 2). Step-7 shape:
   `crates/demerzel-tui/benches/render.rs` drives the transcript and
-  the frame renderer through a headless screen
-  (`demerzel_tui::bench::Screen`, hidden from the docs, not interface
-  contract) over a synthetic delta stream in process — the layout and
-  the buffer diff of the live interface, minus the terminal write.
-  The mock transport stays outside, so the number is render cost
-  alone. Three benches: one redraw, a 64 KiB text stream with no
+  the frame renderer through a headless screen over a synthetic delta
+  stream in process. The screen is `demerzel_tui::bench::Screen`,
+  hidden from the docs and not interface contract. The number is the
+  layout and the buffer diff of the live interface, minus the
+  terminal write; the mock transport stays outside, so it is render
+  cost alone. Three benches: one redraw, a 64 KiB text stream with no
   frames, and the stream with a frame per 64 deltas.
 - Measurement seams (evaluation-contract prework, see
   [`plan.md`](plan.md)): engine events and session records keep
@@ -432,9 +432,9 @@ Each step is one PR with its own verify line.
      provider's message cut at 1 KiB. A dropped turn future, a
      process exit mid-turn, and a session write failure write none,
      so a user turn without one was cut off. Readers skip the record,
-     so old binaries read new files. Wall time per turn is not in the
-     file — no record carries a clock — and stays the runner's to
-     measure, as it does for the cache bench.
+     so old binaries read new files. The file carries no clock beyond
+     the meta record's creation time, so wall time per turn stays the
+     runner's to measure, as it does for the cache bench.
   5. Cost: derived from the three usage parts and the model the meta
      record names. The harness carries no price table; prices change
      faster than releases, and the evaluation runner owns pricing.
@@ -449,13 +449,14 @@ Each step is one PR with its own verify line.
   87% and 90% for the `anthropic` adapter, and no Codex call read its
   predecessor's whole prompt. The Codex CLI sends a per-conversation
   key, and the endpoint's documented routing uses it. Proposed as its
-  own pull request, the first item of the M4 prefix-stability work
-  pulled forward because the receipt is in hand: add an optional
-  cache key to the neutral `Request` (additive; the struct is
-  non-exhaustive), let the engine fill it with the session id, send
-  it as `prompt_cache_key`, and rerun
-  `bench/cache/replay.py --provider openai-codex`. It touches the
-  provider contract, so it does not ride in step 7.
+  own pull request, the first item of the M4 prefix-stability work,
+  pulled forward because the receipt is in hand:
+  1. Add an optional cache key to the neutral `Request`. The struct
+     is non-exhaustive, so the field is additive.
+  2. Let the engine fill it with the session id.
+  3. Send it as `prompt_cache_key` from the `openai-codex` adapter.
+  4. Rerun `bench/cache/replay.py --provider openai-codex`.
+  It touches the provider contract, so it does not ride in step 7.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.

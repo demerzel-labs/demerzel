@@ -104,7 +104,7 @@ pub enum SessionRecord {
     /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
     /// the first five are the engine's turn outcomes by their
     /// `as_str` names, and `error` marks a provider failure, with the
-    /// message in `error`.
+    /// message in `error`, cut at 1 KiB.
     Turn {
         outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

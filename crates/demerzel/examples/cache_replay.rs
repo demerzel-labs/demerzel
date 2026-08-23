@@ -45,8 +45,8 @@ struct Args {
     prompts: Vec<String>,
 }
 
-/// Collects what one turn reports: usage per model call and the
-/// tools the turn ran.
+/// Collects what one turn reports: usage per model call and every
+/// tool call the turn made, declined ones included.
 #[derive(Default)]
 struct Trace {
     calls: Mutex<Vec<Usage>>,
