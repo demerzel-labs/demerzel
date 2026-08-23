@@ -75,8 +75,9 @@ own) is considered only if the bench suite shows ratatui as the bottleneck.
 
 Platforms: Linux and macOS are the supported targets. Platform-specific
 code stays POSIX, behind `cfg(unix)`. CI builds and tests both systems.
-The Linux-only tooling lives in `bench/` and is not part of the product.
-Windows is out of scope until a milestone names it.
+The `bench/` tooling measures on both platforms; the plan is
+[`bench-platforms.md`](bench-platforms.md). Windows is out of scope
+until a milestone names it.
 
 ### Edits: hash-anchored
 
@@ -229,6 +230,12 @@ the credibility fight by publishing all three.
   intervals (hyperfine defaults).
 - Same metric as the competition where comparison is claimed: PSS from
   `/proc/<pid>/smaps_rollup`, so numbers are comparable with jcode's.
+- Two reference machines, one Linux and one macOS, each with its own
+  receipts and trend line. Numbers never compare across operating
+  systems; each OS compares against competitors measured on the same
+  machine with the same metric. macOS memory uses physical footprint,
+  the metric Apple's tools report. The platform plan is
+  [`bench-platforms.md`](bench-platforms.md).
 
 ### Layer 1 — footprint and speed (the headline claims)
 
@@ -315,14 +322,25 @@ sections below carry the details.
 ### Targets
 
 Honest ordering: first beat the incumbent class, then chase jcode with
-profiling receipts.
+profiling receipts. The jcode bar is a Linux-PSS claim and gates the
+Linux track only. The macOS memory gates are provisional until the
+first macOS receipt calibrates them
+([`bench-platforms.md`](bench-platforms.md)).
 
-| Metric | Gate (M4 report) | Bar (jcode) |
-|---|---|---|
-| Boot to interactive | < 50 ms | 14 ms |
-| Single session PSS | < 40 MB | 27.8 MB |
-| Marginal session PSS | < 15 MB | ~9.9 MB |
-| Stripped binary | < 25 MB | — |
+| Metric | Linux gate | macOS gate | Bar (jcode, Linux) |
+|---|---|---|---|
+| Boot to interactive | < 50 ms | < 50 ms | 14 ms |
+| Single session memory | PSS < 40 MB | footprint < 60 MB, provisional | 27.8 MB |
+| Marginal session memory | PSS < 15 MB | footprint < 20 MB, provisional | ~9.9 MB |
+| Stripped binary | 25 MB budget | 25 MB budget | — |
+
+Binary size is a budget, not a wall (decided 2026-08-23). Function and
+measured performance never get cut only to stay under a size number.
+A change that grows the binary more than 10% lands with a
+`cargo-bloat` receipt naming what the bytes buy; crossing a budget
+needs the receipt plus a note in the active plan doc. The direction
+stays lightweight: the smaller dependency at equal function, lazy
+loading, measurement before addition.
 
 ---
 
