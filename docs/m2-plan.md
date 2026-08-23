@@ -9,10 +9,14 @@ M1 is complete (PR #16). Steps 1 to 6 are merged: the plan (PR #17),
 layered config and `doctor` (PR #18) with the platform statement
 (PR #19), the `anthropic` adapter (PR #20), `dmz login` (PR #23), the
 TUI foundation (PR #24), and TUI interaction (PR #25). CI hardening
-landed between steps (PR #26). Step 7, the measurement pass, is in
-review: the render-throughput bench, the cache-hit measurement for
-both providers, the turn record that closes the measurement seams,
-and the receipts in `bench/results/`.
+landed between steps (PR #26). Step 7, the measurement pass, is
+merged (PR #27): the render-throughput bench, the cache-hit
+measurement for both providers, the turn record that closes the
+measurement seams, and the receipts in `bench/results/`. The build
+order is complete. The close-out — the alignment review and the
+metrics receipt — is next. Then M2.5, the interface build-out
+([`m2.5-plan.md`](m2.5-plan.md)), runs before M3; theming moves
+there from M3.
 
 Exit criteria, checked at step 7:
 
@@ -100,8 +104,9 @@ commands (`/help`, `/model`, `/new` plus the M1 `/exit`), `doctor`,
 file-backed REPL history, cache-hit measurement.
 
 Out (deferred to the milestone in parentheses): skills, hooks, MCP,
-subagents, competitor-config discovery, theming, memory, personality
-(M3), per-role model routing and fallback chains (M3, with subagents),
+subagents, competitor-config discovery, memory, personality (M3),
+theming (M2.5), per-role model routing and fallback chains (M3, with
+subagents),
 compaction (M4), `openai-compat` adapter (post-M5, phase 1 of the
 local-model track in [`plan.md`](plan.md)), background-task
 mechanism (decision revisited at the end of M2; see the open question
@@ -460,8 +465,9 @@ Each step is one PR with its own verify line.
 - File-backed history default. The key exists in step 2; decide the
   default (on or off) after dogfood. Step 2 ships with `on` until
   then.
-- The REPL's long-term place once the TUI reaches parity. The working
-  assumption: `--plain` stays supported as the low-dependency path.
+- The REPL's long-term place once the TUI reaches parity — decided
+  in the M2.5 plan: `--plain` stays supported as the low-dependency
+  path and keeps its M2 behavior; presentation work is TUI-only.
 - Background tasks: revisit the open question at the end of M2 with
   TUI and config in hand; the mechanism itself is expected in M3.
 

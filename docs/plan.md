@@ -191,7 +191,7 @@ MEMORY.md pattern in Claude Code.
 - **MCP client** with deferred tool discovery: core tools in the prompt, the
   catalog behind a BM25 search tool.
 - **Subagents** returning typed, schema-validated results — no prose parsing.
-- **Theming** for the TUI.
+- **Theming** for the TUI (M2.5).
 - Deferred until proven necessary: a WASM plugin ABI. Subprocess hooks + MCP
   cover the extension surface without bloating the binary.
 
@@ -356,10 +356,24 @@ final-outcome fields. The full evaluation runner does not delay M2.
 **Verify:** TUI session parity with the REPL; cache-hit rate measured on a
 replayed session; config precedence tests.
 
+### M2.5 — Interface build-out
+
+The full-screen interface becomes the primary surface. It renders
+model output as formatted text with highlighted code. It shows
+thinking blocks that open and close, tool cards with status, duration,
+and output, and a live progress line. It takes multi-line input with
+command completion. Colors come from a theme with config keys, and a
+first-run screen greets a machine without credentials. The plain REPL
+stays the low-dependency fallback with its M2 behavior. The Layer-1
+gates and the render bench hold; the stripped binary stays under
+15 MB. Plan: [`m2.5-plan.md`](m2.5-plan.md). **Verify:** a dogfood
+session shows every element; a PTY scenario per element; the render
+bench inside its gates.
+
 ### M3 — Ecosystem
 
 Skills, hooks, MCP client with deferred discovery, subagents with typed
-results, competitor-config auto-discovery, theming, project memory (store,
+results, competitor-config auto-discovery, project memory (store,
 tools, auto-recall), and the personality profile. At the M3 exit, the
 evaluation runner foundation: the Harbor agent adapter, versioned candidate
 and scenario manifests, the evidence-bundle serializer, artifact and
