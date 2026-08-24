@@ -21,10 +21,12 @@
 //! the caller passes a byte cap and no row starts past it, so a block
 //! of rules, padded tables, or deep quotes cannot grow without bound.
 //! The render reports the cap, and the caller then shows the source as
-//! plain text. The face table has a cap of its own, a quarter of the
-//! row cap in entries — twice it in bytes — because a highlighted
-//! fence can change class at every byte. Past that cap the rest of
-//! the block keeps the code face and stays framed.
+//! plain text. The face table has a cap of its own on the entries a
+//! highlighted fence adds, because such a fence can change class at
+//! every byte: a quarter of the row cap in entries, twice it in
+//! bytes. Past that cap the rest of the block keeps the code face and
+//! stays framed. The two entries a row's prefix and face add sit
+//! under the row cap.
 //!
 //! The source is sanitized before it gets here, but the parser decodes
 //! character references, so control characters can come back; every
@@ -801,13 +803,13 @@ impl<'s> Renderer<'_, 's> {
         let line = std::mem::take(&mut self.line);
         let mut faces = std::mem::take(&mut self.line_faces);
         let room = self.face_cap.saturating_sub(self.out.faces.len());
+        let base = self.inline_face();
         if let Some(highlighter) = &mut self.highlighter
             && room > 0
         {
             // A code line: its classes replace the one face the text
             // arrived with, each over that face. Past the room left
             // under the face cap the rest of the line keeps the face.
-            let base = self.inline.last().copied().unwrap_or(Face::PLAIN);
             faces.clear();
             // A class every few bytes is the usual density; one
             // reserve covers the line instead of a chain of doublings.

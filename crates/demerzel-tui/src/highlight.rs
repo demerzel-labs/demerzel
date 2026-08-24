@@ -3,15 +3,18 @@
 //! languages. The fence label picks the language; a label outside
 //! the set gets no classes.
 //!
-//! The scanner is one linear pass over the bytes of each line, with
-//! one state that carries to the next line: inside a block comment,
-//! inside a string that runs on, or inside a fence of a markdown
-//! sample. It is a tokenizer, not a grammar: it knows where comments,
-//! strings, numbers, and words start and end, and it looks a word up
-//! in the language's keyword list. That covers what a reader scans a
-//! code sample for, at a few nanoseconds per byte on every frame that
-//! renders the block again. The tables are static: no load on the
-//! boot path, none on the first fence.
+//! Two scanners sit behind one type. The code scanner makes one
+//! linear pass over the bytes of each line under a language's rules,
+//! with one state that carries to the next line: inside a block
+//! comment, or inside a string that runs on. It is a tokenizer, not a
+//! grammar: it knows where comments, strings, numbers, and words
+//! start and end, and it looks a word up in the language's keyword
+//! list. The markdown scanner reads a markdown sample by its lines —
+//! headings, quotes, code spans, fences — and carries the open fence.
+//! Both cover what a reader scans a sample for, at a few nanoseconds
+//! per byte on every frame that renders the block again. The tables
+//! are static: no load on the boot path, none on the first fence. The
+//! caller widens tabs before the scan.
 //!
 //! The highlighter starts fresh at the top of each block. A block cut
 //! at the byte cap inside a fence continues in the next block with a
@@ -400,10 +403,10 @@ impl Highlighter {
     /// brace, where the info string's own conventions start:
     /// `rust,ignore`, `python {.numberLines}`.
     pub fn for_label(label: &str) -> Option<Self> {
-        let label = label
-            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '{')
-            .next()
-            .unwrap_or("");
+        let end = label
+            .find(|ch: char| ch.is_whitespace() || ch == ',' || ch == '{')
+            .unwrap_or(label.len());
+        let label = &label[..end];
         let lang = LABELS
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(label))
@@ -473,10 +476,12 @@ impl Code {
             self.state = State::Comment { depth: 1 };
             return at + 2;
         }
-        let quotes = !spec.quote_at_value || value_start(bytes, at);
-        if quotes
-            && (byte == b'"'
-                || (byte == b'\'' && spec.single != Single::None && spec.single != Single::Char))
+        // The value test runs only at a quote: its scan back over
+        // the spaces before one stops at the quote before that, so
+        // the line stays linear.
+        if (byte == b'"'
+            || (byte == b'\'' && spec.single != Single::None && spec.single != Single::Char))
+            && (!spec.quote_at_value || value_start(bytes, at))
         {
             let escapes = byte == b'"' || spec.single == Single::Str { escapes: true };
             return self.open_string(bytes, at, at, escapes, 0, out);
@@ -747,9 +752,12 @@ fn fence_run(rest: &[u8]) -> Option<(u8, usize)> {
 }
 
 /// Whether `at` is where a value starts: the line's start, or the
-/// first non-space after `:`, `-`, `,`, `[`, `{`.
+/// first non-blank after `:`, `-`, `,`, `[`, `{`.
 fn value_start(bytes: &[u8], at: usize) -> bool {
-    let before = bytes[..at].iter().rev().find(|&&byte| byte != b' ');
+    let before = bytes[..at]
+        .iter()
+        .rev()
+        .find(|&&byte| byte != b' ' && byte != b'\t');
     before.is_none_or(|byte| matches!(byte, b':' | b'-' | b',' | b'[' | b'{'))
 }
 
@@ -1083,7 +1091,7 @@ mod tests {
         // carry to the next line.
         let lines = classes(
             "yml",
-            "  MSG: it's fine\n  OTHER: 2\n- 'a'\nlist: [\"b\", 'c']",
+            "  MSG: it's fine\n  OTHER: 2\n- 'a'\nlist: [\"b\", 'c']\nk:\t'd'",
         );
         assert_eq!(lines[0], vec![(0, Plain)]);
         assert_eq!(lines[1], vec![(0, Plain), (9, Number)]);
@@ -1092,6 +1100,7 @@ mod tests {
             lines[3],
             vec![(0, Plain), (7, Str), (10, Plain), (12, Str), (15, Plain)]
         );
+        assert_eq!(lines[4], vec![(0, Plain), (3, Str)]);
         // A quoted scalar still runs across lines.
         let lines = classes("yaml", "key: \"one\ntwo\" tail");
         assert_eq!(lines[0], vec![(0, Plain), (5, Str)]);
