@@ -150,6 +150,18 @@ fn face_style(kind: Kind, face: Face) -> Style {
     if face.has(Face::CODE) {
         style = style.fg(Color::Cyan);
     }
+    if face.has(Face::KEYWORD) {
+        style = style.fg(Color::Magenta);
+    }
+    if face.has(Face::STRING) {
+        style = style.fg(Color::Green);
+    }
+    if face.has(Face::NUMBER) {
+        style = style.fg(Color::Yellow);
+    }
+    if face.has(Face::COMMENT) {
+        style = style.fg(Color::Reset).add_modifier(Modifier::DIM);
+    }
     if face.has(Face::LINK) {
         style = style.add_modifier(Modifier::UNDERLINED);
     }

@@ -17,6 +17,7 @@ mod app;
 #[doc(hidden)]
 pub mod bench;
 mod events;
+mod highlight;
 mod history;
 mod input;
 mod markdown;
