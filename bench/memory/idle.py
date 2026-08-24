@@ -60,6 +60,14 @@ def main() -> int:
         print(f"no binary at {args.bin} — run: cargo build --release", file=sys.stderr)
         return 1
 
+    if not harness.supports_proc_memory():
+        print(
+            "this platform has no per-process memory probe yet; the macOS "
+            "footprint probe is step 3 of docs/bench-platforms.md",
+            file=sys.stderr,
+        )
+        return 1
+
     with tempfile.TemporaryDirectory(prefix="demerzel-bench-") as data_home:
         harness.write_auth_fixture(data_home)
         env = harness.bench_env(data_home)
@@ -78,11 +86,7 @@ def main() -> int:
             "stats_kb": {metric: harness.stats(values) for metric, values in samples.items()},
         }
     )
-    out_path = args.out or os.path.join(
-        harness.REPO_ROOT,
-        "bench/results",
-        f"memory-idle-{report['date']}-{report['git_rev']}.json",
-    )
+    out_path = args.out or harness.result_path("memory-idle")
     harness.write_report(out_path, report)
     anon = report["stats_kb"]["anonymous_kb"]["median"]
     pss_median = report["stats_kb"]["pss_kb"]["median"]

@@ -17,19 +17,29 @@ Spawn notes:
   to raw mode.
 """
 
-import ctypes
 import fcntl
 import glob
 import json
-import mmap
 import os
+import platform
 import select
 import signal
 import statistics
 import struct
 import subprocess
+import sys
 import termios
 import time
+
+# The native probe layer: page-cache reads, eviction, machine-spec
+# fields. Everything platform-specific lives behind this import, and
+# callers reach it only through the wrappers below.
+if sys.platform == "linux":
+    import platform_linux as _native
+elif sys.platform == "darwin":
+    import platform_macos as _native
+else:
+    raise ImportError(f"the bench suite supports Linux and macOS, not {sys.platform}")
 
 READY_MARKER = b"demerzel ready"
 # No trailing space: the full-screen interface draws the prompt cell
@@ -71,16 +81,59 @@ def git_dirty() -> bool:
     return bool(_git("status", "--porcelain", "-uno", "--", ".", ":(exclude)bench/results"))
 
 
+def os_slug() -> str:
+    """The OS-arch slug in result-file names, e.g. `linux-x86_64`,
+    `macos-aarch64`. Two reference machines produce receipts, so the
+    name must say which one. The arch is the interpreter's: a Rosetta
+    Python would mislabel the receipt, so run a native one."""
+    os_name = {"linux": "linux", "darwin": "macos"}[sys.platform]
+    arch = platform.machine()
+    if arch == "arm64":
+        arch = "aarch64"
+    return f"{os_name}-{arch}"
+
+
 def base_report(benchmark: str, bin_path: str) -> dict:
     """The envelope every result file shares."""
+    date = time.strftime("%Y-%m-%d")
+    slug = os_slug()
     return {
         "benchmark": benchmark,
         "bin": os.path.relpath(bin_path, REPO_ROOT),
         "git_rev": git_rev(),
         "git_dirty": git_dirty(),
-        "date": time.strftime("%Y-%m-%d"),
-        "machine": f"machine-{time.strftime('%Y-%m-%d')}.json",
+        "date": date,
+        "os": slug,
+        "machine": f"machine-{date}-{slug}.json",
     }
+
+
+def result_path(prefix: str) -> str:
+    """The one result-name template:
+    `bench/results/<prefix>-<date>-<rev>-<slug>.json`. Every script
+    builds its output path here, so the name and the envelope agree."""
+    name = f"{prefix}-{time.strftime('%Y-%m-%d')}-{git_rev()}-{os_slug()}.json"
+    return os.path.join(REPO_ROOT, "bench", "results", name)
+
+
+def filesystem(path: str) -> str:
+    """The filesystem type that holds `path`, via the native probe."""
+    return _native.filesystem(path)
+
+
+def machine_fields() -> dict:
+    """The platform entries of the machine spec."""
+    return _native.machine_fields(REPO_ROOT)
+
+
+def supports_evict() -> bool:
+    """Whether this platform has verified page-cache eviction."""
+    return _native.SUPPORTS_EVICT
+
+
+def supports_proc_memory() -> bool:
+    """Whether this platform has the per-process memory probe."""
+    return _native.SUPPORTS_PROC_MEMORY
 
 
 def bench_env(data_home: str) -> dict[str, str]:
@@ -294,51 +347,18 @@ def spawn_floor_ms(env: dict[str, str], runs: int = 10) -> dict:
     return {"runs": runs, **stats(samples)}
 
 
-_libc = ctypes.CDLL("libc.so.6", use_errno=True)
-
-
-def resident_pages(path: str) -> int:
-    """Pages of `path` in the page cache, via mincore. The mapping is
-    read-only and unmapped before return, so it does not pin pages."""
-    size = os.path.getsize(path)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        # MAP_PRIVATE read-write: ctypes.from_buffer needs a writable
-        # buffer to take the address. Nothing writes to the mapping,
-        # so no page is copied and mincore sees the file pages.
-        mapped = mmap.mmap(
-            fd, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ | mmap.PROT_WRITE
-        )
-    finally:
-        os.close(fd)
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        pages = (size + page - 1) // page
-        vec = (ctypes.c_ubyte * pages)()
-        buf = (ctypes.c_char * size).from_buffer(mapped)
-        rc = _libc.mincore(
-            ctypes.c_void_p(ctypes.addressof(buf)), ctypes.c_size_t(size), vec
-        )
-        del buf
-        if rc != 0:
-            raise OSError(ctypes.get_errno(), "mincore failed")
-        return sum(v & 1 for v in vec)
-    finally:
-        mapped.close()
-
-
 def evict_verified(path: str, attempts: int = 6) -> None:
     """Evict `path` from the page cache and verify with mincore.
-    One fadvise is advisory and often leaves recently referenced
-    pages resident; retry until zero pages remain."""
+    One eviction attempt is advisory and often leaves recently
+    referenced pages resident; retry until zero pages remain. On a
+    platform without eviction (`supports_evict` is false) the first
+    attempt raises with the reason. The retry loop fits an advisory
+    per-file eviction; a global mechanism (the step-4 macOS decision)
+    must replace the loop, not ride it."""
     resident = -1
     for _ in range(attempts):
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-        finally:
-            os.close(fd)
-        resident = resident_pages(path)
+        _native.evict_once(path)
+        resident = _native.resident_pages(path)
         if resident == 0:
             return
         time.sleep(0.02)

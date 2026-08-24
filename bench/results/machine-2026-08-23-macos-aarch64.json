@@ -1,0 +1,17 @@
+{
+  "cpu": "Apple M2 Pro",
+  "mem_total_kb": 16777216,
+  "distro": "macOS 26.5.2 (25F84)",
+  "filesystem": "apfs",
+  "power_source": "AC Power",
+  "low_power_mode": "0",
+  "thermal_state": "nominal",
+  "date": "2026-08-23",
+  "os": "macos-aarch64",
+  "cores": 12,
+  "kernel": "25.5.0",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26) (Homebrew)",
+  "binary_bytes": 6705152,
+  "git_rev": "81e5843",
+  "git_dirty": false
+}

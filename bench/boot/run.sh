@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 command -v hyperfine >/dev/null 2>&1 || {
-    echo "hyperfine is required (Arch: pacman -S hyperfine)" >&2
+    echo "hyperfine is required (Arch: pacman -S hyperfine; macOS: brew install hyperfine)" >&2
     exit 1
 }
 
@@ -15,7 +15,9 @@ BIN="${BIN:-target/release/demerzel}"
     exit 1
 }
 
-OUT="bench/results/boot-$(date +%F)-$(git rev-parse --short HEAD).json"
+# The result path comes from the shared template, so the name and
+# the envelope agree.
+OUT="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; print(harness.result_path("boot"))')"
 # -N: no shell between hyperfine and the binary; the command is
 # sub-5 ms and shell startup would blur it.
 hyperfine -N --warmup 5 --runs "${RUNS:-50}" --export-json "$OUT" "$BIN --version"

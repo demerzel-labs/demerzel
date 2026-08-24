@@ -9,15 +9,15 @@ cd "$(dirname "$0")/../.."
 START=$(date +%s)
 cargo bench -p demerzel-tui --bench render
 
-OUT="bench/results/render-$(date +%F)-$(git rev-parse --short HEAD).json"
-python3 - "$OUT" "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
+python3 - "${CARGO_TARGET_DIR:-target}" "$START" <<'EOF'
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.getcwd(), "bench"))
 import harness
 
-out, target, start = sys.argv[1], sys.argv[2], float(sys.argv[3])
+target, start = sys.argv[1], float(sys.argv[2])
+out = harness.result_path("render")
 report = harness.base_report("render-throughput-headless", "target/release/demerzel")
 report["bin"] = "cargo bench -p demerzel-tui --bench render"
 report["screen"] = {"width": 120, "height": 40, "history_lines": 200}
@@ -35,5 +35,5 @@ report["benches"] = harness.criterion_benches(target, group="render", since=star
 if not report["benches"]:
     sys.exit(f"no criterion estimates under {target}/criterion/render")
 harness.write_report(out, report)
+print(f"raw data: {out}")
 EOF
-echo "raw data: $OUT"
