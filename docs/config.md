@@ -61,17 +61,20 @@ A top-level `effort` applies to any provider.
 
 `effort` sets how hard the model reasons on each request. The Codex
 adapter sends it as `reasoning.effort`. The Anthropic adapter sends
-it as `output_config.effort`, next to adaptive thinking. Unknown
-keys warn on stderr and do not stop the run.
+it as `output_config.effort`, next to adaptive thinking. The level
+goes on every request, so a model that does not accept the field
+refuses the call; the current models accept it. Unknown keys warn on
+stderr and do not stop the run.
 
 `/effort [low|medium|high]` shows or sets the level for the session.
-Each `meta` record in the session file names the effort in force,
-so a resumed session and an evaluation run can pin it.
+Each `meta` record in the session file names the effort in force, so
+a reader can tell what a run used. A resumed session takes its level
+from config, not from the file.
 
 ## Trust rules
 
 A project file travels with the repository, so it cannot raise
-privilege, move credentials, or raise spend:
+privilege, move credentials, or raise cost:
 
 - It cannot raise `approval` above the user file's mode, or above
   `ask`.

@@ -43,9 +43,9 @@ use crate::provider::Effort;
 /// Version of the session-file schema, written into every meta record.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The metadata record that opens every session file. A resume and a
-/// model switch append a fresh one, so the last meta record describes
-/// the current run.
+/// The metadata record that opens every session file. A resume, a
+/// model switch, and an effort switch append a fresh one, so the last
+/// meta record describes the current run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub schema: u32,

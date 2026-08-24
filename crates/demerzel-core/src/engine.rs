@@ -400,13 +400,15 @@ impl<'a> Engine<'a> {
     /// Set the reasoning effort for the requests that follow. A fresh
     /// meta record names it, the way a model switch leaves its trail.
     pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
-        self.config.effort = Some(effort);
+        // The record first, the switch second: a failed write leaves
+        // the engine where the interface still believes it is.
         self.session.append_meta(&SessionMeta::now(
             self.session.cwd(),
             self.provider.id(),
             &self.config.model,
-            self.config.effort,
+            Some(effort),
         ))?;
+        self.config.effort = Some(effort);
         Ok(())
     }
 
