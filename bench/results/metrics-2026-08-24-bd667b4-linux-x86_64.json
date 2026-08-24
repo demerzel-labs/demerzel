@@ -1,0 +1,119 @@
+{
+  "benchmark": "metrics",
+  "bin": "target/release/demerzel",
+  "git_rev": "bd667b4",
+  "git_dirty": false,
+  "date": "2026-08-24",
+  "os": "linux-x86_64",
+  "machine": "machine-2026-08-24-linux-x86_64.json",
+  "crates": {
+    "demerzel": {
+      "lines": 3682,
+      "pub_items": 45
+    },
+    "demerzel-core": {
+      "lines": 3254,
+      "pub_items": 73
+    },
+    "demerzel-mock": {
+      "lines": 481,
+      "pub_items": 22
+    },
+    "demerzel-providers": {
+      "lines": 2649,
+      "pub_items": 56
+    },
+    "demerzel-tools": {
+      "lines": 3008,
+      "pub_items": 24
+    },
+    "demerzel-tui": {
+      "lines": 2544,
+      "pub_items": 56
+    }
+  },
+  "lines_total": 15618,
+  "pub_items_total": 276,
+  "external_deps": [
+    "axum",
+    "base64",
+    "clap",
+    "criterion",
+    "futures-core",
+    "getrandom",
+    "globset",
+    "grep-regex",
+    "grep-searcher",
+    "humantime",
+    "ignore",
+    "libc",
+    "ratatui",
+    "reqwest",
+    "rustyline",
+    "serde",
+    "serde_json",
+    "sha2",
+    "tempfile",
+    "thiserror",
+    "tokio",
+    "toml",
+    "unicode-width"
+  ],
+  "external_dep_count": 23,
+  "binary_bytes": 7864672,
+  "contracts": {
+    "provider_trait": [
+      "id",
+      "capabilities",
+      "stream"
+    ],
+    "engine_events": [
+      "TextDelta",
+      "ReasoningDelta",
+      "ToolStart",
+      "ToolRun",
+      "ToolEnd",
+      "ModelUsage"
+    ],
+    "tools": [
+      "read",
+      "edit",
+      "create",
+      "bash",
+      "grep",
+      "glob"
+    ],
+    "config_keys": [
+      "approval",
+      "ask",
+      "auto",
+      "base_url",
+      "history_file",
+      "model",
+      "provider",
+      "providers"
+    ],
+    "cli_fields": [
+      "prompt",
+      "continue_last",
+      "plain",
+      "provider",
+      "model",
+      "base_url",
+      "auto",
+      "read_only"
+    ],
+    "cli_subcommands": [
+      "Doctor",
+      "Login"
+    ]
+  },
+  "contract_counts": {
+    "provider_trait": 3,
+    "engine_events": 6,
+    "tools": 6,
+    "config_keys": 8,
+    "cli_fields": 8,
+    "cli_subcommands": 2
+  }
+}
