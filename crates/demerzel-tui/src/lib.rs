@@ -19,6 +19,7 @@ pub mod bench;
 mod events;
 mod history;
 mod input;
+mod markdown;
 mod render;
 mod terminal;
 mod transcript;
@@ -85,6 +86,9 @@ pub struct Options {
     /// Capture the mouse, so the wheel scrolls the transcript. On by
     /// default; off, the terminal keeps its own text selection.
     pub mouse: bool,
+    /// Render model replies as markdown. On by default; off shows the
+    /// raw text, for copying.
+    pub markdown: bool,
 }
 
 impl Default for Options {
@@ -95,6 +99,7 @@ impl Default for Options {
             model: String::new(),
             mode: String::new(),
             mouse: true,
+            markdown: true,
         }
     }
 }

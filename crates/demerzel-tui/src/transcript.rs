@@ -2,13 +2,17 @@
 //!
 //! A block is one unit of the session: a prompt echo, one streamed
 //! model reply segment, one reasoning segment, a tool call, a notice,
-//! or an error. Each block owns a layout cache: its wrapped rows at
-//! the last width, as byte offsets into its text. The renderer walks
-//! blocks from the bottom until the viewport is full, so a long
-//! session pays for its window, not its history. A streamed delta
-//! touches only the open block, and that block's layout catches up
-//! from its last row, not from its start: a wrap break depends only
-//! on the text before it, so the rows already laid out stay valid.
+//! or an error. Each block owns a layout cache: its styled rows at
+//! the last width. A plain block keeps its rows as byte offsets into
+//! its text. A model reply renders as markdown into a buffer of its
+//! own, with the rows and the face changes over that buffer. The
+//! renderer walks blocks from the bottom until the viewport is full,
+//! so a long session pays for its window, not its history. A streamed
+//! delta touches only the open block. A plain block's layout catches
+//! up from its last row, not from its start: a wrap break depends
+//! only on the text before it, so the rows already laid out stay
+//! valid. A markdown block renders again whole: a delta can close a
+//! fence or an emphasis that opened rows earlier.
 //!
 //! Two caps bound memory and per-frame work. The block count cap
 //! drops the oldest blocks. The per-block byte cap closes a block that
@@ -27,6 +31,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
+use crate::markdown::{self, Face, Target};
 use crate::wrap::row_starts;
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
@@ -36,8 +41,10 @@ const MAX_BLOCKS: usize = 2_000;
 /// and the stream continues in a new block; a pushed block splits.
 pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
 
-// Row starts are `u16` offsets into a block's text.
-const _: () = assert!(MAX_BLOCK_BYTES <= u16::MAX as usize + 1);
+/// Byte cap for the rendered rows of one markdown block. Prefixes,
+/// frames, and table padding grow the rows past the source; a block
+/// whose render would cross the cap shows as plain text instead.
+pub(crate) const MAX_RENDER_BYTES: usize = 4 * MAX_BLOCK_BYTES;
 
 /// What a block is. Kinds map to terminal-native styles until the
 /// theme lands.
@@ -58,19 +65,27 @@ pub enum Kind {
     Error,
 }
 
-/// The wrapped rows of one block at one width.
+/// The rows of one block at one width.
 #[derive(Debug, Default)]
 struct Layout {
     /// The width the rows hold for; zero before the first layout.
     width: u16,
-    /// Byte offset where each row starts. A row ends where the next
-    /// row starts, less the newline that ended its logical line.
-    rows: Vec<u16>,
-    /// Rows that stay valid when text is appended: all but the last
-    /// row, because a wrap break depends only on the text before it.
+    /// Byte offset where each row starts, into `rendered` when the
+    /// block rendered as markdown, else into the text. A row ends
+    /// where the next row starts, less the newline that ended its
+    /// logical line.
+    rows: Vec<u32>,
+    /// Face changes as `(offset, face)`, sorted; a face holds until
+    /// the next change. Empty for a plain layout.
+    faces: Vec<(u32, Face)>,
+    /// The markdown rows' text. `None` for a plain layout.
+    rendered: Option<String>,
+    /// Plain layout: rows that stay valid when text is appended, all
+    /// but the last row, because a wrap break depends only on the
+    /// text before it.
     stable: usize,
-    /// Byte offset where the last row starts; the point a sync lays
-    /// out from.
+    /// Plain layout: byte offset where the last row starts; the point
+    /// a sync lays out from.
     tail: usize,
     /// Text arrived since the rows were laid out.
     dirty: bool,
@@ -109,29 +124,60 @@ impl Block {
         self.layout.width != 0
     }
 
-    /// Bring the rows up to date at `width`. Returns the change in the
-    /// row count since the last sync at this width: every row for a
-    /// block laid out for the first time, zero for a layout at a new
-    /// width, where a row count means nothing.
-    pub(crate) fn sync(&mut self, width: u16) -> isize {
+    /// Bring the rows up to date at `width`, a model reply as markdown
+    /// when `markdown` is set. The flag holds for a transcript's whole
+    /// life, so a block is always laid out one way. Returns the change
+    /// in the row count since the last sync at this width: every row
+    /// for a block laid out for the first time, zero for a layout at
+    /// a new width, where a row count means nothing.
+    pub(crate) fn sync(&mut self, width: u16, markdown: bool) -> isize {
         debug_assert!(width > 0, "zero width is the never-laid-out mark");
+        let markdown = markdown && self.kind == Kind::Text;
         if self.layout.width != width {
             let first = !self.laid();
             self.layout.width = width;
-            self.layout.rows.clear();
-            self.lay_out_from(0);
-            self.layout.dirty = false;
+            self.lay_out_whole(markdown);
             return if first { row_delta(0, self.rows()) } else { 0 };
         }
         if !self.layout.dirty {
             return 0;
         }
         let before = self.rows();
-        self.layout.rows.truncate(self.layout.stable);
-        let tail = self.layout.tail;
-        self.lay_out_from(tail);
-        self.layout.dirty = false;
+        if markdown {
+            self.lay_out_whole(true);
+        } else {
+            self.layout.rows.truncate(self.layout.stable);
+            let tail = self.layout.tail;
+            self.lay_out_from(tail);
+            self.layout.dirty = false;
+        }
         row_delta(before, self.rows())
+    }
+
+    /// Lay every row out again: as markdown when asked and the render
+    /// stays inside its cap, else as plain text.
+    fn lay_out_whole(&mut self, markdown: bool) {
+        let layout = &mut self.layout;
+        layout.rows.clear();
+        layout.faces.clear();
+        if markdown {
+            let text = layout.rendered.get_or_insert_with(String::new);
+            text.clear();
+            let target = Target {
+                text,
+                rows: &mut layout.rows,
+                faces: &mut layout.faces,
+            };
+            if markdown::render(&self.text, layout.width, MAX_RENDER_BYTES, target) {
+                layout.dirty = false;
+                return;
+            }
+            layout.rows.clear();
+            layout.faces.clear();
+        }
+        layout.rendered = None;
+        self.lay_out_from(0);
+        self.layout.dirty = false;
     }
 
     /// Wrap the text from byte `from` — a row start — and append the
@@ -153,10 +199,10 @@ impl Block {
                 break;
             }
             row_starts(line, layout.width, |offset| {
-                layout.rows.push((start + offset) as u16);
+                layout.rows.push((start + offset) as u32);
             });
             layout.stable = layout.rows.len() - 1;
-            layout.tail = usize::from(layout.rows[layout.stable]);
+            layout.tail = layout.rows[layout.stable] as usize;
             match next {
                 Some(next) => start = next,
                 None => break,
@@ -169,16 +215,58 @@ impl Block {
         self.layout.rows.len()
     }
 
-    /// One row at the synced width.
-    pub(crate) fn row(&self, index: usize) -> &str {
-        let start = usize::from(self.layout.rows[index]);
+    /// The text the rows index: the rendered buffer or the source.
+    fn buffer(&self) -> &str {
+        self.layout.rendered.as_deref().unwrap_or(&self.text)
+    }
+
+    /// One row at the synced width, and where it starts in the buffer.
+    fn row_at(&self, index: usize) -> (usize, &str) {
+        let buffer = self.buffer();
+        let start = self.layout.rows[index] as usize;
         let end = self
             .layout
             .rows
             .get(index + 1)
-            .map_or(self.text.len(), |&next| usize::from(next));
-        let row = &self.text[start..end];
-        row.strip_suffix('\n').unwrap_or(row)
+            .map_or(buffer.len(), |&next| next as usize);
+        let row = &buffer[start..end];
+        (start, row.strip_suffix('\n').unwrap_or(row))
+    }
+
+    /// One row at the synced width.
+    pub(crate) fn row(&self, index: usize) -> &str {
+        self.row_at(index).1
+    }
+
+    /// Whether every row is one span in the block's own style.
+    pub(crate) fn plain(&self) -> bool {
+        self.layout.faces.is_empty()
+    }
+
+    /// One row at the synced width as its spans, in order.
+    pub(crate) fn spans<'b>(&'b self, index: usize, mut span: impl FnMut(Face, &'b str)) {
+        let (from, row) = self.row_at(index);
+        let faces = &self.layout.faces;
+        let mut next = faces.partition_point(|&(at, _)| at as usize <= from);
+        let mut face = if next == 0 {
+            Face::Plain
+        } else {
+            faces[next - 1].1
+        };
+        let mut at = 0usize;
+        while next < faces.len() && (faces[next].0 as usize) < from + row.len() {
+            let (change, new) = faces[next];
+            let change = change as usize - from;
+            if change > at {
+                span(face, &row[at..change]);
+            }
+            face = new;
+            at = change;
+            next += 1;
+        }
+        if at < row.len() || at == 0 {
+            span(face, &row[at..]);
+        }
     }
 
     /// Append streamed text. The rows catch up at the next sync.
@@ -219,6 +307,8 @@ fn row_delta(before: usize, after: usize) -> isize {
 
 /// The scrollable session log.
 pub struct Transcript {
+    /// Render model replies as markdown; off shows the raw text.
+    markdown: bool,
     blocks: VecDeque<Block>,
     /// Blocks dropped from the front, so absolute block indices stay
     /// stable.
@@ -239,8 +329,9 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    pub fn new() -> Self {
+    pub fn new(markdown: bool) -> Self {
         Self {
+            markdown,
             blocks: VecDeque::new(),
             dropped: 0,
             open: None,
@@ -253,6 +344,11 @@ impl Transcript {
 
     pub fn blocks(&self) -> impl DoubleEndedIterator<Item = &Block> + ExactSizeIterator {
         self.blocks.iter()
+    }
+
+    /// Whether model replies render as markdown.
+    pub(crate) fn markdown(&self) -> bool {
+        self.markdown
     }
 
     pub(crate) fn blocks_mut(
@@ -390,7 +486,7 @@ impl Transcript {
                 let new = self.dropped + offset >= self.frame_end;
                 let laid = block.laid();
                 let before = block.rows();
-                let change = block.sync(width);
+                let change = block.sync(width, self.markdown);
                 if new || laid {
                     delta += change;
                 }
@@ -474,11 +570,19 @@ mod tests {
         t.blocks().map(|b| (b.kind, b.text())).collect()
     }
 
+    /// A transcript that shows every kind as plain text: the layout
+    /// mechanics under test hold for both modes, and plain rows are
+    /// the ones that read as their text.
+    fn plain() -> Transcript {
+        Transcript::new(false)
+    }
+
     /// Every row of every block, laid out at `width`.
     fn rows(t: &mut Transcript, width: u16) -> Vec<String> {
+        let markdown = t.markdown();
         let mut out = Vec::new();
         for block in t.blocks_mut() {
-            block.sync(width);
+            block.sync(width, markdown);
             for index in 0..block.rows() {
                 out.push(block.row(index).to_string());
             }
@@ -507,7 +611,7 @@ mod tests {
 
     #[test]
     fn deltas_of_one_kind_extend_the_open_block() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "hel");
         t.push_delta(Kind::Text, "lo\nworld");
         assert_eq!(blocks(&t), vec![(Kind::Text, "hello\nworld")]);
@@ -516,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_kind_switch_opens_a_new_block() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Reasoning, "thinking");
         t.push_delta(Kind::Text, "answer");
         assert_eq!(
@@ -527,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_trailing_newline_opens_no_empty_row() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "done\n");
         assert_eq!(rows(&mut t, 80), vec!["done"]);
         t.push_delta(Kind::Text, "next");
@@ -539,7 +643,7 @@ mod tests {
 
     #[test]
     fn a_pushed_block_interrupts_a_stream_and_the_stream_reopens() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "strea");
         t.push_line(Kind::Notice, "note");
         t.push_delta(Kind::Text, "med");
@@ -555,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_pushed_block_keeps_its_lines_together() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_line(Kind::Notice, "one\ntwo");
         assert_eq!(t.blocks().len(), 1);
         assert_eq!(rows(&mut t, 80), vec!["one", "two"]);
@@ -572,7 +676,7 @@ mod tests {
                     and keeps going without a newline so the layout must resume from a row, \
                     not a line, 日本語の文字 included\n";
         for width in [5u16, 12, 33, 80] {
-            let mut t = Transcript::new();
+            let mut t = plain();
             let mut whole = String::new();
             let mut cut = 0;
             let mut step = 1;
@@ -596,19 +700,19 @@ mod tests {
 
     #[test]
     fn a_sync_lays_out_from_the_last_row_not_the_last_line() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "one two three four five six");
         rows(&mut t, 8);
         let block = t.blocks_mut().next_back().unwrap();
         assert_eq!(block.rows(), 4);
         // Every row but the last stays; the sync resumes at the last.
         assert_eq!(block.layout.stable, 3);
-        assert_eq!(block.layout.tail, usize::from(block.layout.rows[3]));
+        assert_eq!(block.layout.tail, block.layout.rows[3] as usize);
     }
 
     #[test]
     fn a_width_change_lays_the_block_out_again() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "one two three");
         assert_eq!(rows(&mut t, 80), vec!["one two three"]);
         assert_eq!(rows(&mut t, 8), vec!["one two ", "three"]);
@@ -618,29 +722,29 @@ mod tests {
 
     #[test]
     fn sync_reports_the_rows_a_change_added_or_removed() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "one");
         let block = t.blocks_mut().next_back().unwrap();
-        assert_eq!(block.sync(8), 1, "a first layout counts every row");
+        assert_eq!(block.sync(8, false), 1, "a first layout counts every row");
         assert!(block.clean(8));
-        assert_eq!(block.sync(8), 0);
+        assert_eq!(block.sync(8, false), 0);
         // A new width lays out again and counts nothing.
-        assert_eq!(block.sync(2), 0);
+        assert_eq!(block.sync(2, false), 0);
         assert_eq!(block.rows(), 2);
-        assert_eq!(block.sync(8), 0);
+        assert_eq!(block.sync(8, false), 0);
         t.push_delta(Kind::Text, " two three\nfour");
         let block = t.blocks_mut().next_back().unwrap();
         assert!(!block.clean(8));
-        assert_eq!(block.sync(8), 2);
-        assert_eq!(block.sync(8), 0);
+        assert_eq!(block.sync(8, false), 2);
+        assert_eq!(block.sync(8, false), 0);
         // A rewrite to fewer rows reports the loss.
         block.set_text("ok".into());
-        assert_eq!(block.sync(8), -2);
+        assert_eq!(block.sync(8, false), -2);
     }
 
     #[test]
     fn tool_blocks_update_in_place() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "bash");
         t.push_delta(Kind::Text, "meanwhile");
         t.tool_end("call_1", "bash: ok", false);
@@ -652,7 +756,7 @@ mod tests {
 
     #[test]
     fn a_failed_tool_block_gets_the_error_mark() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "edit");
         t.tool_end("call_1", "stale tag", true);
         assert_eq!(blocks(&t), vec![(Kind::Tool, "✗ stale tag")]);
@@ -660,14 +764,14 @@ mod tests {
 
     #[test]
     fn an_unknown_call_id_appends_instead() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_end("ghost", "late result", false);
         assert_eq!(blocks(&t), vec![(Kind::Tool, "· late result")]);
     }
 
     #[test]
     fn a_tool_update_lays_its_rows_out_again() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "bash");
         assert_eq!(rows(&mut t, 80), vec!["· bash …"]);
         t.tool_end("call_1", "bash: exit 0 after a long summary", false);
@@ -679,7 +783,7 @@ mod tests {
 
     #[test]
     fn the_cap_drops_old_blocks_and_tool_updates_survive() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "bash");
         for i in 0..MAX_BLOCKS {
             t.push_line(Kind::Text, &format!("line {i}"));
@@ -693,7 +797,7 @@ mod tests {
 
     #[test]
     fn a_block_at_the_byte_cap_closes_and_the_stream_continues() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, &"x".repeat(MAX_BLOCK_BYTES));
         t.push_delta(Kind::Text, "overflow");
         let all: Vec<_> = t.blocks().collect();
@@ -708,7 +812,7 @@ mod tests {
     #[test]
     fn oversized_blocks_split_at_the_cap_on_every_path() {
         // One pushed block, as a pasted prompt echoes it.
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_line(Kind::Prompt, &"é".repeat(MAX_BLOCK_BYTES));
         assert!(t.blocks().len() >= 2);
         let joined: String = t.blocks().map(|b| b.text()).collect();
@@ -718,7 +822,7 @@ mod tests {
         }
 
         // One giant delta onto an open block.
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "start");
         t.push_delta(Kind::Text, &"y".repeat(2 * MAX_BLOCK_BYTES));
         for block in t.blocks() {
@@ -733,9 +837,9 @@ mod tests {
         // Each block owns an allocation of its own size: no block
         // keeps the buffer of the whole paste.
         let paste = "a line of pasted text\n".repeat(50_000);
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_line(Kind::Prompt, &paste);
-        let mut t2 = Transcript::new();
+        let mut t2 = plain();
         t2.push_delta(Kind::Text, "start");
         t2.push_delta(Kind::Text, &paste);
         for block in t.blocks().chain(t2.blocks()) {
@@ -750,7 +854,7 @@ mod tests {
 
     #[test]
     fn close_marks_unanswered_calls_as_interrupted_and_forgets_them() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "bash");
         t.close();
         // The pending block claims interruption, never absence: the
@@ -763,14 +867,14 @@ mod tests {
 
     #[test]
     fn tool_lines_sanitize_a_hostile_tool_name_on_every_path() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "ba\x1b[2Jsh\nSECOND");
         assert_eq!(rows(&mut t, 80), vec!["· ba[2Jsh SECOND …"]);
         t.close();
         let last = t.blocks().last().unwrap();
         assert_eq!(last.text(), "✗ ba[2Jsh SECOND: interrupted");
         // A name past the cap stays one block, so the update finds it.
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_2", &"n".repeat(2 * MAX_BLOCK_BYTES));
         t.tool_end("call_2", "ok", false);
         assert_eq!(blocks(&t), vec![(Kind::Tool, "· ok")]);
@@ -778,7 +882,7 @@ mod tests {
 
     #[test]
     fn close_leaves_answered_calls_alone() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("call_1", "bash");
         t.tool_end("call_1", "bash: ok", false);
         t.close();
@@ -787,17 +891,17 @@ mod tests {
 
     #[test]
     fn control_characters_never_reach_a_block() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_delta(Kind::Text, "a\x1b[31mred\tdone\r");
         assert_eq!(blocks(&t), vec![(Kind::Text, "a[31mred    done")]);
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_line(Kind::Notice, "a\x1b[31mred\tdone\r");
         assert_eq!(blocks(&t), vec![(Kind::Notice, "a[31mred    done")]);
     }
 
     #[test]
     fn a_browsing_view_stays_put_when_rows_arrive() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         for i in 0..10 {
             t.push_line(Kind::Text, &format!("line {i}"));
         }
@@ -822,7 +926,7 @@ mod tests {
     fn a_rewritten_block_below_the_viewport_top_moves_the_anchor() {
         // A tool block behind a clean notice grows: the walk reaches
         // it, and the rows it gained keep the view in place.
-        let mut t = Transcript::new();
+        let mut t = plain();
         for i in 0..20 {
             t.push_line(Kind::Text, &format!("line {i:02}"));
         }
@@ -839,7 +943,7 @@ mod tests {
         assert_eq!(t.scroll(), 4);
 
         // A block that shrinks reports the loss.
-        let mut t = Transcript::new();
+        let mut t = plain();
         for i in 0..20 {
             t.push_line(Kind::Text, &format!("line {i:02}"));
         }
@@ -860,14 +964,14 @@ mod tests {
     fn blocks_above_the_viewport_leave_the_anchor_alone() {
         // A tool call at the top, then a long history: the first
         // frame lays out only what it shows.
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.tool_start("c1", "bash");
         for i in 0..30 {
             t.push_line(Kind::Text, &format!("line {i:02}"));
         }
         t.begin_frame(40, 4);
         for block in t.blocks_mut().rev().take(4) {
-            block.sync(40);
+            block.sync(40, false);
         }
         // Scrolling into blocks the frame never laid out counts
         // nothing: they sat above the viewport all along.
@@ -886,9 +990,121 @@ mod tests {
         assert_eq!(t.scroll(), 21);
     }
 
+    /// Every row of every block as `(face, text)` spans.
+    fn spans(t: &mut Transcript, width: u16) -> Vec<Vec<(Face, String)>> {
+        let markdown = t.markdown();
+        let mut out = Vec::new();
+        for block in t.blocks_mut() {
+            block.sync(width, markdown);
+            for index in 0..block.rows() {
+                let mut row = Vec::new();
+                block.spans(index, |face, text| row.push((face, text.to_string())));
+                out.push(row);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn markdown_renders_model_text_and_leaves_the_other_kinds_plain() {
+        let mut t = Transcript::new(true);
+        t.push_delta(Kind::Text, "# Title\n\n- one\n- two");
+        t.push_line(Kind::Notice, "# not a heading");
+        t.push_delta(Kind::Reasoning, "- not a list");
+        assert_eq!(
+            rows(&mut t, 80),
+            vec![
+                "# Title",
+                "",
+                "• one",
+                "• two",
+                "# not a heading",
+                "- not a list"
+            ]
+        );
+        let spans = spans(&mut t, 80);
+        assert_eq!(
+            spans[0],
+            vec![
+                (Face::Marker, "# ".to_string()),
+                (Face::Heading, "Title".to_string())
+            ]
+        );
+        assert_eq!(spans[4], vec![(Face::Plain, "# not a heading".to_string())]);
+        assert_eq!(spans[5], vec![(Face::Plain, "- not a list".to_string())]);
+        let blocks: Vec<_> = t.blocks().collect();
+        assert!(!blocks[0].plain());
+        assert!(blocks[1].plain());
+        // Off, the reply shows its source.
+        let mut t = plain();
+        t.push_delta(Kind::Text, "# Title\n\n- one");
+        assert_eq!(rows(&mut t, 80), vec!["# Title", "", "- one"]);
+    }
+
+    #[test]
+    fn a_streamed_markdown_block_matches_a_fresh_render_after_every_delta() {
+        // A delta can close a fence or an emphasis that opened rows
+        // earlier, so the block renders again whole; the rows after
+        // each delta must equal the rows of the whole text.
+        let text = "Intro with *emphasis\nacross* lines.\n\n```rust\nfn a() {}\n```\n\n\
+                    | a | b |\n|---|---|\n| 1 | 2 |\n\n> quote\n\n- item **bold**\n";
+        for width in [7u16, 20, 80] {
+            let mut t = Transcript::new(true);
+            let mut whole = String::new();
+            let mut cut = 0;
+            let mut step = 1;
+            while cut < text.len() {
+                let mut end = (cut + step).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                t.push_delta(Kind::Text, &text[cut..end]);
+                whole.push_str(&text[cut..end]);
+                cut = end;
+                step = step % 5 + 1;
+                let mut fresh = Transcript::new(true);
+                fresh.push_delta(Kind::Text, &whole);
+                assert_eq!(
+                    spans(&mut t, width),
+                    spans(&mut fresh, width),
+                    "width {width} after {cut} bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_render_past_its_cap_shows_the_source_as_plain_text() {
+        // Rules render at the full width; enough of them outgrow the
+        // rendered-row cap, and the block falls back to its source.
+        let source = "---\n\n".repeat(MAX_BLOCK_BYTES / 5);
+        let mut t = Transcript::new(true);
+        t.push_delta(Kind::Text, &source);
+        let rows = rows(&mut t, 200);
+        assert_eq!(rows[0], "---");
+        assert_eq!(rows[1], "");
+        let block = t.blocks().next().unwrap();
+        assert!(block.plain());
+        assert!(block.layout.rendered.is_none());
+    }
+
+    #[test]
+    fn a_markdown_block_reports_its_row_change_like_a_plain_one() {
+        let mut t = Transcript::new(true);
+        t.push_delta(Kind::Text, "one");
+        let block = t.blocks_mut().next_back().unwrap();
+        assert_eq!(block.sync(8, true), 1);
+        assert_eq!(block.sync(8, true), 0);
+        t.push_delta(Kind::Text, "\n\ntwo\n\nthree");
+        let block = t.blocks_mut().next_back().unwrap();
+        assert_eq!(block.sync(8, true), 4);
+        assert_eq!(block.sync(2, true), 0);
+        assert_eq!(block.rows(), 9);
+    }
+
     #[test]
     fn follow_mode_ignores_arrivals_and_end_returns_to_it() {
-        let mut t = Transcript::new();
+        let mut t = plain();
         t.push_line(Kind::Text, "first");
         frame(&mut t, 40, 4);
         t.push_line(Kind::Text, "second");

@@ -24,7 +24,7 @@ pub struct Screen {
 impl Screen {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
-            transcript: Transcript::new(),
+            transcript: Transcript::new(true),
             input: Input::new(),
             status: Status {
                 model: "bench-model".into(),
