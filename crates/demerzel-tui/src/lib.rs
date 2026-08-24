@@ -80,6 +80,10 @@ pub struct Options {
     pub model: String,
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
+    /// Capture the mouse, so the wheel scrolls the transcript. Off,
+    /// the terminal keeps its own text selection; the `Default` value
+    /// is off.
+    pub mouse: bool,
 }
 
 /// Run the interface until the user ends the session.

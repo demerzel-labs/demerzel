@@ -74,6 +74,8 @@ pub struct Settings {
     /// `None` keeps the M1 rule: the REPL asks, one-shot is read-only.
     pub approval: Setting<Option<ApprovalMode>>,
     pub history_file: Setting<bool>,
+    /// Mouse capture in the full-screen interface, for wheel scroll.
+    pub mouse: Setting<bool>,
 }
 
 impl Settings {
@@ -105,6 +107,13 @@ struct ProviderKeys {
     model: Option<String>,
 }
 
+/// Interface keys from the `[tui]` table. Cosmetic: a project file
+/// can set them, they raise no privilege.
+#[derive(Debug, Default, PartialEq)]
+struct TuiKeys {
+    mouse: Option<bool>,
+}
+
 /// One parsed config file.
 #[derive(Debug, Default, PartialEq)]
 pub struct Layer {
@@ -113,6 +122,7 @@ pub struct Layer {
     approval: Option<ApprovalMode>,
     history_file: Option<bool>,
     providers: BTreeMap<String, ProviderKeys>,
+    tui: TuiKeys,
 }
 
 impl Layer {
@@ -157,6 +167,14 @@ impl Layer {
                         ));
                     }
                 },
+                "tui" => match value {
+                    toml::Value::Table(table) => {
+                        parse_tui(table, &mut layer.tui, &mut warnings)?;
+                    }
+                    other => {
+                        return Err(format!("`tui` must be a table, not {}", other.type_str()));
+                    }
+                },
                 _ => warnings.push(format!("unknown key `{key}`")),
             }
         }
@@ -188,6 +206,31 @@ fn parse_providers(
         into.insert(id, keys);
     }
     Ok(())
+}
+
+fn parse_tui(
+    table: toml::Table,
+    into: &mut TuiKeys,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    for (key, value) in table {
+        let path = format!("tui.{key}");
+        match key.as_str() {
+            "mouse" => into.mouse = Some(expect_bool(&path, value)?),
+            _ => warnings.push(format!("unknown key `{path}`")),
+        }
+    }
+    Ok(())
+}
+
+fn expect_bool(key: &str, value: toml::Value) -> Result<bool, String> {
+    match value {
+        toml::Value::Boolean(flag) => Ok(flag),
+        other => Err(format!(
+            "`{key}` must be a boolean, not {}",
+            other.type_str()
+        )),
+    }
 }
 
 fn expect_string(key: &str, value: toml::Value) -> Result<String, String> {
@@ -397,6 +440,11 @@ pub fn resolve(
         .or(user_history)
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
 
+    // Cosmetic keys carry no trust rule: the project file wins.
+    let mouse = layer_key(project, Origin::Project, |l| l.tui.mouse)
+        .or_else(|| layer_key(user, Origin::User, |l| l.tui.mouse))
+        .unwrap_or_else(|| Setting::new(true, Origin::Default));
+
     (
         Settings {
             provider,
@@ -404,6 +452,7 @@ pub fn resolve(
             base_url,
             approval,
             history_file,
+            mouse,
         },
         warnings,
     )
@@ -475,8 +524,24 @@ mod tests {
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
+        assert!(settings.mouse.value);
+        assert_eq!(settings.mouse.origin, Origin::Default);
         assert_eq!(settings.approval_mode(true), ApprovalMode::Ask);
         assert_eq!(settings.approval_mode(false), ApprovalMode::ReadOnly);
+    }
+
+    #[test]
+    fn the_tui_table_sets_mouse_capture_and_the_project_file_wins() {
+        let user = layer("[tui]\nmouse = false");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert!(!settings.mouse.value);
+        assert_eq!(settings.mouse.origin, Origin::User);
+
+        // Cosmetic: the project file can set it either way.
+        let project = layer("[tui]\nmouse = true");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert!(settings.mouse.value);
+        assert_eq!(settings.mouse.origin, Origin::Project);
     }
 
     #[test]
@@ -737,7 +802,9 @@ mod tests {
             "model = \"m\"\n\
              future_key = 1\n\
              [providers.openai-codex]\n\
-             future_sub_key = \"x\"",
+             future_sub_key = \"x\"\n\
+             [tui]\n\
+             future_tui_key = true",
         )
         .unwrap();
         assert_eq!(layer.model.as_deref(), Some("m"));
@@ -746,6 +813,7 @@ mod tests {
             vec![
                 "unknown key `future_key`",
                 "unknown key `providers.openai-codex.future_sub_key`",
+                "unknown key `tui.future_tui_key`",
             ]
         );
     }
@@ -764,6 +832,12 @@ mod tests {
                 .contains("boolean")
         );
         assert!(Layer::parse("providers = 1").unwrap_err().contains("table"));
+        assert!(Layer::parse("tui = 1").unwrap_err().contains("table"));
+        assert!(
+            Layer::parse("[tui]\nmouse = \"off\"")
+                .unwrap_err()
+                .contains("boolean")
+        );
         assert!(Layer::parse("model = \"\"").unwrap_err().contains("empty"));
         assert!(
             Layer::parse("[providers.openai-codex]\nbase_url = \"\"")

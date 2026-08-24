@@ -1,22 +1,23 @@
 //! Display-width line wrapping for the transcript pane.
 //!
-//! The transcript stores logical lines and the renderer wraps only the
-//! lines the viewport shows, so a long session never pays a full
-//! re-layout per frame.
+//! A block lays out its rows once per width and keeps the row starts,
+//! so a frame walks cached rows and wraps nothing. The core here emits
+//! row starts; the slice form serves the tests and small callers.
 
 use unicode_width::UnicodeWidthChar;
 
-/// Split `line` into rows of at most `width` columns. A break lands on
-/// the last space inside the window when one exists, else on the last
-/// character that fits. `line` must hold no newline; the transcript
-/// splits on newlines before it stores a line.
-pub fn wrap(line: &str, width: u16) -> Vec<&str> {
+/// Feed `row` the byte offset where each row of `line` starts when
+/// wrapped at `width` columns, first row at zero. A break lands after
+/// the last space inside the window when one exists, else before the
+/// first character that does not fit. `line` must hold no newline; the
+/// transcript splits on newlines before it lays out a line.
+pub fn row_starts(line: &str, width: u16, mut row: impl FnMut(usize)) {
     let width = usize::from(width.max(1));
-    let mut rows = Vec::new();
     let mut start = 0usize;
     let mut cols = 0usize;
     let mut last_space: Option<usize> = None;
 
+    row(0);
     for (index, ch) in line.char_indices() {
         let ch_cols = ch.width().unwrap_or(0);
         if cols + ch_cols > width && index > start {
@@ -26,14 +27,14 @@ pub fn wrap(line: &str, width: u16) -> Vec<&str> {
                 Some(space) if space >= start => space + 1,
                 _ => index,
             };
-            rows.push(&line[start..break_at]);
+            row(break_at);
             start = break_at;
             last_space = None;
             cols = display_width(&line[start..index]) + ch_cols;
             // A space break can carry a tail that itself overflows
             // when the current char is wide; break once more.
             if cols > width && index > start {
-                rows.push(&line[start..index]);
+                row(index);
                 start = index;
                 cols = ch_cols;
             }
@@ -44,8 +45,20 @@ pub fn wrap(line: &str, width: u16) -> Vec<&str> {
             last_space = Some(index);
         }
     }
-    rows.push(&line[start..]);
-    rows
+}
+
+/// Split `line` into rows of at most `width` columns.
+#[cfg(test)]
+pub fn wrap(line: &str, width: u16) -> Vec<&str> {
+    let mut starts = Vec::new();
+    row_starts(line, width, |start| starts.push(start));
+    let len = line.len();
+    let ends = starts.iter().skip(1).chain(std::iter::once(&len));
+    starts
+        .iter()
+        .zip(ends)
+        .map(|(&start, &end)| &line[start..end])
+        .collect()
 }
 
 /// Columns `text` occupies on one row.
@@ -117,5 +130,14 @@ mod tests {
             }
             assert_eq!(wrap(line, width).concat(), line);
         }
+    }
+
+    #[test]
+    fn row_starts_are_the_slice_boundaries() {
+        let line = "one two three four";
+        let mut starts = Vec::new();
+        row_starts(line, 8, |start| starts.push(start));
+        assert_eq!(starts, vec![0, 8, 14]);
+        assert_eq!(wrap(line, 8), vec!["one two ", "three ", "four"]);
     }
 }

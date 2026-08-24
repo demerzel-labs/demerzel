@@ -31,6 +31,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         )),
         model: config.model.clone(),
         mode: mode.to_string(),
+        mouse: config.mouse,
     };
     let mut driver = TuiDriver {
         runtime: &runtime,

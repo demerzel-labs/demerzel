@@ -1,12 +1,15 @@
-//! Terminal ownership: raw mode, the alternate screen, and the
-//! guarantee that both revert on every exit path, panics included.
+//! Terminal ownership: raw mode, the alternate screen, mouse capture,
+//! and the guarantee that all of it reverts on every exit path,
+//! panics included.
 
 use std::io::Stdout;
 use std::sync::Once;
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -18,9 +21,10 @@ pub struct Guard {
 }
 
 impl Guard {
-    /// Enter raw mode and the alternate screen. The first call installs
-    /// a panic hook that restores the terminal before the panic prints.
-    pub fn enter() -> std::io::Result<Self> {
+    /// Enter raw mode and the alternate screen, and capture the mouse
+    /// when `mouse` is set. The first call installs a panic hook that
+    /// restores the terminal before the panic prints.
+    pub fn enter(mouse: bool) -> std::io::Result<Self> {
         static HOOK: Once = Once::new();
         HOOK.call_once(|| {
             let previous = std::panic::take_hook();
@@ -39,6 +43,10 @@ impl Guard {
             let _ = disable_raw_mode();
             return Err(error);
         }
+        if mouse && let Err(error) = execute!(std::io::stdout(), EnableMouseCapture) {
+            restore();
+            return Err(error);
+        }
         match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
@@ -55,10 +63,12 @@ impl Drop for Guard {
     }
 }
 
-/// Leave the alternate screen and raw mode. Safe to call twice.
+/// Release the mouse, leave the alternate screen and raw mode. Safe
+/// to call twice, and with the mouse never captured.
 fn restore() {
     let _ = execute!(
         std::io::stdout(),
+        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         cursor::Show

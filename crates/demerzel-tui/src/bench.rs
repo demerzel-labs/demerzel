@@ -10,6 +10,8 @@ use crate::input::Input;
 use crate::render::{self, Status, View};
 use crate::transcript::{Kind, Transcript};
 
+pub use crate::transcript::MAX_BLOCK_BYTES;
+
 /// A transcript, an input line, a status bar, and a frame buffer of
 /// one size. Frames render into the buffer and go nowhere.
 pub struct Screen {
@@ -41,7 +43,7 @@ impl Screen {
         self.transcript.push_delta(Kind::Text, delta);
     }
 
-    /// Append one whole line, the way a notice arrives.
+    /// Append one whole block, the way a notice arrives.
     pub fn push_line(&mut self, text: &str) {
         self.transcript.push_line(Kind::Notice, text);
     }
@@ -70,8 +72,8 @@ impl Screen {
             .expect("headless draw");
     }
 
-    /// Logical lines the transcript holds.
-    pub fn lines(&self) -> usize {
-        self.transcript.entries().len()
+    /// Blocks the transcript holds.
+    pub fn blocks(&self) -> usize {
+        self.transcript.blocks().len()
     }
 }
