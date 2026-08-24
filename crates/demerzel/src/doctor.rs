@@ -53,24 +53,24 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         None => "ask in the REPL, read-only for one-shot".to_string(),
     };
     print_setting(out, "approval", &approval, settings.approval.origin)?;
-    let history = if settings.history_file.value {
-        "on"
-    } else {
-        "off"
-    };
-    print_setting(out, "history_file", history, settings.history_file.origin)?;
-    let mouse = if settings.tui.mouse.value {
-        "on"
-    } else {
-        "off"
-    };
-    print_setting(out, "tui.mouse", mouse, settings.tui.mouse.origin)?;
-    let markdown = if settings.tui.markdown.value {
-        "on"
-    } else {
-        "off"
-    };
-    print_setting(out, "tui.markdown", markdown, settings.tui.markdown.origin)?;
+    print_setting(
+        out,
+        "history_file",
+        on_off(settings.history_file.value),
+        settings.history_file.origin,
+    )?;
+    print_setting(
+        out,
+        "tui.mouse",
+        on_off(settings.tui.mouse.value),
+        settings.tui.mouse.origin,
+    )?;
+    print_setting(
+        out,
+        "tui.markdown",
+        on_off(settings.tui.markdown.value),
+        settings.tui.markdown.origin,
+    )?;
     let base_url = settings
         .base_url
         .value
@@ -99,6 +99,10 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         n => writeln!(out, "result: {n} problems")?,
     }
     Ok(problems)
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 fn print_setting(

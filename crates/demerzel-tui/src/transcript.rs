@@ -43,8 +43,8 @@ pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
 
 /// Byte cap for the rendered rows of one markdown block. Prefixes,
 /// frames, and table padding grow the rows past the source; a block
-/// whose render would cross the cap shows as plain text instead.
-pub(crate) const MAX_RENDER_BYTES: usize = 4 * MAX_BLOCK_BYTES;
+/// whose render reaches the cap shows as plain text instead.
+const MAX_RENDER_BYTES: usize = 2 * MAX_BLOCK_BYTES;
 
 /// What a block is. Kinds map to terminal-native styles until the
 /// theme lands.
@@ -89,6 +89,10 @@ struct Layout {
     tail: usize,
     /// Text arrived since the rows were laid out.
     dirty: bool,
+    /// The markdown render reached its cap at this width; the block
+    /// lays out as plain text until the width changes. The text only
+    /// grows, so a render that failed once fails again.
+    fallback: bool,
 }
 
 /// One unit of the transcript with its layout cache.
@@ -96,14 +100,19 @@ struct Layout {
 pub struct Block {
     pub kind: Kind,
     text: String,
+    /// Lay out as markdown: a model reply in a transcript that
+    /// renders. Fixed at birth, so a block is always laid out one
+    /// way and its rows always index one buffer.
+    markdown: bool,
     layout: Layout,
 }
 
 impl Block {
-    fn new(kind: Kind, text: String) -> Self {
+    fn new(kind: Kind, text: String, markdown: bool) -> Self {
         Self {
             kind,
             text,
+            markdown,
             layout: Layout::default(),
         }
     }
@@ -124,27 +133,25 @@ impl Block {
         self.layout.width != 0
     }
 
-    /// Bring the rows up to date at `width`, a model reply as markdown
-    /// when `markdown` is set. The flag holds for a transcript's whole
-    /// life, so a block is always laid out one way. Returns the change
-    /// in the row count since the last sync at this width: every row
-    /// for a block laid out for the first time, zero for a layout at
-    /// a new width, where a row count means nothing.
-    pub(crate) fn sync(&mut self, width: u16, markdown: bool) -> isize {
+    /// Bring the rows up to date at `width`. Returns the change in the
+    /// row count since the last sync at this width: every row for a
+    /// block laid out for the first time, zero for a layout at a new
+    /// width, where a row count means nothing.
+    pub(crate) fn sync(&mut self, width: u16) -> isize {
         debug_assert!(width > 0, "zero width is the never-laid-out mark");
-        let markdown = markdown && self.kind == Kind::Text;
         if self.layout.width != width {
             let first = !self.laid();
             self.layout.width = width;
-            self.lay_out_whole(markdown);
+            self.layout.fallback = false;
+            self.lay_out_whole();
             return if first { row_delta(0, self.rows()) } else { 0 };
         }
         if !self.layout.dirty {
             return 0;
         }
         let before = self.rows();
-        if markdown {
-            self.lay_out_whole(true);
+        if self.markdown && !self.layout.fallback {
+            self.lay_out_whole();
         } else {
             self.layout.rows.truncate(self.layout.stable);
             let tail = self.layout.tail;
@@ -154,13 +161,13 @@ impl Block {
         row_delta(before, self.rows())
     }
 
-    /// Lay every row out again: as markdown when asked and the render
-    /// stays inside its cap, else as plain text.
-    fn lay_out_whole(&mut self, markdown: bool) {
+    /// Lay every row out again: as markdown for a block that renders
+    /// and stays inside the render cap, else as plain text.
+    fn lay_out_whole(&mut self) {
         let layout = &mut self.layout;
         layout.rows.clear();
         layout.faces.clear();
-        if markdown {
+        if self.markdown && !layout.fallback {
             let text = layout.rendered.get_or_insert_with(String::new);
             text.clear();
             let target = Target {
@@ -172,6 +179,7 @@ impl Block {
                 layout.dirty = false;
                 return;
             }
+            layout.fallback = true;
             layout.rows.clear();
             layout.faces.clear();
         }
@@ -346,11 +354,6 @@ impl Transcript {
         self.blocks.iter()
     }
 
-    /// Whether model replies render as markdown.
-    pub(crate) fn markdown(&self) -> bool {
-        self.markdown
-    }
-
     pub(crate) fn blocks_mut(
         &mut self,
     ) -> impl DoubleEndedIterator<Item = &mut Block> + ExactSizeIterator {
@@ -486,7 +489,7 @@ impl Transcript {
                 let new = self.dropped + offset >= self.frame_end;
                 let laid = block.laid();
                 let before = block.rows();
-                let change = block.sync(width, self.markdown);
+                let change = block.sync(width);
                 if new || laid {
                     delta += change;
                 }
@@ -508,7 +511,9 @@ impl Transcript {
         let mut rest = text;
         loop {
             let (head, tail) = rest.split_at(cap_boundary(rest));
-            self.blocks.push_back(Block::new(kind, head.to_string()));
+            let markdown = self.markdown && kind == Kind::Text;
+            self.blocks
+                .push_back(Block::new(kind, head.to_string(), markdown));
             while self.blocks.len() > MAX_BLOCKS {
                 self.blocks.pop_front();
                 self.dropped += 1;
@@ -579,10 +584,9 @@ mod tests {
 
     /// Every row of every block, laid out at `width`.
     fn rows(t: &mut Transcript, width: u16) -> Vec<String> {
-        let markdown = t.markdown();
         let mut out = Vec::new();
         for block in t.blocks_mut() {
-            block.sync(width, markdown);
+            block.sync(width);
             for index in 0..block.rows() {
                 out.push(block.row(index).to_string());
             }
@@ -725,21 +729,21 @@ mod tests {
         let mut t = plain();
         t.push_delta(Kind::Text, "one");
         let block = t.blocks_mut().next_back().unwrap();
-        assert_eq!(block.sync(8, false), 1, "a first layout counts every row");
+        assert_eq!(block.sync(8), 1, "a first layout counts every row");
         assert!(block.clean(8));
-        assert_eq!(block.sync(8, false), 0);
+        assert_eq!(block.sync(8), 0);
         // A new width lays out again and counts nothing.
-        assert_eq!(block.sync(2, false), 0);
+        assert_eq!(block.sync(2), 0);
         assert_eq!(block.rows(), 2);
-        assert_eq!(block.sync(8, false), 0);
+        assert_eq!(block.sync(8), 0);
         t.push_delta(Kind::Text, " two three\nfour");
         let block = t.blocks_mut().next_back().unwrap();
         assert!(!block.clean(8));
-        assert_eq!(block.sync(8, false), 2);
-        assert_eq!(block.sync(8, false), 0);
+        assert_eq!(block.sync(8), 2);
+        assert_eq!(block.sync(8), 0);
         // A rewrite to fewer rows reports the loss.
         block.set_text("ok".into());
-        assert_eq!(block.sync(8, false), -2);
+        assert_eq!(block.sync(8), -2);
     }
 
     #[test]
@@ -971,7 +975,7 @@ mod tests {
         }
         t.begin_frame(40, 4);
         for block in t.blocks_mut().rev().take(4) {
-            block.sync(40, false);
+            block.sync(40);
         }
         // Scrolling into blocks the frame never laid out counts
         // nothing: they sat above the viewport all along.
@@ -992,10 +996,9 @@ mod tests {
 
     /// Every row of every block as `(face, text)` spans.
     fn spans(t: &mut Transcript, width: u16) -> Vec<Vec<(Face, String)>> {
-        let markdown = t.markdown();
         let mut out = Vec::new();
         for block in t.blocks_mut() {
-            block.sync(width, markdown);
+            block.sync(width);
             for index in 0..block.rows() {
                 let mut row = Vec::new();
                 block.spans(index, |face, text| row.push((face, text.to_string())));
@@ -1086,6 +1089,15 @@ mod tests {
         let block = t.blocks().next().unwrap();
         assert!(block.plain());
         assert!(block.layout.rendered.is_none());
+        // The block stays plain and lays out from its tail while the
+        // width holds; a new width tries the render again.
+        assert!(block.layout.fallback);
+        t.push_delta(Kind::Text, "tail");
+        let block = t.blocks_mut().next().unwrap();
+        assert_eq!(block.sync(200), 1);
+        assert!(block.layout.fallback);
+        block.sync(199);
+        assert!(!block.layout.fallback || block.layout.rendered.is_none());
     }
 
     #[test]
@@ -1093,12 +1105,12 @@ mod tests {
         let mut t = Transcript::new(true);
         t.push_delta(Kind::Text, "one");
         let block = t.blocks_mut().next_back().unwrap();
-        assert_eq!(block.sync(8, true), 1);
-        assert_eq!(block.sync(8, true), 0);
+        assert_eq!(block.sync(8), 1);
+        assert_eq!(block.sync(8), 0);
         t.push_delta(Kind::Text, "\n\ntwo\n\nthree");
         let block = t.blocks_mut().next_back().unwrap();
-        assert_eq!(block.sync(8, true), 4);
-        assert_eq!(block.sync(2, true), 0);
+        assert_eq!(block.sync(8), 4);
+        assert_eq!(block.sync(2), 0);
         assert_eq!(block.rows(), 9);
     }
 

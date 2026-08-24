@@ -16,13 +16,14 @@
 //!   real stream arrives slower than the renderer draws, so arrival,
 //!   not the frame cap, sets the batch in use.
 //!
-//! Each bench runs twice: on prose, and on a formatted stream with
-//! headings, lists, a table, and code fences (`*-formatted`). A
-//! formatted block renders again whole on every frame that changes
-//! it, so the formatted `stream` carries the cost of the markdown
-//! pass, and `frame-formatted` redraws a screen whose rows come from
-//! formatted blocks. The prose numbers keep the M2 workloads, so
-//! they compare with the M2 receipts.
+//! Each bench runs twice. The prose run keeps the M2 workloads on a
+//! plain-text transcript, so its numbers compare with the M2
+//! receipts. The formatted run (`*-formatted`) streams a markdown
+//! document with headings, lists, tables, and code fences through a
+//! transcript that renders it. A formatted block renders again whole
+//! on every frame that changes it, so the formatted `stream` carries
+//! the cost of the markdown pass, and `frame-formatted` redraws a
+//! screen whose rows come from formatted blocks.
 //!
 //! The screen is headless: frames render into a buffer and diff
 //! against the last one, the same work the live interface does before
@@ -77,26 +78,51 @@ fn stream_text() -> String {
 }
 
 /// The formatted stream: the same size, built from a markdown
-/// document with one of each element. ASCII, as above.
+/// document with one of each element, a table and a list long
+/// enough that their per-row work shows. ASCII, as above.
 fn formatted_text() -> String {
-    const DOC: &str = "## A heading\n\n\
-        Some prose with *emphasis*, **strong** words, and `inline code` that runs long \
-        enough to wrap on the screen.\n\n\
-        - first item\n- second item with more words\n  - nested item\n- third\n\n\
-        | name | value | note |\n|---|---:|---|\n| alpha | 1 | first |\n| beta | 22 | second |\n\n\
-        ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n\
-        > A quote that also runs long enough to wrap when the pane is narrow.\n\n";
-    let mut text = String::with_capacity(STREAM + DOC.len());
+    let mut doc = String::from(
+        "## A heading\n\n\
+         Some prose with *emphasis*, **strong** words, and `inline code` that runs long \
+         enough to wrap on the screen.\n\n\
+         - first item\n- second item with more words\n  - nested item\n- third\n\n\
+         ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n\
+         > A quote that also runs long enough to wrap when the pane is narrow.\n\n\
+         | name | value | note |\n|---|---:|---|\n",
+    );
+    for row in 0..24 {
+        doc.push_str(&format!(
+            "| item {row} | {} | note for row {row} |\n",
+            row * 7
+        ));
+    }
+    doc.push('\n');
+    for item in 0..24 {
+        doc.push_str(&format!(
+            "{}. step {item} of the [plan](https://example.test/p/{item})\n",
+            item + 1
+        ));
+    }
+    doc.push('\n');
+    let mut text = String::with_capacity(STREAM + doc.len());
     while text.len() < STREAM {
-        text.push_str(DOC);
+        text.push_str(&doc);
     }
     text.truncate(STREAM);
     assert!(text.is_ascii());
     text
 }
 
-fn screen_with_history() -> Screen {
-    let mut screen = Screen::new(WIDTH, HEIGHT);
+/// The stream as 16-byte deltas.
+fn deltas(text: &str) -> Vec<&str> {
+    text.as_bytes()
+        .chunks(DELTA)
+        .map(|chunk| std::str::from_utf8(chunk).expect("ascii"))
+        .collect()
+}
+
+fn screen_with_history(markdown: bool) -> Screen {
+    let mut screen = Screen::new(WIDTH, HEIGHT, markdown);
     for index in 0..HISTORY_LINES {
         screen.push_line(&history_line(index));
     }
@@ -127,44 +153,45 @@ fn stream(screen: &mut Screen, deltas: &[&str]) -> usize {
 }
 
 fn bench_render(c: &mut Criterion) {
+    let prose = stream_text();
+    let formatted = formatted_text();
+    let workloads = [("", false, &prose), ("-formatted", true, &formatted)];
     let mut group = c.benchmark_group("render");
-    for (suffix, text) in [("", stream_text()), ("-formatted", formatted_text())] {
-        let deltas: Vec<&str> = text
-            .as_bytes()
-            .chunks(DELTA)
-            .map(|chunk| std::str::from_utf8(chunk).expect("ascii"))
-            .collect();
 
-        // Workload checks, once and outside the timed spans: the
-        // stream lands as one block per byte cap, the total stays
-        // under the block cap so the drop path is not measured, and
-        // the stream draws the frame count the throughput names.
-        let streamed_blocks = HISTORY_LINES + STREAM.div_ceil(MAX_BLOCK_BYTES);
-        let mut check = screen_with_history();
+    // Workload checks, once and outside the timed spans: the stream
+    // lands as one block per byte cap, the total stays under the
+    // block cap so the drop path is not measured, and the stream
+    // draws the frame count the throughput names.
+    let streamed_blocks = HISTORY_LINES + STREAM.div_ceil(MAX_BLOCK_BYTES);
+    for (_, markdown, text) in workloads {
+        let deltas = deltas(text);
+        let mut check = screen_with_history(markdown);
         assert_eq!(check.blocks(), HISTORY_LINES);
         ingest(&mut check, &deltas);
         assert_eq!(check.blocks(), streamed_blocks);
-        let mut check = screen_with_history();
+        let mut check = screen_with_history(markdown);
         assert_eq!(stream(&mut check, &deltas), FRAMES);
         assert_eq!(check.blocks(), streamed_blocks);
-        drop(check);
+    }
 
-        // The formatted `frame` redraws a screen whose tail is the
-        // streamed text, so the formatted rows are the ones on
-        // screen; the prose `frame` keeps the M2 workload.
-        let mut screen = screen_with_history();
-        if !suffix.is_empty() {
-            ingest(&mut screen, &deltas);
+    // The frames run before any throughput is set on the group, the
+    // M2 shape of `frame`. The formatted one redraws a screen whose
+    // tail is the streamed text, so formatted rows are on screen.
+    for (suffix, markdown, text) in workloads {
+        let mut screen = screen_with_history(markdown);
+        if markdown {
+            ingest(&mut screen, &deltas(text));
             screen.draw();
         }
-        group.throughput(Throughput::Elements(1));
         group.bench_function(format!("frame{suffix}"), |b| b.iter(|| screen.draw()));
-        drop(screen);
+    }
 
+    for (suffix, markdown, text) in workloads {
+        let deltas = deltas(text);
         group.throughput(Throughput::Bytes(STREAM as u64));
         group.bench_function(format!("ingest{suffix}"), |b| {
             b.iter_batched(
-                screen_with_history,
+                || screen_with_history(markdown),
                 |mut screen| {
                     ingest(&mut screen, &deltas);
                     screen
@@ -176,7 +203,7 @@ fn bench_render(c: &mut Criterion) {
         group.throughput(Throughput::Elements(FRAMES as u64));
         group.bench_function(format!("stream{suffix}"), |b| {
             b.iter_batched(
-                screen_with_history,
+                || screen_with_history(markdown),
                 |mut screen| {
                     stream(&mut screen, &deltas);
                     screen

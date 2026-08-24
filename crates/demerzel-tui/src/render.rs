@@ -134,8 +134,8 @@ fn style(kind: Kind) -> Style {
     }
 }
 
-/// A face over the block's own style. Terminal-native attributes
-/// until the theme lands.
+/// A face over the block's own style. Terminal attributes and one
+/// color until the theme lands.
 fn face_style(kind: Kind, face: Face) -> Style {
     let base = style(kind);
     match face {
@@ -160,14 +160,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
     let height = usize::from(area.height);
     transcript.begin_frame(area.width, area.height);
     let want = height.saturating_add(transcript.scroll());
-    let markdown = transcript.markdown();
 
     // Bottom-first: lay out blocks until the viewport and the offset
     // are covered.
     let mut visited = 0usize;
     let mut avail = 0usize;
     for block in transcript.blocks_mut().rev() {
-        block.sync(area.width, markdown);
+        block.sync(area.width);
         visited += 1;
         avail += block.rows();
         if avail >= want {
@@ -627,14 +626,16 @@ line 12",
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        // The mark is dim, the heading bold, the code colored.
+        // The mark, the heading, and the code each read apart from
+        // the plain text; which attribute is the theme's call.
+        let plain = buffer[(0u16, 2u16)].style();
         assert_eq!(buffer[(0u16, 0u16)].symbol(), "#");
-        assert!(buffer[(0u16, 0u16)].modifier.contains(Modifier::DIM));
+        assert_ne!(buffer[(0u16, 0u16)].style(), plain);
         assert_eq!(buffer[(2u16, 0u16)].symbol(), "T");
-        assert!(buffer[(2u16, 0u16)].modifier.contains(Modifier::BOLD));
+        assert_ne!(buffer[(2u16, 0u16)].style(), plain);
+        assert_ne!(buffer[(2u16, 0u16)].style(), buffer[(0u16, 0u16)].style());
         assert_eq!(buffer[(6u16, 2u16)].symbol(), "c");
-        assert_eq!(buffer[(6u16, 2u16)].fg, Color::Cyan);
-        assert_eq!(buffer[(0u16, 2u16)].fg, Color::Reset);
+        assert_ne!(buffer[(6u16, 2u16)].style(), plain);
     }
 
     #[test]

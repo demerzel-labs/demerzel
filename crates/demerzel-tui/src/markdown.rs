@@ -18,12 +18,21 @@
 //!
 //! The rendered rows live in a buffer of their own next to the source.
 //! Prefixes, frames, and table padding make it larger than the source;
-//! the caller passes a byte cap and the render reports when it would
-//! cross it, so a block of rules or padded tables cannot grow past a
-//! bound. The caller then shows the source as plain text.
+//! the caller passes a byte cap and no row starts past it, so a block
+//! of rules, padded tables, or deep quotes cannot grow without bound.
+//! The render reports the cap, and the caller then shows the source as
+//! plain text.
+//!
+//! The source is sanitized before it gets here, but the parser decodes
+//! character references, so control characters can come back; every
+//! path to the rows drops them again.
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::fmt::Write as _;
+use std::ops::Range;
 
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::wrap::{display_width, row_starts};
@@ -60,17 +69,22 @@ pub(crate) struct Target<'a> {
 }
 
 /// Render `source` at `width` columns into `target`, which starts
-/// empty. Returns `false` when the rows would grow past `cap` bytes;
-/// the target then holds a partial render the caller must discard.
+/// empty. Returns `false` when the rows reached `cap` bytes; the
+/// target then holds a partial render the caller must discard. The
+/// buffer can run past the cap by one row: the check runs where a
+/// row starts.
+#[must_use]
 pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -> bool {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     let mut renderer = Renderer {
         out: target,
         width: usize::from(width.max(1)),
+        cap,
+        full: false,
         face: Face::Plain,
         prefix: String::new(),
-        marker: None,
-        marker_cols: 0,
+        markers: Vec::new(),
+        marker_text: String::new(),
         lists: Vec::new(),
         inline: Vec::new(),
         line: String::new(),
@@ -78,54 +92,79 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -
         line_face: Face::Plain,
         starts: Vec::new(),
         need_gap: false,
-        link: None,
+        links: Vec::new(),
         table: None,
+        cell_text: String::new(),
+        cell_faces: Vec::new(),
     };
     for event in Parser::new_ext(source, options) {
         renderer.event(event);
-        if renderer.out.text.len() > cap {
+        if renderer.full {
             return false;
         }
     }
     renderer.flush_pending();
-    renderer.out.text.len() <= cap
+    !renderer.full
 }
 
-/// One list container: its next ordinal when ordered, and the
-/// indent its open item pushed onto the prefix.
+/// One list container: its next ordinal when ordered, the indent its
+/// open item pushed onto the prefix, and whether its items hold
+/// paragraphs — a loose list, whose items part with a blank row.
 struct ListState {
     next: Option<u64>,
     item_cols: usize,
+    loose: bool,
+}
+
+/// A list marker waiting for its item's first row, where it takes
+/// the place of the item's indent: where that indent starts in the
+/// prefix, its length, and the marker's text in `marker_text`.
+struct Pending {
+    at: usize,
+    bytes: usize,
+    text: Range<usize>,
+}
+
+/// An open link or image: its destination, where its text starts in
+/// the line, and whether a row ended since, which makes that start
+/// stale.
+struct Link<'s> {
+    dest: CowStr<'s>,
+    from: usize,
+    split: bool,
 }
 
 /// A table under construction: cells stay as text until the end
-/// tag, when the column widths are known.
+/// tag, when the column widths are known. Cells are ranges into the
+/// renderer's cell scratch; `rows` holds the index of each row's
+/// first cell.
 struct TableState {
     aligns: Vec<Alignment>,
-    /// Every row, the header first when there is one.
-    rows: Vec<Vec<Cell>>,
+    cells: Vec<Cell>,
+    rows: Vec<usize>,
     has_head: bool,
 }
 
 struct Cell {
-    text: String,
-    faces: Vec<(usize, Face)>,
+    text: Range<usize>,
+    faces: Range<usize>,
 }
 
-struct Renderer<'a> {
-    out: Target<'a>,
+struct Renderer<'t, 's> {
+    out: Target<'t>,
     /// Columns in the viewport.
     width: usize,
+    cap: usize,
+    /// The rows reached the cap; nothing more lands.
+    full: bool,
     /// The face the output currently carries.
     face: Face,
     /// The continuation prefix of the open containers: quote bars and
     /// list indents. Every row starts with it.
     prefix: String,
-    /// A list marker waiting for the item's first row, where it takes
-    /// the place of the item's indent.
-    marker: Option<String>,
-    /// Columns the pending marker spans; the indent pushed for it.
-    marker_cols: usize,
+    /// Markers waiting for a first row, outermost first.
+    markers: Vec<Pending>,
+    marker_text: String,
     lists: Vec<ListState>,
     /// The inline face stack: emphasis, strong, links, headings, code.
     inline: Vec<Face>,
@@ -137,53 +176,43 @@ struct Renderer<'a> {
     starts: Vec<usize>,
     /// A block ended; the next block opens with a blank row.
     need_gap: bool,
-    /// The open link's destination and where its text starts in
-    /// `line`.
-    link: Option<(String, usize)>,
+    /// Open links and images, outermost first.
+    links: Vec<Link<'s>>,
     table: Option<TableState>,
+    /// The text and faces of the open table's cells; face offsets are
+    /// relative to their cell.
+    cell_text: String,
+    cell_faces: Vec<(usize, Face)>,
 }
 
-impl Renderer<'_> {
-    fn event(&mut self, event: Event<'_>) {
+impl<'s> Renderer<'_, 's> {
+    fn event(&mut self, event: Event<'s>) {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => {
                 if self.inline.last() == Some(&Face::Code) {
                     // Inside a code block: every newline ends a row.
-                    let mut rest = text.as_ref();
-                    while let Some(at) = rest.find('\n') {
-                        self.push_inline(&rest[..at]);
-                        self.flush_line();
-                        rest = &rest[at + 1..];
-                    }
-                    self.push_inline(rest);
+                    self.push_lines(&text);
                 } else {
                     self.push_inline(&text);
                 }
             }
             Event::Code(code) => self.push_text(&code, Face::Code),
-            Event::Html(html) | Event::InlineHtml(html) => {
-                // Raw markup stays as text; a newline inside an HTML
-                // block ends the row.
-                let mut rest = html.as_ref();
-                while let Some(at) = rest.find('\n') {
-                    self.push_inline(&rest[..at]);
-                    self.flush_line();
-                    rest = &rest[at + 1..];
-                }
-                self.push_inline(rest);
-            }
+            // Raw markup stays as text; a newline inside an HTML
+            // block ends the row.
+            Event::Html(html) | Event::InlineHtml(html) => self.push_lines(&html),
             Event::SoftBreak | Event::HardBreak => self.flush_line(),
             Event::Rule => {
                 self.flush_pending();
                 self.gap();
                 let cols = self.avail();
-                self.begin_row();
-                self.push_prefix();
-                self.set_face(Face::Marker);
-                for _ in 0..cols {
-                    self.out.text.push('─');
+                if self.begin_row() {
+                    self.push_prefix();
+                    self.set_face(Face::Marker);
+                    for _ in 0..cols {
+                        self.out.text.push('─');
+                    }
                 }
                 self.need_gap = true;
             }
@@ -195,11 +224,16 @@ impl Renderer<'_> {
         }
     }
 
-    fn start(&mut self, tag: Tag<'_>) {
+    fn start(&mut self, tag: Tag<'s>) {
         match tag {
             Tag::Paragraph => {
                 self.flush_pending();
                 self.gap();
+                // The parser wraps item text in a paragraph only in a
+                // loose list.
+                if let Some(list) = self.lists.last_mut() {
+                    list.loose = true;
+                }
             }
             Tag::Heading { level, .. } => {
                 self.flush_pending();
@@ -223,23 +257,24 @@ impl Renderer<'_> {
             Tag::CodeBlock(kind) => {
                 self.flush_pending();
                 self.gap();
-                self.begin_row();
-                self.push_prefix();
-                self.push_out("╭─", Face::Marker);
-                if let CodeBlockKind::Fenced(info) = kind
-                    && let Some(language) = info.split_whitespace().next()
-                {
-                    // The label cuts at the width, like a table row.
-                    let avail = self.avail();
-                    let mut used = 2usize;
-                    self.push_pad(1, &mut used, avail);
-                    for ch in language.chars() {
-                        let cols = ch.width().unwrap_or(0);
-                        if used + cols > avail {
-                            break;
+                if self.begin_row() {
+                    self.push_prefix();
+                    self.push_out("╭─", Face::Marker);
+                    if let CodeBlockKind::Fenced(info) = kind
+                        && let Some(language) = info.split_whitespace().next()
+                    {
+                        // The label cuts at the width, like a table row.
+                        let avail = self.avail();
+                        let mut used = 2usize;
+                        self.push_pad(1, &mut used, avail);
+                        for ch in language.chars().filter(|ch| !ch.is_control()) {
+                            let cols = ch.width().unwrap_or(0);
+                            if used + cols > avail {
+                                break;
+                            }
+                            self.out.text.push(ch);
+                            used += cols;
                         }
-                        self.out.text.push(ch);
-                        used += cols;
                     }
                 }
                 self.prefix.push_str("│ ");
@@ -258,34 +293,28 @@ impl Renderer<'_> {
                 self.lists.push(ListState {
                     next: first,
                     item_cols: 0,
+                    loose: false,
                 });
             }
             Tag::Item => {
                 self.flush_pending();
-                let marker = match self.lists.last_mut().and_then(|list| list.next.as_mut()) {
+                let start = self.marker_text.len();
+                match self.lists.last_mut().and_then(|list| list.next.as_mut()) {
                     Some(next) => {
-                        let marker = format!("{next}. ");
+                        let _ = write!(self.marker_text, "{next}. ");
                         *next += 1;
-                        marker
                     }
-                    None => "• ".to_string(),
-                };
-                let cols = display_width(&marker);
+                    None => self.marker_text.push_str("• "),
+                }
+                let cols = display_width(&self.marker_text[start..]);
+                self.markers.push(Pending {
+                    at: self.prefix.len(),
+                    bytes: cols,
+                    text: start..self.marker_text.len(),
+                });
                 self.prefix.extend(std::iter::repeat_n(' ', cols));
                 if let Some(list) = self.lists.last_mut() {
                     list.item_cols = cols;
-                }
-                // An item whose first content is a list: the markers
-                // join on one row.
-                match &mut self.marker {
-                    Some(pending) => {
-                        pending.push_str(&marker);
-                        self.marker_cols += cols;
-                    }
-                    None => {
-                        self.marker = Some(marker);
-                        self.marker_cols = cols;
-                    }
                 }
             }
             Tag::Table(aligns) => {
@@ -293,19 +322,15 @@ impl Renderer<'_> {
                 self.gap();
                 self.table = Some(TableState {
                     aligns,
+                    cells: Vec::new(),
                     rows: Vec::new(),
                     has_head: false,
                 });
             }
-            Tag::TableHead => {
+            Tag::TableHead | Tag::TableRow => {
                 if let Some(table) = &mut self.table {
-                    table.has_head = true;
-                    table.rows.push(Vec::new());
-                }
-            }
-            Tag::TableRow => {
-                if let Some(table) = &mut self.table {
-                    table.rows.push(Vec::new());
+                    table.has_head |= matches!(tag, Tag::TableHead);
+                    table.rows.push(table.cells.len());
                 }
             }
             Tag::TableCell => {}
@@ -313,7 +338,11 @@ impl Renderer<'_> {
             Tag::Strong => self.inline.push(Face::Strong),
             Tag::Strikethrough => self.inline.push(Face::Strike),
             Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
-                self.link = Some((dest_url.into_string(), self.line.len()));
+                self.links.push(Link {
+                    dest: dest_url,
+                    from: self.line.len(),
+                    split: false,
+                });
                 self.inline.push(Face::Link);
             }
             // Extensions that are off never produce these.
@@ -350,63 +379,87 @@ impl Renderer<'_> {
                 self.flush_pending();
                 self.inline.pop();
                 self.pop_prefix("│ ".len());
-                self.begin_row();
-                self.push_prefix();
-                self.push_out("╰─", Face::Marker);
+                if self.begin_row() {
+                    self.push_prefix();
+                    self.push_out("╰─", Face::Marker);
+                }
                 self.need_gap = true;
             }
             TagEnd::List(_) => {
                 self.lists.pop();
-                // A list that ends another list's item leaves the
-                // gap to the outer list's end.
-                self.need_gap = self.lists.is_empty();
+                // A nested list's end leaves the gap to the item that
+                // holds it; the outer list's end sets one.
+                if self.lists.is_empty() {
+                    self.need_gap = true;
+                }
             }
             TagEnd::Item => {
                 if !self.line.is_empty() {
                     self.flush_line();
-                } else if let Some(marker) = self.marker.take() {
+                } else if !self.markers.is_empty() && self.begin_row() {
                     // An empty item still shows its marker, without
                     // the space that would follow its text.
-                    self.begin_row();
-                    self.set_face(Face::Marker);
-                    let keep = self.prefix.len() - self.marker_cols;
-                    self.out.text.push_str(&self.prefix[..keep]);
-                    self.out.text.push_str(marker.trim_end());
-                    self.marker_cols = 0;
+                    self.push_prefix();
+                    while self.out.text.ends_with(' ') {
+                        self.out.text.pop();
+                    }
                 }
-                let cols = self.lists.last().map_or(0, |list| list.item_cols);
+                let list = self.lists.last();
+                if list.is_some_and(|list| list.loose) {
+                    self.need_gap = true;
+                }
+                let cols = list.map_or(0, |list| list.item_cols);
                 self.pop_prefix(cols);
             }
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
                     self.emit_table(table);
                 }
+                self.cell_text.clear();
+                self.cell_faces.clear();
                 self.need_gap = true;
             }
             TagEnd::TableHead | TagEnd::TableRow => {}
             TagEnd::TableCell => {
-                let text = std::mem::take(&mut self.line);
-                let faces = std::mem::take(&mut self.line_faces);
-                self.line_face = Face::Plain;
-                if let Some(row) = self.table.as_mut().and_then(|table| table.rows.last_mut()) {
-                    row.push(Cell { text, faces });
+                let text = self.cell_text.len()..self.cell_text.len() + self.line.len();
+                self.cell_text.push_str(&self.line);
+                let faces = self.cell_faces.len()..self.cell_faces.len() + self.line_faces.len();
+                self.cell_faces.extend_from_slice(&self.line_faces);
+                if let Some(table) = &mut self.table {
+                    table.cells.push(Cell { text, faces });
                 }
+                self.line.clear();
+                self.line_faces.clear();
+                self.line_face = Face::Plain;
             }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.inline.pop();
             }
             TagEnd::Link | TagEnd::Image => {
                 self.inline.pop();
-                if let Some((dest, from)) = self.link.take()
-                    && !dest.is_empty()
-                    && self.line[from..] != dest
-                {
-                    let shown = if self.line.len() > from {
-                        format!(" ({dest})")
-                    } else {
-                        dest
-                    };
-                    self.push_text(&shown, Face::Url);
+                let Some(link) = self.links.pop() else {
+                    return;
+                };
+                if link.dest.is_empty() {
+                    return;
+                }
+                // The destination shows once: not after text that is
+                // the destination already, and alone when the link
+                // has no text.
+                let has_text = if link.split {
+                    !self.line.is_empty()
+                } else {
+                    self.line.len() > link.from
+                };
+                if !link.split && self.line[link.from..] == *link.dest {
+                    return;
+                }
+                if has_text {
+                    self.push_text(" (", Face::Url);
+                    self.push_text(&link.dest, Face::Url);
+                    self.push_text(")", Face::Url);
+                } else {
+                    self.push_text(&link.dest, Face::Url);
                 }
             }
             TagEnd::FootnoteDefinition
@@ -435,7 +488,20 @@ impl Renderer<'_> {
         self.push_text(text, face);
     }
 
-    /// Append text to the line under construction.
+    /// Append text that may hold newlines; each one ends the row.
+    fn push_lines(&mut self, text: &str) {
+        let mut rest = text;
+        while let Some(at) = rest.find('\n') {
+            self.push_inline(&rest[..at]);
+            self.flush_line();
+            rest = &rest[at + 1..];
+        }
+        self.push_inline(rest);
+    }
+
+    /// Append text to the line under construction. Control characters
+    /// drop and a tab widens, the transcript's rule; the parser can
+    /// decode a character reference into either.
     fn push_text(&mut self, text: &str, face: Face) {
         if text.is_empty() {
             return;
@@ -444,47 +510,82 @@ impl Renderer<'_> {
             self.line_faces.push((self.line.len(), face));
             self.line_face = face;
         }
-        self.line.push_str(text);
+        if text.bytes().all(|byte| byte >= 0x20 && byte != 0x7f) {
+            self.line.push_str(text);
+            return;
+        }
+        for ch in text.chars() {
+            if ch == '\t' {
+                self.line.push_str("    ");
+            } else if !ch.is_control() {
+                self.line.push(ch);
+            }
+        }
     }
 
     /// Text that goes to the output row directly, not through the
-    /// line: frames and markers.
+    /// line: frames and markers, from this module's own literals.
     fn push_out(&mut self, text: &str, face: Face) {
         self.set_face(face);
         self.out.text.push_str(text);
     }
 
     /// Change the face from here on. A change before any text lands
-    /// under the last one replaces it, so no entry covers nothing.
+    /// replaces the last one, or removes it when the face in force
+    /// before it is the one asked for, so no entry covers nothing and
+    /// a block of prose keeps no faces at all.
     fn set_face(&mut self, face: Face) {
         if face == self.face {
             return;
         }
         let at = self.out.text.len() as u32;
-        match self.out.faces.last_mut() {
-            Some(last) if last.0 == at => last.1 = face,
-            _ => self.out.faces.push((at, face)),
+        let faces = &mut *self.out.faces;
+        match faces.last() {
+            Some(&(last, _)) if last == at => {
+                let before = faces
+                    .len()
+                    .checked_sub(2)
+                    .map_or(Face::Plain, |index| faces[index].1);
+                if before == face {
+                    faces.pop();
+                } else if let Some(last) = faces.last_mut() {
+                    last.1 = face;
+                }
+            }
+            _ => faces.push((at, face)),
         }
         self.face = face;
     }
 
-    fn begin_row(&mut self) {
+    /// Start a row, unless the rows reached the cap.
+    fn begin_row(&mut self) -> bool {
+        if self.full || self.out.text.len() >= self.cap {
+            self.full = true;
+            return false;
+        }
         self.out.rows.push(self.out.text.len() as u32);
+        true
     }
 
-    /// The container prefix at the start of a row. A pending list
+    /// The container prefix at the start of a row. Each pending list
     /// marker takes the place of its item's indent, once.
     fn push_prefix(&mut self) {
         self.set_face(Face::Marker);
-        match self.marker.take() {
-            Some(marker) => {
-                let keep = self.prefix.len() - self.marker_cols;
-                self.out.text.push_str(&self.prefix[..keep]);
-                self.out.text.push_str(&marker);
-            }
-            None => self.out.text.push_str(&self.prefix),
+        let Self {
+            out,
+            prefix,
+            markers,
+            marker_text,
+            ..
+        } = self;
+        let mut at = 0usize;
+        for pending in markers.drain(..) {
+            out.text.push_str(&prefix[at..pending.at]);
+            out.text.push_str(&marker_text[pending.text]);
+            at = pending.at + pending.bytes;
         }
-        self.marker_cols = 0;
+        out.text.push_str(&prefix[at..]);
+        marker_text.clear();
     }
 
     /// The blank row between blocks: the prefix without its trailing
@@ -492,8 +593,7 @@ impl Renderer<'_> {
     fn gap(&mut self) {
         if self.need_gap {
             self.need_gap = false;
-            if !self.out.rows.is_empty() {
-                self.begin_row();
+            if !self.out.rows.is_empty() && self.begin_row() {
                 self.set_face(Face::Marker);
                 self.out.text.push_str(self.prefix.trim_end());
             }
@@ -518,9 +618,14 @@ impl Renderer<'_> {
         row_starts(&line, avail, |start| starts.push(start));
         for (index, &from) in starts.iter().enumerate() {
             let to = starts.get(index + 1).copied().unwrap_or(line.len());
-            self.begin_row();
+            if !self.begin_row() {
+                break;
+            }
             self.push_prefix();
             self.push_span(&line, &faces, from, to);
+        }
+        for link in &mut self.links {
+            link.split = true;
         }
         self.starts = starts;
         self.line = line;
@@ -553,66 +658,83 @@ impl Renderer<'_> {
     /// Lay the table out on the column widths of its content and cut
     /// every row at the viewport width.
     fn emit_table(&mut self, table: TableState) {
-        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
-        if columns == 0 {
-            return;
-        }
-        let mut widths = vec![1usize; columns];
-        for row in &table.rows {
-            for (index, cell) in row.iter().enumerate() {
-                widths[index] = widths[index].max(display_width(&cell.text));
-            }
-        }
-        let avail = self.avail();
-        for (index, row) in table.rows.iter().enumerate() {
-            let head = table.has_head && index == 0;
-            self.begin_row();
-            self.push_prefix();
-            let mut used = 0usize;
-            for (column, width) in widths.iter().enumerate() {
-                if column > 0 && !self.push_cut(" │ ", Face::Marker, &mut used, avail) {
-                    break;
-                }
-                let empty = Cell {
-                    text: String::new(),
-                    faces: Vec::new(),
-                };
-                let cell = row.get(column).unwrap_or(&empty);
-                let pad = width - display_width(&cell.text);
-                let (left, right) = match table.aligns.get(column) {
-                    Some(Alignment::Right) => (pad, 0),
-                    Some(Alignment::Center) => (pad / 2, pad - pad / 2),
-                    _ => (0, pad),
-                };
-                if !self.push_pad(left, &mut used, avail) {
-                    break;
-                }
-                if !self.push_cell(cell, head, &mut used, avail) {
-                    break;
-                }
-                if !self.push_pad(right, &mut used, avail) {
-                    break;
+        let cell_text = std::mem::take(&mut self.cell_text);
+        let cell_faces = std::mem::take(&mut self.cell_faces);
+        let row_cells = |index: usize| {
+            let from = table.rows[index];
+            let to = table
+                .rows
+                .get(index + 1)
+                .copied()
+                .unwrap_or(table.cells.len());
+            &table.cells[from..to]
+        };
+        let columns = (0..table.rows.len())
+            .map(|index| row_cells(index).len())
+            .max()
+            .unwrap_or(0);
+        if columns > 0 {
+            let mut widths = vec![1usize; columns];
+            for index in 0..table.rows.len() {
+                for (column, cell) in row_cells(index).iter().enumerate() {
+                    widths[column] =
+                        widths[column].max(display_width(&cell_text[cell.text.clone()]));
                 }
             }
-            if head {
-                self.begin_row();
+            let avail = self.avail();
+            for index in 0..table.rows.len() {
+                let head = table.has_head && index == 0;
+                if !self.begin_row() {
+                    break;
+                }
                 self.push_prefix();
-                self.set_face(Face::Marker);
+                let cells = row_cells(index);
                 let mut used = 0usize;
                 for (column, width) in widths.iter().enumerate() {
-                    if column > 0 && !self.push_cut("─┼─", Face::Marker, &mut used, avail) {
+                    if column > 0 && !self.push_cut(" │ ", &mut used, avail) {
                         break;
                     }
-                    for _ in 0..*width {
-                        if used >= avail {
+                    let (text, faces) = match cells.get(column) {
+                        Some(cell) => (
+                            &cell_text[cell.text.clone()],
+                            &cell_faces[cell.faces.clone()],
+                        ),
+                        None => ("", &[][..]),
+                    };
+                    let pad = width - display_width(text);
+                    let (left, right) = match table.aligns.get(column) {
+                        Some(Alignment::Right) => (pad, 0),
+                        Some(Alignment::Center) => (pad / 2, pad - pad / 2),
+                        _ => (0, pad),
+                    };
+                    if !self.push_pad(left, &mut used, avail)
+                        || !self.push_cell(text, faces, head, &mut used, avail)
+                        || !self.push_pad(right, &mut used, avail)
+                    {
+                        break;
+                    }
+                }
+                if head && self.begin_row() {
+                    self.push_prefix();
+                    self.set_face(Face::Marker);
+                    let mut used = 0usize;
+                    for (column, width) in widths.iter().enumerate() {
+                        if column > 0 && !self.push_cut("─┼─", &mut used, avail) {
                             break;
                         }
-                        self.out.text.push('─');
-                        used += 1;
+                        for _ in 0..*width {
+                            if used >= avail {
+                                break;
+                            }
+                            self.out.text.push('─');
+                            used += 1;
+                        }
                     }
                 }
             }
         }
+        self.cell_text = cell_text;
+        self.cell_faces = cell_faces;
     }
 
     /// Append `count` spaces inside the cut.
@@ -629,12 +751,19 @@ impl Renderer<'_> {
 
     /// Append a cell inside the cut, its faces kept; a header cell
     /// reads bold where it has no face of its own.
-    fn push_cell(&mut self, cell: &Cell, head: bool, used: &mut usize, avail: usize) -> bool {
+    fn push_cell(
+        &mut self,
+        text: &str,
+        faces: &[(usize, Face)],
+        head: bool,
+        used: &mut usize,
+        avail: usize,
+    ) -> bool {
         let mut next = 0usize;
         let mut face = Face::Plain;
-        for (at, ch) in cell.text.char_indices() {
-            while next < cell.faces.len() && cell.faces[next].0 <= at {
-                face = cell.faces[next].1;
+        for (at, ch) in text.char_indices() {
+            while next < faces.len() && faces[next].0 <= at {
+                face = faces[next].1;
                 next += 1;
             }
             let shown = if head && face == Face::Plain {
@@ -653,18 +782,17 @@ impl Renderer<'_> {
         true
     }
 
-    /// Append `text` inside the cut, whole or not at all.
-    fn push_cut(&mut self, text: &str, face: Face, used: &mut usize, avail: usize) -> bool {
+    /// Append a table line inside the cut, whole or not at all.
+    fn push_cut(&mut self, text: &str, used: &mut usize, avail: usize) -> bool {
         let cols = display_width(text);
         if *used + cols > avail {
             return false;
         }
-        self.push_out(text, face);
+        self.push_out(text, Face::Marker);
         *used += cols;
         true
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +1021,101 @@ mod tests {
             texts("<div>\nx\n</div>\n", 80),
             vec!["<div>", "x", "</div>"]
         );
+    }
+
+    #[test]
+    fn a_quote_that_opens_an_item_keeps_the_marker_and_the_bar() {
+        assert_eq!(texts("- > careful", 80), vec!["• │ careful"]);
+        assert_eq!(
+            texts("1. > x\n   > y\n2. z", 80),
+            vec!["1. │ x", "   │ y", "2. z"]
+        );
+        assert_eq!(texts("- > > deep 日本", 80), vec!["• │ │ deep 日本"]);
+    }
+
+    #[test]
+    fn a_link_whose_text_crosses_a_line_break_keeps_its_destination() {
+        assert_eq!(
+            texts(
+                "Read the [documentation for the\nAPI](http://example.test/api).",
+                80
+            ),
+            vec![
+                "Read the documentation for the",
+                "API (http://example.test/api)."
+            ]
+        );
+        // The break lands at the end of the link text.
+        assert_eq!(
+            texts("[text\n](http://x) tail", 80),
+            vec!["text", "http://x tail"]
+        );
+        // An image inside a link shows both destinations.
+        assert_eq!(
+            texts("[![alt](i.png)](http://y)", 80),
+            vec!["alt (i.png) (http://y)"]
+        );
+    }
+
+    #[test]
+    fn a_decoded_character_reference_cannot_put_a_control_character_back() {
+        assert_eq!(texts("esc &#27;[31mRED&#13;", 80), vec!["esc [31mRED"]);
+        assert_eq!(texts("&#9;x", 80), vec!["    x"]);
+        assert_eq!(
+            texts("[a&#27;b](http://x/&#27;)", 80),
+            vec!["ab (http://x/)"]
+        );
+    }
+
+    #[test]
+    fn a_loose_list_keeps_its_gap_after_a_nested_list() {
+        assert_eq!(
+            texts("- a\n\n  - b\n\n- c", 80),
+            vec!["• a", "", "  • b", "", "• c"]
+        );
+    }
+
+    #[test]
+    fn prose_keeps_no_faces() {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        let mut faces = Vec::new();
+        let ok = render(
+            "plain prose\n\nand a second paragraph that wraps",
+            12,
+            usize::MAX,
+            Target {
+                text: &mut text,
+                rows: &mut starts,
+                faces: &mut faces,
+            },
+        );
+        assert!(ok);
+        assert!(faces.is_empty(), "{faces:?}");
+        assert_eq!(starts.len(), 6);
+    }
+
+    #[test]
+    fn the_cap_holds_inside_one_event() {
+        // Sixty quote levels leave one column, so a paragraph of three
+        // thousand characters is three thousand rows of a long
+        // prefix: the cap must stop it inside the paragraph.
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        let mut faces = Vec::new();
+        let source = format!("{} {}", ">".repeat(60), "x".repeat(3000));
+        let ok = render(
+            &source,
+            120,
+            4096,
+            Target {
+                text: &mut text,
+                rows: &mut starts,
+                faces: &mut faces,
+            },
+        );
+        assert!(!ok);
+        assert!(text.len() < 4096 + 512, "{}", text.len());
     }
 
     #[test]
