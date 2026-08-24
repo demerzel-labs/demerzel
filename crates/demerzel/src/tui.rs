@@ -23,15 +23,15 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     // The first line on stderr, before the alternate screen. The PTY
     // boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", config.model);
-    let options = Options {
-        history_path: config.history_path.clone(),
-        banner: Some(format!(
-            "{} ({mode}) — /help lists the commands; /exit or Ctrl-D ends the session",
-            config.model
-        )),
-        model: config.model.clone(),
-        mode: mode.to_string(),
-    };
+    let mut options = Options::default();
+    options.history_path = config.history_path.clone();
+    options.banner = Some(format!(
+        "{} ({mode}) — /help lists the commands; /exit or Ctrl-D ends the session",
+        config.model
+    ));
+    options.model = config.model.clone();
+    options.mode = mode.to_string();
+    options.mouse = config.mouse;
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,

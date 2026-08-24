@@ -3,10 +3,11 @@
 //! Three benches decompose the number, all on a 120x40 screen over a
 //! transcript that already holds more history than one screen:
 //! - `frame`: one redraw with no new content. The per-frame cost of
-//!   the layout: the visible tail wraps, the rest of the history does
-//!   not, so the cost does not move with the history length. The
-//!   buffer diff finds nothing to change, so this is the floor of a
-//!   frame; `stream` carries the changed frames.
+//!   the layout: the visible rows come from the blocks' layout
+//!   caches, and the walk stops at the viewport, so the cost does not
+//!   move with the history length. The buffer diff finds nothing to
+//!   change, so this is the floor of a frame; `stream` carries the
+//!   changed frames.
 //! - `ingest`: 64 KiB of model text pushed in 16-byte deltas, no
 //!   frames. The transcript's cost per streamed byte.
 //! - `stream`: the same 64 KiB with a frame every 64 deltas: 65
@@ -19,12 +20,13 @@
 //! against the last one, the same work the live interface does before
 //! the terminal write. Outside this number: the terminal-size query
 //! and the escape-sequence encoding of the changed cells on the live
-//! backend, and the write itself. The transcript stays under its line
-//! cap and its entry cap throughout, so the eviction paths are outside
-//! it too.
+//! backend, and the write itself. The transcript stays under its
+//! block cap throughout, so the drop path is outside it. The stream
+//! crosses the per-block byte cap once, so one block split is inside
+//! `ingest` and `stream`.
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use demerzel_tui::bench::Screen;
+use demerzel_tui::bench::{MAX_BLOCK_BYTES, Screen};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
@@ -37,7 +39,8 @@ const DELTAS_PER_FRAME: usize = 64;
 /// Frames in one `stream` iteration: one per batch, one at the end.
 const FRAMES: usize = STREAM / DELTA / DELTAS_PER_FRAME + 1;
 
-/// A history line; lengths cycle from one row to several wrapped rows.
+/// A history block of one line; lengths cycle from one row to several
+/// wrapped rows.
 fn history_line(index: usize) -> String {
     format!(
         "{index:05} {}",
@@ -105,18 +108,18 @@ fn bench_render(c: &mut Criterion) {
         .collect();
     let mut group = c.benchmark_group("render");
 
-    // Workload checks, once and outside the timed spans: every
-    // streamed line lands as one transcript line, the total stays
-    // under the cap so the drop path is not measured, and the stream
+    // Workload checks, once and outside the timed spans: the stream
+    // lands as one block per byte cap, the total stays under the
+    // block cap so the drop path is not measured, and the stream
     // draws the frame count the throughput names.
-    let streamed_lines = HISTORY_LINES + text.matches('\n').count() + 1;
+    let streamed_blocks = HISTORY_LINES + STREAM.div_ceil(MAX_BLOCK_BYTES);
     let mut check = screen_with_history();
-    assert_eq!(check.lines(), HISTORY_LINES);
+    assert_eq!(check.blocks(), HISTORY_LINES);
     ingest(&mut check, &deltas);
-    assert_eq!(check.lines(), streamed_lines);
+    assert_eq!(check.blocks(), streamed_blocks);
     let mut check = screen_with_history();
     assert_eq!(stream(&mut check, &deltas), FRAMES);
-    assert_eq!(check.lines(), streamed_lines);
+    assert_eq!(check.blocks(), streamed_blocks);
     drop(check);
 
     let mut screen = screen_with_history();

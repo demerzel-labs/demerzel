@@ -59,6 +59,12 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         "off"
     };
     print_setting(out, "history_file", history, settings.history_file.origin)?;
+    let mouse = if settings.tui.mouse.value {
+        "on"
+    } else {
+        "off"
+    };
+    print_setting(out, "tui.mouse", mouse, settings.tui.mouse.origin)?;
     let base_url = settings
         .base_url
         .value

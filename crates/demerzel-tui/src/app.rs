@@ -5,13 +5,19 @@
 //! line, during a turn it aborts the turn by dropping its future, and
 //! at an approval question it stops the turn. Ctrl-D on an empty line
 //! ends the session.
+//!
+//! The transcript follows the bottom until the user scrolls up: the
+//! wheel, PageUp, and PageDown browse; End and a submitted line return
+//! to the bottom.
 
 use std::future::poll_fn;
 use std::io;
 use std::time::Duration;
 
 use demerzel_core::ApprovalAnswer;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -28,6 +34,9 @@ use crate::{Options, PROMPT, Submission, TurnFuture};
 /// interface dirty; the frame timer draws at the deadline. This caps
 /// draw cost during fast streams without adding idle wakeups.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// Rows one wheel notch scrolls.
+const WHEEL_ROWS: usize = 3;
 
 /// What a handled key asks the loop to do.
 enum Action {
@@ -109,7 +118,7 @@ impl App {
         // The signal listener installs before the terminal goes raw,
         // so an external SIGINT can never kill a raw terminal.
         let sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
-        let guard = Guard::enter()?;
+        let guard = Guard::enter(options.mouse)?;
         let keys = spawn_input_thread();
         let (display_tx, displays) = mpsc::unbounded_channel();
         let (approval_tx, approvals) = mpsc::unbounded_channel();
@@ -157,10 +166,7 @@ impl App {
         loop {
             let action = tokio::select! {
                 event = self.keys.recv() => match event {
-                    Some(event) => {
-                        self.dirty = true;
-                        self.terminal_event(event, Phase::Idle)
-                    }
+                    Some(event) => self.terminal_event(event, Phase::Idle),
                     // The input thread died; without keys the session
                     // cannot continue.
                     None => Action::Exit,
@@ -223,10 +229,7 @@ impl App {
             let action = match wake {
                 Wake::Done => break,
                 Wake::Frame => Action::None,
-                Wake::Key(Some(event)) => {
-                    self.dirty = true;
-                    self.terminal_event(event, Phase::Turn)
-                }
+                Wake::Key(Some(event)) => self.terminal_event(event, Phase::Turn),
                 Wake::Key(None) | Wake::Signal => self.ctrl_c(Phase::Turn),
                 // The loop holds senders for both channels, so `None`
                 // cannot happen; abort instead of spinning if a
@@ -323,25 +326,45 @@ impl App {
         // driver passes `None` — gets only the question row.
         if let Some(preview) = &request.preview {
             self.transcript
-                .push_line(Kind::Status, &format!("{} wants to run:", request.tool));
+                .push_line(Kind::Notice, &format!("{} wants to run:", request.tool));
             self.transcript.push_line(Kind::Notice, preview);
         }
         // A question needs its call visible: jump to the bottom, where
         // the preview and the question row are.
-        self.transcript.scroll = 0;
+        self.transcript.follow();
         self.mode = Mode::Approval {
             tool: request.tool,
             reply: request.reply,
         };
     }
 
+    /// Apply one terminal event. Only an event that changes what the
+    /// screen shows marks a frame: a mouse event other than the wheel
+    /// changes nothing and must not wake one.
     fn terminal_event(&mut self, event: Event, phase: Phase) -> Action {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key, phase),
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                self.dirty = true;
+                self.key(key, phase)
+            }
             Event::Paste(text) => {
                 if matches!(self.mode, Mode::Edit) {
                     self.input.insert_str(&normalize_paste(&text));
+                    self.dirty = true;
                 }
+                Action::None
+            }
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.transcript.scroll_up(WHEEL_ROWS),
+                    MouseEventKind::ScrollDown => self.transcript.scroll_down(WHEEL_ROWS),
+                    _ => return Action::None,
+                }
+                self.dirty = true;
+                Action::None
+            }
+            Event::Resize(..) => {
+                self.dirty = true;
                 Action::None
             }
             _ => Action::None,
@@ -349,6 +372,25 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent, phase: Phase) -> Action {
+        // The browse keys work at every prompt, the approval question
+        // included: the call under question may sit above the window.
+        match key.code {
+            KeyCode::PageUp => {
+                self.transcript.scroll_up(usize::from(self.page.max(1)));
+                return Action::None;
+            }
+            KeyCode::PageDown => {
+                self.transcript.scroll_down(usize::from(self.page.max(1)));
+                return Action::None;
+            }
+            // End returns a browsed transcript to follow mode; at the
+            // bottom it is the cursor key, with Ctrl-E as the twin.
+            KeyCode::End if self.transcript.browsing() => {
+                self.transcript.follow();
+                return Action::None;
+            }
+            _ => {}
+        }
         if matches!(self.mode, Mode::Approval { .. }) {
             return self.approval_key(key);
         }
@@ -375,6 +417,8 @@ impl App {
                     let line = self.input.take();
                     let line = line.trim();
                     if !line.is_empty() {
+                        // The reply lands at the bottom; show it.
+                        self.transcript.follow();
                         return Action::Submit(line.to_string());
                     }
                 }
@@ -396,15 +440,6 @@ impl App {
                     let text = text.to_string();
                     self.input.set(&text);
                 }
-            }
-            KeyCode::PageUp => {
-                self.transcript.scroll += usize::from(self.page.max(1));
-            }
-            KeyCode::PageDown => {
-                self.transcript.scroll = self
-                    .transcript
-                    .scroll
-                    .saturating_sub(usize::from(self.page.max(1)));
             }
             _ => {}
         }

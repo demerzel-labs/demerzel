@@ -1,8 +1,9 @@
 //! Frame rendering: the transcript pane above, the input line below.
 //!
 //! Functions over interface state, driven in tests through ratatui's
-//! `TestBackend` without a terminal. The one write-back: `draw`
-//! clamps the transcript's scroll to the rows that exist.
+//! `TestBackend` without a terminal. The write-backs: `draw` lays out
+//! the blocks it shows and clamps the transcript's scroll to the rows
+//! that exist.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -14,7 +15,7 @@ use unicode_width::UnicodeWidthChar as _;
 use crate::PROMPT;
 use crate::input::Input;
 use crate::transcript::{Kind, Transcript};
-use crate::wrap::{display_width, wrap};
+use crate::wrap::display_width;
 
 /// What the status bar names: the model, the mode, the open session,
 /// and the open session's token totals, counted from this run's
@@ -126,43 +127,82 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
 fn style(kind: Kind) -> Style {
     match kind {
         Kind::Prompt => Style::default().add_modifier(Modifier::BOLD),
-        Kind::Text | Kind::Status => Style::default(),
+        Kind::Text | Kind::Tool => Style::default(),
         Kind::Reasoning | Kind::Notice => Style::default().add_modifier(Modifier::DIM),
         Kind::Error => Style::default().fg(Color::Red),
     }
 }
 
-/// Wrap and show the tail of the transcript. Only the rows the
-/// viewport and the scroll offset need are wrapped, so a long session
-/// pays for its window, not its history.
+/// Show the tail of the transcript, or the browsed window above it.
+/// Only the blocks the viewport and the scroll need lay out, and a
+/// block lays out once per width, so a long session pays for its
+/// window, not its history.
 fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
     if area.height == 0 {
         return;
     }
     let height = usize::from(area.height);
-    let want = height + transcript.scroll;
+    transcript.begin_frame(area.width, area.height);
+    let want = height.saturating_add(transcript.scroll());
 
-    // Bottom-first rows until the viewport and the offset are covered.
-    let mut rows: Vec<(Kind, &str)> = Vec::new();
-    'collect: for entry in transcript.entries().rev() {
-        for row in wrap(&entry.text, area.width).into_iter().rev() {
-            rows.push((entry.kind, row));
-            if rows.len() >= want {
-                break 'collect;
-            }
+    // Bottom-first: lay out blocks until the viewport and the offset
+    // are covered.
+    let mut visited = 0usize;
+    let mut avail = 0usize;
+    for block in transcript.blocks_mut().rev() {
+        block.sync(area.width);
+        visited += 1;
+        avail += block.rows();
+        if avail >= want {
+            break;
         }
     }
+    transcript.clamp_scroll(avail.saturating_sub(height));
+    let scroll = transcript.scroll();
 
-    let scroll = transcript.scroll.min(rows.len().saturating_sub(height));
-    let lines: Vec<Line<'_>> = rows
-        .iter()
-        .skip(scroll)
-        .take(height)
-        .rev()
-        .map(|(kind, row)| Line::styled(*row, style(*kind)))
-        .collect();
+    // Rows from the bottom: past the offset, then one viewport.
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(height.min(avail));
+    let mut skip = scroll;
+    'collect: for block in transcript.blocks().rev().take(visited) {
+        let rows = block.rows();
+        if rows <= skip {
+            skip -= rows;
+            continue;
+        }
+        for index in (0..rows - skip).rev() {
+            if lines.len() >= height {
+                break 'collect;
+            }
+            lines.push(Line::styled(block.row(index), style(block.kind)));
+        }
+        skip = 0;
+    }
+    lines.reverse();
     frame.render_widget(Paragraph::new(lines), area);
-    transcript.scroll = scroll;
+
+    if scroll > 0 {
+        draw_indicator(frame, area, scroll);
+    }
+}
+
+/// Browse mode: the rows below the viewport and the key back to
+/// follow mode, on the viewport's last row at the right.
+fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
+    let text = format!(" ↓ {below} below · End ");
+    let Ok(width) = u16::try_from(display_width(&text)) else {
+        return;
+    };
+    if width > area.width {
+        return;
+    }
+    let corner = Rect {
+        x: area.x + area.width - width,
+        y: area.y + area.height - 1,
+        width,
+        height: 1,
+    };
+    let line = Line::styled(text, Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(Paragraph::new(line), corner);
 }
 
 /// The prompt and the buffer, windowed so the cursor stays visible.
@@ -377,11 +417,12 @@ mod tests {
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        transcript.scroll = 3;
         let input = Input::new();
         let status = status();
-        let (lines, _) = render(
-            20,
+        // The first frame sets the width; a scroll before it would
+        // reset with the width change.
+        render(
+            40,
             4,
             View {
                 transcript: &mut transcript,
@@ -390,11 +431,23 @@ mod tests {
                 approval: None,
             },
         );
-        assert_eq!(lines[1].trim_end(), "line 6");
-
-        transcript.scroll = 100;
+        transcript.scroll_up(3);
         let (lines, _) = render(
-            20,
+            40,
+            4,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+            },
+        );
+        // The indicator sits at the right of the bottom row.
+        assert!(lines[1].starts_with("line 6"), "{:?}", lines[1]);
+
+        transcript.scroll_up(100);
+        let (lines, _) = render(
+            40,
             4,
             View {
                 transcript: &mut transcript,
@@ -404,7 +457,58 @@ mod tests {
             },
         );
         assert_eq!(lines[0].trim_end(), "line 0");
-        assert_eq!(transcript.scroll, 8);
+        assert_eq!(transcript.scroll(), 8);
+    }
+
+    #[test]
+    fn browse_mode_shows_the_rows_below_and_holds_still_as_rows_arrive() {
+        let mut transcript = Transcript::new();
+        for i in 0..10 {
+            transcript.push_line(Kind::Text, &format!("line {i}"));
+        }
+        let input = Input::new();
+        let status = status();
+        let view = |transcript: &mut Transcript| {
+            render(
+                30,
+                4,
+                View {
+                    transcript,
+                    input: &input,
+                    status: &status,
+                    approval: None,
+                },
+            )
+            .0
+        };
+        // Follow mode: no indicator, the tail at the bottom.
+        let lines = view(&mut transcript);
+        assert_eq!(lines[1].trim_end(), "line 9");
+        assert!(!lines[1].contains("below"));
+
+        transcript.scroll_up(3);
+        let lines = view(&mut transcript);
+        assert_eq!(lines[0].trim_end(), "line 5");
+        assert!(lines[1].starts_with("line 6"), "{:?}", lines[1]);
+        assert!(lines[1].contains("3 below"), "{:?}", lines[1]);
+
+        // Rows that arrive below the window leave it in place and
+        // count on the indicator.
+        transcript.push_line(Kind::Text, "line 10");
+        transcript.push_delta(
+            Kind::Text,
+            "line 11
+line 12",
+        );
+        let lines = view(&mut transcript);
+        assert_eq!(lines[0].trim_end(), "line 5");
+        assert!(lines[1].contains("6 below"), "{:?}", lines[1]);
+
+        // End: the tail again, no indicator.
+        transcript.follow();
+        let lines = view(&mut transcript);
+        assert_eq!(lines[1].trim_end(), "line 12");
+        assert!(!lines[1].contains("below"));
     }
 
     #[test]

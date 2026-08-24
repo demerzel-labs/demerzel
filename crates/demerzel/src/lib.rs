@@ -69,6 +69,9 @@ pub struct RunConfig {
     /// Input-history file for the REPL; `None` keeps history in
     /// memory only.
     pub history_path: Option<PathBuf>,
+    /// Capture the mouse in the full-screen interface, so the wheel
+    /// scrolls the transcript.
+    pub mouse: bool,
 }
 
 impl RunConfig {
@@ -85,6 +88,7 @@ impl RunConfig {
             base_url: None,
             auth: None,
             history_path: None,
+            mouse: true,
         }
     }
 }
