@@ -78,4 +78,13 @@ impl Screen {
     pub fn blocks(&self) -> usize {
         self.transcript.blocks().len()
     }
+
+    /// Blocks whose rows come from a markdown render, among the
+    /// blocks laid out so far.
+    pub fn rendered_blocks(&self) -> usize {
+        self.transcript
+            .blocks()
+            .filter(|block| block.rendered())
+            .count()
+    }
 }

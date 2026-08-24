@@ -251,6 +251,11 @@ impl Block {
         self.layout.faces.is_empty()
     }
 
+    /// Whether the rows come from a markdown render.
+    pub(crate) fn rendered(&self) -> bool {
+        self.layout.rendered.is_some()
+    }
+
     /// One row at the synced width as its spans, in order.
     pub(crate) fn spans<'b>(&'b self, index: usize, mut span: impl FnMut(Face, &'b str)) {
         let (from, row) = self.row_at(index);
@@ -1078,9 +1083,9 @@ mod tests {
 
     #[test]
     fn a_render_past_its_cap_shows_the_source_as_plain_text() {
-        // Rules render at the full width; enough of them outgrow the
-        // rendered-row cap, and the block falls back to its source.
-        let source = "---\n\n".repeat(MAX_BLOCK_BYTES / 5);
+        // Rules render at the full width: 150 of them outgrow the
+        // rendered-row cap at 200 columns and fit it at 10.
+        let source = "---\n\n".repeat(150);
         let mut t = Transcript::new(true);
         t.push_delta(Kind::Text, &source);
         let rows = rows(&mut t, 200);
@@ -1088,7 +1093,7 @@ mod tests {
         assert_eq!(rows[1], "");
         let block = t.blocks().next().unwrap();
         assert!(block.plain());
-        assert!(block.layout.rendered.is_none());
+        assert!(!block.rendered());
         // The block stays plain and lays out from its tail while the
         // width holds; a new width tries the render again.
         assert!(block.layout.fallback);
@@ -1096,8 +1101,10 @@ mod tests {
         let block = t.blocks_mut().next().unwrap();
         assert_eq!(block.sync(200), 1);
         assert!(block.layout.fallback);
-        block.sync(199);
-        assert!(!block.layout.fallback || block.layout.rendered.is_none());
+        block.sync(10);
+        assert!(!block.layout.fallback);
+        assert!(block.rendered());
+        assert_eq!(block.row(0), "──────────");
     }
 
     #[test]

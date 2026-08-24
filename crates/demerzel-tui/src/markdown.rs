@@ -108,17 +108,20 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -
 }
 
 /// One list container: its next ordinal when ordered, the indent its
-/// open item pushed onto the prefix, and whether its items hold
-/// paragraphs — a loose list, whose items part with a blank row.
+/// open item pushed onto the prefix and the prefix length with it,
+/// and whether its items hold paragraphs — a loose list, whose items
+/// part with a blank row.
 struct ListState {
     next: Option<u64>,
     item_cols: usize,
+    item_prefix: usize,
     loose: bool,
 }
 
 /// A list marker waiting for its item's first row, where it takes
 /// the place of the item's indent: where that indent starts in the
-/// prefix, its length, and the marker's text in `marker_text`.
+/// prefix, its length in bytes, and the marker's text in
+/// `marker_text`.
 struct Pending {
     at: usize,
     bytes: usize,
@@ -230,8 +233,11 @@ impl<'s> Renderer<'_, 's> {
                 self.flush_pending();
                 self.gap();
                 // The parser wraps item text in a paragraph only in a
-                // loose list.
-                if let Some(list) = self.lists.last_mut() {
+                // loose list. A paragraph deeper inside the item — in
+                // a quote — says nothing about the list.
+                if let Some(list) = self.lists.last_mut()
+                    && self.prefix.len() == list.item_prefix
+                {
                     list.loose = true;
                 }
             }
@@ -293,6 +299,7 @@ impl<'s> Renderer<'_, 's> {
                 self.lists.push(ListState {
                     next: first,
                     item_cols: 0,
+                    item_prefix: 0,
                     loose: false,
                 });
             }
@@ -307,14 +314,16 @@ impl<'s> Renderer<'_, 's> {
                     None => self.marker_text.push_str("• "),
                 }
                 let cols = display_width(&self.marker_text[start..]);
+                let at = self.prefix.len();
+                self.prefix.extend(std::iter::repeat_n(' ', cols));
                 self.markers.push(Pending {
-                    at: self.prefix.len(),
-                    bytes: cols,
+                    at,
+                    bytes: self.prefix.len() - at,
                     text: start..self.marker_text.len(),
                 });
-                self.prefix.extend(std::iter::repeat_n(' ', cols));
                 if let Some(list) = self.lists.last_mut() {
                     list.item_cols = cols;
+                    list.item_prefix = self.prefix.len();
                 }
             }
             Tag::Table(aligns) => {
@@ -404,10 +413,11 @@ impl<'s> Renderer<'_, 's> {
                         self.out.text.pop();
                     }
                 }
+                // An item's end is the boundary: a loose list parts
+                // its items with a blank row, a tight one does not,
+                // whatever block ended inside the item.
                 let list = self.lists.last();
-                if list.is_some_and(|list| list.loose) {
-                    self.need_gap = true;
-                }
+                self.need_gap = list.is_some_and(|list| list.loose);
                 let cols = list.map_or(0, |list| list.item_cols);
                 self.pop_prefix(cols);
             }
@@ -446,12 +456,13 @@ impl<'s> Renderer<'_, 's> {
                 // The destination shows once: not after text that is
                 // the destination already, and alone when the link
                 // has no text.
+                let from = link.from.min(self.line.len());
                 let has_text = if link.split {
                     !self.line.is_empty()
                 } else {
-                    self.line.len() > link.from
+                    self.line.len() > from
                 };
-                if !link.split && self.line[link.from..] == *link.dest {
+                if !link.split && self.line[from..] == *link.dest {
                     return;
                 }
                 if has_text {
@@ -510,7 +521,12 @@ impl<'s> Renderer<'_, 's> {
             self.line_faces.push((self.line.len(), face));
             self.line_face = face;
         }
-        if text.bytes().all(|byte| byte >= 0x20 && byte != 0x7f) {
+        // The fast path: no ASCII control, and no 0xC2 lead byte,
+        // which is where the C1 controls live.
+        if text
+            .bytes()
+            .all(|byte| byte >= 0x20 && byte != 0x7f && byte != 0xC2)
+        {
             self.line.push_str(text);
             return;
         }
@@ -558,6 +574,7 @@ impl<'s> Renderer<'_, 's> {
     }
 
     /// Start a row, unless the rows reached the cap.
+    #[must_use]
     fn begin_row(&mut self) -> bool {
         if self.full || self.out.text.len() >= self.cap {
             self.full = true;
@@ -610,6 +627,14 @@ impl<'s> Renderer<'_, 's> {
     /// Wrap the line at the width left after the prefix and emit its
     /// rows, the prefix on each. An empty line is one row.
     fn flush_line(&mut self) {
+        if self.full {
+            // The render ends after this event; the wrap pass would
+            // be waste.
+            self.line.clear();
+            self.line_faces.clear();
+            self.line_face = Face::Plain;
+            return;
+        }
         let line = std::mem::take(&mut self.line);
         let faces = std::mem::take(&mut self.line_faces);
         let avail = u16::try_from(self.avail()).unwrap_or(u16::MAX);
@@ -1060,6 +1085,7 @@ mod tests {
     #[test]
     fn a_decoded_character_reference_cannot_put_a_control_character_back() {
         assert_eq!(texts("esc &#27;[31mRED&#13;", 80), vec!["esc [31mRED"]);
+        assert_eq!(texts("csi &#155;[31m é", 80), vec!["csi [31m é"]);
         assert_eq!(texts("&#9;x", 80), vec!["    x"]);
         assert_eq!(
             texts("[a&#27;b](http://x/&#27;)", 80),
@@ -1072,6 +1098,23 @@ mod tests {
         assert_eq!(
             texts("- a\n\n  - b\n\n- c", 80),
             vec!["• a", "", "  • b", "", "• c"]
+        );
+        // A loose inner list parts its own items; the tight outer
+        // list stays tight, and the gap after it goes to the block
+        // that follows the list.
+        assert_eq!(
+            texts("- a\n  - b\n\n  - c\n- d\n", 80),
+            vec!["• a", "  • b", "", "  • c", "• d"]
+        );
+        assert_eq!(
+            texts("- a\n  - b\n\n  - c\n\ntail", 80),
+            vec!["• a", "  • b", "", "  • c", "", "tail"]
+        );
+        // A paragraph inside a quote inside an item leaves the list
+        // tight.
+        assert_eq!(
+            texts("- > q\n- a\n  - b", 80),
+            vec!["• │ q", "• a", "  • b"]
         );
     }
 

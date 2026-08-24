@@ -172,6 +172,14 @@ fn bench_render(c: &mut Criterion) {
         let mut check = screen_with_history(markdown);
         assert_eq!(stream(&mut check, &deltas), FRAMES);
         assert_eq!(check.blocks(), streamed_blocks);
+        // The formatted run measures the markdown path: every
+        // streamed block rendered, none fell back to plain text.
+        let rendered = if markdown {
+            streamed_blocks - HISTORY_LINES
+        } else {
+            0
+        };
+        assert_eq!(check.rendered_blocks(), rendered);
     }
 
     // The frames run before any throughput is set on the group, the
