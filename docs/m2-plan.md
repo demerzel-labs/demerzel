@@ -138,7 +138,8 @@ TOML, three layers plus defaults. Highest wins:
 3. User file: `$XDG_CONFIG_HOME/demerzel/config.toml`.
 4. Built-in defaults.
 
-M2 keys, all optional:
+M2 keys, all optional. The live reference for every key is
+[`config.md`](config.md).
 
 ```toml
 provider = "openai-codex"        # or "anthropic"
@@ -429,7 +430,8 @@ Each step is one PR with its own verify line.
      the `tool_use` and `tool_result` blocks in the messages; the
      `approval` record with the call id for every policy decision.
   3. Environment: the meta record — project directory, provider,
-     model, creation time, schema version.
+     model, creation time, schema version, and, since 2026-08-24, the
+     reasoning effort ([`config.md`](config.md)).
   4. Termination and the per-turn outcome: the `turn` record, new in
      step 7. The engine appends it when a user turn returns:
      `outcome` is `completed`, `max_tokens`, `refused`, `call_limit`,

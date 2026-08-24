@@ -615,8 +615,15 @@ async fn the_plain_interface_shares_the_command_registry() {
     pty.send(b"/model gpt-test\r");
     pty.wait_for("model: gpt-test");
     pty.wait_for(PROMPT);
+    pty.send(b"/effort low\r");
+    pty.wait_for("effort: low");
+    pty.wait_for(PROMPT);
     pty.send(b"hello\r");
     pty.wait_for("plain reply");
+    pty.wait_for(PROMPT);
+    // With the engine open, the switch reaches it in place.
+    pty.send(b"/effort high\r");
+    pty.wait_for("effort: high");
     pty.wait_for(PROMPT);
     pty.send(b"/new\r");
     pty.wait_for("fresh session");
@@ -627,12 +634,14 @@ async fn the_plain_interface_shares_the_command_registry() {
     pty.send(CTRL_D);
     pty.wait_exit();
 
-    // The switch happened before the session opened, and the fresh
-    // session dropped the first exchange.
+    // The switches happened before the session opened and while it
+    // ran, and the fresh session dropped the first exchange.
     let requests = mock.received();
     let first = requests[0].body.to_string();
     let second = requests[1].body.to_string();
     assert!(first.contains("gpt-test"), "{first}");
+    assert_eq!(requests[0].body["reasoning"]["effort"], "low");
+    assert_eq!(requests[1].body["reasoning"]["effort"], "high");
     assert!(second.contains("again"), "{second}");
     assert!(!second.contains("hello"), "{second}");
 }
@@ -746,4 +755,31 @@ async fn the_markdown_config_key_shows_the_raw_text() {
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_effort_flag_and_command_reach_the_requests() {
+    let mock = MockServer::start(
+        vec![text_turn("low reply"), text_turn("high reply")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &["--effort", "low"]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"/effort\r");
+    pty.wait_for("effort: low");
+    pty.send(b"one\r");
+    pty.wait_for("low reply");
+    pty.send(b"/effort high\r");
+    pty.wait_for("effort: high");
+    pty.send(b"two\r");
+    pty.wait_for("high reply");
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    let requests = mock.received();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "low");
+    assert_eq!(requests[1].body["reasoning"]["effort"], "high");
 }

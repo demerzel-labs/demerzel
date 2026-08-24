@@ -15,8 +15,8 @@ pub mod tui;
 use std::path::PathBuf;
 
 use demerzel_core::{
-    ApprovalMode, ApprovalPolicy, Engine, EngineConfig, EngineError, EventSink, Message, NoPrompt,
-    ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
+    ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
+    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
@@ -64,6 +64,8 @@ pub struct RunConfig {
     pub data_root: Option<PathBuf>,
     /// Endpoint override; `None` uses the Codex default.
     pub base_url: Option<String>,
+    /// The reasoning effort every request carries.
+    pub effort: Effort,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
     /// Input-history file for the REPL; `None` keeps history in
@@ -88,6 +90,7 @@ impl RunConfig {
             continue_last: false,
             data_root: None,
             base_url: None,
+            effort: config::DEFAULT_EFFORT,
             auth: None,
             history_path: None,
             mouse: true,
@@ -219,6 +222,7 @@ impl Runtime {
         &self,
         resume: bool,
         model: &str,
+        effort: Effort,
     ) -> Result<(Session, Vec<Message>), RunError> {
         if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
             let (mut session, replay) = Session::resume(&path)?;
@@ -240,20 +244,30 @@ impl Runtime {
                     &self.config.project_dir,
                     self.provider.id(),
                     model,
+                    Some(effort),
                 ))?;
                 return Ok((session, replay.messages));
             }
         }
-        let session = self
-            .store
-            .create(&self.config.project_dir, self.provider.id(), model)?;
+        let session = self.store.create(
+            &self.config.project_dir,
+            self.provider.id(),
+            model,
+            Some(effort),
+        )?;
         Ok((session, Vec::new()))
     }
 
     /// Build the turn engine over an open session. A read-only run
-    /// advertises only the read tools. `model` is the interface's
-    /// current session model.
-    pub fn engine(&self, session: Session, history: Vec<Message>, model: &str) -> Engine<'_> {
+    /// advertises only the read tools. `model` and `effort` are the
+    /// interface's current session model and effort.
+    pub fn engine(
+        &self,
+        session: Session,
+        history: Vec<Message>,
+        model: &str,
+        effort: Effort,
+    ) -> Engine<'_> {
         let registry = if self.config.approval == ApprovalMode::ReadOnly {
             &self.read_only_registry
         } else {
@@ -261,6 +275,7 @@ impl Runtime {
         };
         let mut engine_config = self.engine_config.clone();
         engine_config.model = model.to_string();
+        engine_config.effort = Some(effort);
         Engine::with_history(
             self.provider.as_ref(),
             registry,
@@ -278,9 +293,12 @@ impl Runtime {
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
-        let (session, history) =
-            self.open_session(self.config.continue_last, &self.config.model)?;
-        let mut engine = self.engine(session, history, &self.config.model);
+        let (session, history) = self.open_session(
+            self.config.continue_last,
+            &self.config.model,
+            self.config.effort,
+        )?;
+        let mut engine = self.engine(session, history, &self.config.model, self.config.effort);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
 }

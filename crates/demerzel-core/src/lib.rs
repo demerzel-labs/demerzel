@@ -18,7 +18,9 @@ pub use engine::{
     EngineEvent, EventSink, NoPrompt, TurnOutcome,
 };
 pub use message::{ContentBlock, Message, Role, SealedPayload, StopReason, Usage};
-pub use provider::{Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
+pub use provider::{
+    Capabilities, Effort, EventStream, Provider, ProviderError, Request, StreamEvent,
+};
 pub use session::{
     Replay, SCHEMA_VERSION, Session, SessionMeta, SessionRecord, SessionStore, replay,
 };

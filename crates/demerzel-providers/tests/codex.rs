@@ -5,7 +5,7 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use demerzel_core::{ContentBlock, Message, Role, SealedPayload, StopReason};
+use demerzel_core::{ContentBlock, Effort, Message, Role, SealedPayload, StopReason};
 use demerzel_mock::{MockResponse, MockServer};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
@@ -206,6 +206,38 @@ async fn reasoning_summary_parts_arrive_as_paragraphs() {
         })
         .collect();
     assert_eq!(reasoning, "**First**\n\n**Second**\n\n**Third**");
+}
+
+#[tokio::test]
+async fn the_request_effort_lands_in_the_reasoning_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let done = || {
+        MockResponse::stream(vec![
+            json!({"type": "response.output_text.delta", "delta": "ok"}),
+            completed(json!({"input_tokens": 1, "output_tokens": 1})),
+        ])
+    };
+    let mock = MockServer::start(vec![done(), done()], vec![]).await;
+    let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
+
+    let mut with_effort = request(Vec::new(), Vec::new());
+    with_effort.effort = Some(Effort::XHigh);
+    collect(provider.stream(with_effort).await.unwrap()).await;
+    collect(
+        provider
+            .stream(request(Vec::new(), Vec::new()))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let received = mock.received();
+    assert_eq!(received[0].body["reasoning"]["effort"], "xhigh");
+    assert_eq!(received[0].body["reasoning"]["summary"], "auto");
+    // No effort on the request: the provider's own default applies,
+    // and the summary setting stays.
+    assert!(received[1].body["reasoning"].get("effort").is_none());
+    assert_eq!(received[1].body["reasoning"]["summary"], "auto");
 }
 
 #[tokio::test]

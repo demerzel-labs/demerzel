@@ -19,15 +19,19 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use demerzel_core::ApprovalMode;
+use demerzel_core::{ApprovalMode, Effort};
 
 /// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
+/// The reasoning effort when nothing sets one. High: the Messages
+/// API's own default, and the level a coding agent wants.
+pub const DEFAULT_EFFORT: Effort = Effort::High;
 
 /// Environment variables, one per flag.
 pub const ENV_PROVIDER: &str = "DEMERZEL_PROVIDER";
 pub const ENV_MODEL: &str = "DEMERZEL_MODEL";
 pub const ENV_BASE_URL: &str = "DEMERZEL_BASE_URL";
+pub const ENV_EFFORT: &str = "DEMERZEL_EFFORT";
 
 /// Which layer set a key. `doctor` prints it next to each value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,8 @@ pub struct Settings {
     pub base_url: Setting<Option<String>>,
     /// `None` keeps the M1 rule: the REPL asks, one-shot is read-only.
     pub approval: Setting<Option<ApprovalMode>>,
+    /// The reasoning effort every request carries.
+    pub effort: Setting<Effort>,
     pub history_file: Setting<bool>,
     /// The `[tui]` table.
     pub tui: TuiSettings,
@@ -108,6 +114,7 @@ pub struct Flags {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub approval: Option<ApprovalMode>,
+    pub effort: Option<Effort>,
 }
 
 /// Per-provider keys from a `[providers.<id>]` table.
@@ -115,6 +122,7 @@ pub struct Flags {
 struct ProviderKeys {
     base_url: Option<String>,
     model: Option<String>,
+    effort: Option<Effort>,
 }
 
 /// Interface keys from the `[tui]` table.
@@ -130,6 +138,7 @@ pub struct Layer {
     provider: Option<String>,
     model: Option<String>,
     approval: Option<ApprovalMode>,
+    effort: Option<Effort>,
     history_file: Option<bool>,
     providers: BTreeMap<String, ProviderKeys>,
     tui: TuiKeys,
@@ -154,6 +163,7 @@ impl Layer {
             match key.as_str() {
                 "provider" => layer.provider = Some(expect_string(&key, value)?),
                 "model" => layer.model = Some(expect_string(&key, value)?),
+                "effort" => layer.effort = Some(expect_effort(&key, value)?),
                 "approval" => {
                     layer.approval = Some(parse_approval(&expect_string(&key, value)?)?);
                 }
@@ -210,6 +220,7 @@ fn parse_providers(
             match key.as_str() {
                 "base_url" => keys.base_url = Some(expect_string(&path, value)?),
                 "model" => keys.model = Some(expect_string(&path, value)?),
+                "effort" => keys.effort = Some(expect_effort(&path, value)?),
                 _ => warnings.push(format!("unknown key `{path}`")),
             }
         }
@@ -232,6 +243,12 @@ fn parse_tui(
         }
     }
     Ok(())
+}
+
+fn expect_effort(key: &str, value: toml::Value) -> Result<Effort, String> {
+    expect_string(key, value)?
+        .parse()
+        .map_err(|error| format!("`{key}` {error}"))
 }
 
 fn expect_bool(key: &str, value: toml::Value) -> Result<bool, String> {
@@ -438,6 +455,56 @@ pub fn resolve(
         .or_else(|| user_approval.map(some_setting))
         .unwrap_or_else(|| Setting::new(None, Origin::Default));
 
+    // Within one layer the provider table's `effort` wins over the
+    // top-level one; unlike `model`, a level belongs to no provider,
+    // so a layer that names another provider still lends its
+    // top-level `effort`. Trust rule: the project file can lower the
+    // effort, never raise it above the user file's level or the
+    // default — a high effort costs more, and a project file travels
+    // with the repository. A flag or the environment decides
+    // outright, so no warning then.
+    let layer_effort = |layer: Option<&Layer>, origin| {
+        layer_key(layer, origin, |l| {
+            l.providers
+                .get(&provider.value)
+                .and_then(|p| p.effort)
+                .or(l.effort)
+        })
+    };
+    let flag_or_env_effort = flags
+        .effort
+        .map(|v| Setting::new(v, Origin::Flag))
+        .or_else(|| {
+            env(ENV_EFFORT).and_then(|value| match value.parse() {
+                Ok(effort) => Some(Setting::new(effort, Origin::Env)),
+                Err(error) => {
+                    warnings.push(format!("ignored: {ENV_EFFORT}: {error}"));
+                    None
+                }
+            })
+        });
+    let user_effort = layer_effort(user, Origin::User);
+    let effort_baseline = user_effort
+        .as_ref()
+        .map_or(DEFAULT_EFFORT, |setting| setting.value);
+    let project_effort = match layer_effort(project, Origin::Project) {
+        Some(setting) if setting.value > effort_baseline => {
+            if flag_or_env_effort.is_none() {
+                warnings.push(format!(
+                    "ignored: the project file sets effort = {}; a project file \
+                     cannot raise the effort; use --effort, {ENV_EFFORT}, or the user file",
+                    setting.value
+                ));
+            }
+            None
+        }
+        other => other,
+    };
+    let effort = flag_or_env_effort
+        .or(project_effort)
+        .or(user_effort)
+        .unwrap_or_else(|| Setting::new(DEFAULT_EFFORT, Origin::Default));
+
     // Trust rule: the project file can turn the history file off,
     // never on against a user who turned it off.
     let user_history = layer_key(user, Origin::User, |l| l.history_file);
@@ -479,6 +546,7 @@ pub fn resolve(
             model,
             base_url,
             approval,
+            effort,
             history_file,
             tui: TuiSettings { mouse, markdown },
         },
@@ -599,6 +667,77 @@ mod tests {
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
         assert!(settings.tui.markdown.value);
         assert_eq!(settings.tui.markdown.origin, Origin::Project);
+    }
+
+    #[test]
+    fn effort_resolves_by_layer_and_the_project_file_cannot_raise_it() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.effort.value, Effort::High);
+        assert_eq!(settings.effort.origin, Origin::Default);
+
+        let user = layer("effort = \"low\"\n[providers.openai-codex]\neffort = \"high\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(
+            settings.effort.value,
+            Effort::High,
+            "the provider table wins"
+        );
+        let flags = Flags {
+            provider: Some("anthropic".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert_eq!(
+            settings.effort.value,
+            Effort::Low,
+            "another provider takes the top-level key"
+        );
+
+        // The project file lowers, never raises: not above the user
+        // file's level, and not above the default when the user file
+        // is silent.
+        let user = layer("effort = \"low\"");
+        let project = layer("effort = \"low\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.effort.value, Effort::Low);
+        assert_eq!(settings.effort.origin, Origin::Project);
+        let project = layer("effort = \"medium\"");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.effort.value, Effort::Low);
+        assert_eq!(settings.effort.origin, Origin::User);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("effort"));
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
+        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.origin, Origin::Project);
+
+        // A flag or the environment decides outright; a bad variable
+        // is ignored with a warning.
+        let flags = Flags {
+            effort: Some(Effort::High),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, Some(&layer("effort = \"low\"")), None);
+        assert_eq!(settings.effort.value, Effort::High);
+        assert_eq!(settings.effort.origin, Origin::Flag);
+        let env = |name: &str| (name == ENV_EFFORT).then(|| "high".to_string());
+        let settings = resolve_clean(&Flags::default(), &env, None, None);
+        assert_eq!(settings.effort.origin, Origin::Env);
+        let env = |name: &str| (name == ENV_EFFORT).then(|| "extreme".to_string());
+        let (settings, warnings) = resolve(&Flags::default(), &env, None, None);
+        assert_eq!(settings.effort.value, Effort::High);
+        assert!(warnings[0].contains(ENV_EFFORT));
+
+        assert!(
+            Layer::parse("effort = \"extreme\"")
+                .unwrap_err()
+                .contains("effort")
+        );
+        assert_eq!(
+            layer("effort = \"ultra\"").effort,
+            Some(Effort::Ultra),
+            "every level parses"
+        );
     }
 
     #[test]

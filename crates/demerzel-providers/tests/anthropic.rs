@@ -4,7 +4,7 @@
 use std::future::poll_fn;
 use std::time::Duration;
 
-use demerzel_core::{ContentBlock, Message, Role, SealedPayload, StopReason};
+use demerzel_core::{ContentBlock, Effort, Message, Role, SealedPayload, StopReason};
 use demerzel_mock::{MockResponse, MockServer, anthropic as fixtures};
 use demerzel_providers::anthropic::{Anthropic, AnthropicConfig};
 use demerzel_providers::{
@@ -36,6 +36,38 @@ async fn collect(mut stream: EventStream) -> Vec<Result<StreamEvent, ProviderErr
         out.push(item);
     }
     out
+}
+
+#[tokio::test]
+async fn the_request_effort_lands_in_output_config() {
+    let done = || {
+        MockResponse::stream(vec![
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            json!({"type": "message_stop"}),
+        ])
+    };
+    let mock = MockServer::start(vec![done(), done(), done(), done()], vec![]).await;
+    let provider = provider_for(&mock);
+
+    for effort in [
+        Some(Effort::Low),
+        None,
+        Some(Effort::Ultra),
+        Some(Effort::None),
+    ] {
+        let mut request = request(Vec::new(), Vec::new());
+        request.effort = effort;
+        collect(provider.stream(request).await.unwrap()).await;
+    }
+
+    let received = mock.received();
+    assert_eq!(received[0].body["output_config"]["effort"], "low");
+    assert_eq!(received[0].body["thinking"]["type"], "adaptive");
+    assert!(received[1].body.get("output_config").is_none());
+    // The Messages API takes `low` through `max`: the ends clamp.
+    assert_eq!(received[2].body["output_config"]["effort"], "max");
+    assert_eq!(received[3].body["output_config"]["effort"], "low");
 }
 
 #[tokio::test]

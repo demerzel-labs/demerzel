@@ -97,7 +97,7 @@ impl Bed {
 
     fn engine(&self, mode: ApprovalMode) -> Engine<'_> {
         let session = SessionStore::at(self.data.path())
-            .create(self.project.path(), "openai-codex", "test-model")
+            .create(self.project.path(), "openai-codex", "test-model", None)
             .unwrap();
         Engine::new(
             &self.provider,

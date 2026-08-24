@@ -55,6 +55,12 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
     print_setting(out, "approval", &approval, settings.approval.origin)?;
     print_setting(
         out,
+        "effort",
+        settings.effort.value.as_str(),
+        settings.effort.origin,
+    )?;
+    print_setting(
+        out,
         "history_file",
         on_off(settings.history_file.value),
         settings.history_file.origin,

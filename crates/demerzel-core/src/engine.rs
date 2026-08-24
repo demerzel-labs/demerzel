@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{Capabilities, Provider, ProviderError, Request, StreamEvent};
+use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, StreamEvent};
 use crate::session::{Session, SessionMeta};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
@@ -46,6 +46,9 @@ pub struct EngineConfig {
     /// Model calls allowed for one user turn before the loop stops.
     pub max_model_calls: u32,
     pub max_output_tokens: Option<u64>,
+    /// The reasoning effort every request carries; `None` leaves the
+    /// provider's default.
+    pub effort: Option<Effort>,
 }
 
 impl EngineConfig {
@@ -55,6 +58,7 @@ impl EngineConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             max_model_calls: 32,
             max_output_tokens: None,
+            effort: None,
         }
     }
 }
@@ -267,6 +271,7 @@ impl<'a> Engine<'a> {
             self.session.cwd(),
             self.provider.id(),
             model,
+            self.config.effort,
         ))?;
         if model != self.config.model {
             for message in &mut self.history {
@@ -388,7 +393,23 @@ impl<'a> Engine<'a> {
             request.tools = self.tool_definitions.clone();
         }
         request.max_output_tokens = self.config.max_output_tokens;
+        request.effort = self.config.effort;
         request
+    }
+
+    /// Set the reasoning effort for the requests that follow. A fresh
+    /// meta record names it, the way a model switch leaves its trail.
+    pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
+        // The record first, the switch second: a failed write leaves
+        // the engine where the interface still believes it is.
+        self.session.append_meta(&SessionMeta::now(
+            self.session.cwd(),
+            self.provider.id(),
+            &self.config.model,
+            Some(effort),
+        ))?;
+        self.config.effort = Some(effort);
+        Ok(())
     }
 
     /// Append one message to the session file and the history, in that
@@ -787,7 +808,7 @@ mod tests {
 
     fn session_in(dir: &tempfile::TempDir) -> Session {
         SessionStore::at(dir.path())
-            .create(dir.path(), "scripted", "test-model")
+            .create(dir.path(), "scripted", "test-model", None)
             .unwrap()
     }
 
@@ -1353,6 +1374,37 @@ mod tests {
         assert_eq!(replayed.messages, engine.history());
         let canonical = dir.path().canonicalize().unwrap();
         assert_eq!(replayed.meta.unwrap().cwd, canonical.display().to_string());
+    }
+
+    #[test]
+    fn set_effort_reaches_later_requests_and_records_a_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("first".into(), &sink, &mut ApproveAll)).unwrap();
+        engine.set_effort(Effort::High).unwrap();
+        block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
+
+        let requests = provider.requests();
+        assert_eq!(requests[0].effort, None);
+        assert_eq!(requests[1].effort, Some(Effort::High));
+
+        // The switch left a meta record naming the effort, and the
+        // last meta describes the run that continues.
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        let metas: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["type"] == "meta")
+            .collect();
+        assert_eq!(metas.len(), 2);
+        assert!(metas[0].get("effort").is_none());
+        assert_eq!(metas[1]["effort"], "high");
+        let replayed = replay(engine.session().path()).unwrap();
+        assert_eq!(replayed.meta.unwrap().effort.as_deref(), Some("high"));
     }
 
     #[test]

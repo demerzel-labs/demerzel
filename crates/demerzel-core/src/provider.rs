@@ -14,6 +14,8 @@ use std::time::Duration;
 use futures_core::Stream;
 use serde_json::Value;
 
+use serde::{Deserialize, Serialize};
+
 use crate::message::{Message, SealedPayload, StopReason, Usage};
 use crate::tool::{BoxFuture, ToolDefinition};
 
@@ -31,7 +33,7 @@ pub struct Capabilities {
 /// One model request. The system prompt stays separate from history so
 /// prompt assembly can keep the prefix stable. Build one with
 /// [`Request::new`]; the struct is non-exhaustive so later fields
-/// (cache breakpoints, per-request reasoning effort) stay additive.
+/// (cache breakpoints, for one) stay additive.
 ///
 /// `messages` can hold two same-role messages in a row — a repaired or
 /// limit-cut turn produces that shape. An adapter whose wire format
@@ -45,6 +47,9 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<u64>,
+    /// How hard the model reasons on this request. `None` leaves the
+    /// provider's own default.
+    pub effort: Option<Effort>,
 }
 
 impl Request {
@@ -55,7 +60,87 @@ impl Request {
             messages: Vec::new(),
             tools: Vec::new(),
             max_output_tokens: None,
+            effort: None,
         }
+    }
+}
+
+/// How hard the model reasons on a request. The levels are the
+/// Codex vocabulary, by rank; each adapter maps them to its own
+/// knob, and one that takes fewer levels clamps at its ends. Ordered,
+/// so a config rule can say "not above"; a later level must land in
+/// rank order. Non-exhaustive, so that level stays additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum Effort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl Effort {
+    /// Every level, by rank.
+    pub const ALL: [Effort; 8] = [
+        Effort::None,
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::XHigh,
+        Effort::Max,
+        Effort::Ultra,
+    ];
+
+    /// The level names, by rank, for help and error text.
+    pub const NAMES: &'static str = "none, minimal, low, medium, high, xhigh, max, ultra";
+
+    /// The level's wire and config name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::None => "none",
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+            Effort::Ultra => "ultra",
+        }
+    }
+
+    /// The level, held inside `[low, high]`, for a knob with a
+    /// narrower range.
+    pub fn clamp(self, low: Effort, high: Effort) -> Effort {
+        if self < low {
+            low
+        } else if self > high {
+            high
+        } else {
+            self
+        }
+    }
+}
+
+impl std::str::FromStr for Effort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Effort::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+            .ok_or_else(|| format!("must be one of {}, not `{value}`", Effort::NAMES))
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
