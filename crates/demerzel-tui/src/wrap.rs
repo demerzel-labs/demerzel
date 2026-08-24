@@ -146,8 +146,10 @@ mod tests {
         let line = "\u{200b}".repeat(10_000);
         let rows = wrap(&line, 10);
         assert!(rows.len() > 100, "{} rows", rows.len());
+        // The bound is checked before a char, so a row can run over
+        // it by the last char's length less one.
         for row in &rows {
-            assert!(row.len() <= 10 * ROW_BYTES_PER_COLUMN + ROW_BYTES_SLACK);
+            assert!(row.len() <= 10 * ROW_BYTES_PER_COLUMN + ROW_BYTES_SLACK + 3);
         }
         assert_eq!(rows.concat(), line);
     }

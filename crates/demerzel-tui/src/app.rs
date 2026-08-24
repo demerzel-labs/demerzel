@@ -339,8 +339,8 @@ impl App {
     }
 
     /// Apply one terminal event. Only an event that changes what the
-    /// screen shows marks a frame: mouse motion arrives often and
-    /// must not wake one.
+    /// screen shows marks a frame: a mouse event other than the wheel
+    /// changes nothing and must not wake one.
     fn terminal_event(&mut self, event: Event, phase: Phase) -> Action {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {

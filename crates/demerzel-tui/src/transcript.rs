@@ -231,9 +231,8 @@ pub struct Transcript {
     /// Rows between the viewport bottom and the transcript end. The
     /// renderer clamps it against the rows that exist.
     scroll: usize,
-    /// The viewport of the last frame; zero before the first.
+    /// The width of the last frame; zero before the first.
     width: u16,
-    height: u16,
     /// The absolute block count at the last frame: blocks past it
     /// arrived since.
     frame_end: usize,
@@ -248,7 +247,6 @@ impl Transcript {
             tools: HashMap::new(),
             scroll: 0,
             width: 0,
-            height: 0,
             frame_end: 0,
         }
     }
@@ -278,7 +276,7 @@ impl Transcript {
                 self.push_blocks(kind, &overflow);
             }
         } else {
-            let mut text = String::new();
+            let mut text = String::with_capacity(delta.len());
             push_sanitized(&mut text, delta);
             self.push_blocks(kind, &text);
         }
@@ -289,7 +287,7 @@ impl Transcript {
     /// or a pasted prompt is one block of several lines.
     pub fn push_line(&mut self, kind: Kind, text: &str) {
         self.open = None;
-        let mut clean = String::new();
+        let mut clean = String::with_capacity(text.len());
         push_sanitized(&mut clean, text);
         self.push_blocks(kind, &clean);
     }
@@ -376,7 +374,6 @@ impl Transcript {
     /// before, and older than the last frame, sat above the viewport
     /// too, so its rows count as old.
     pub(crate) fn begin_frame(&mut self, width: u16, height: u16) {
-        self.height = height;
         if width != self.width {
             self.width = width;
             self.scroll = 0;
