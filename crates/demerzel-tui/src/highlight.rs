@@ -76,6 +76,10 @@ struct Spec {
     triple: bool,
     /// A `"` or `'` string a line does not close runs on to the next.
     multiline: bool,
+    /// A quote opens a string only where a value starts: at the
+    /// start of the line or after `:`, `-`, `,`, `[`, `{`. An
+    /// apostrophe inside a plain scalar is then a plain byte.
+    quote_at_value: bool,
     /// Letters a string prefix can use, one or two before the quote.
     prefixes: &'static [u8],
     /// `r#"…"#`: a quote and as many hashes as opened it close a raw
@@ -86,9 +90,6 @@ struct Spec {
     /// Dates and times read as numbers: `-`, `:`, and `+` between
     /// digits stay inside one.
     dates: bool,
-    /// A markdown sample: headings, quotes, code spans, and fences,
-    /// in place of the code rules above.
-    markdown: bool,
 }
 
 /// The rules a language starts from: C-style comments, strings with
@@ -103,14 +104,14 @@ const BASE: Spec = Spec {
     backtick: Backtick::None,
     triple: false,
     multiline: false,
+    quote_at_value: false,
     prefixes: &[],
     raw_hashes: false,
     numbers: true,
     dates: false,
-    markdown: false,
 };
 
-const RUST: Spec = Spec {
+static RUST: Spec = Spec {
     keywords: RUST_KEYWORDS,
     nested_comments: true,
     single: Single::Char,
@@ -120,7 +121,7 @@ const RUST: Spec = Spec {
     ..BASE
 };
 
-const PYTHON: Spec = Spec {
+static PYTHON: Spec = Spec {
     keywords: PYTHON_KEYWORDS,
     line_comment: "#",
     block_comment: false,
@@ -129,20 +130,20 @@ const PYTHON: Spec = Spec {
     ..BASE
 };
 
-const JAVASCRIPT: Spec = Spec {
+static JAVASCRIPT: Spec = Spec {
     keywords: JAVASCRIPT_KEYWORDS,
     backtick: Backtick::Template,
     ..BASE
 };
 
-const GO: Spec = Spec {
+static GO: Spec = Spec {
     keywords: GO_KEYWORDS,
     single: Single::Char,
     backtick: Backtick::Raw,
     ..BASE
 };
 
-const SHELL: Spec = Spec {
+static SHELL: Spec = Spec {
     keywords: SHELL_KEYWORDS,
     line_comment: "#",
     comment_after_space: true,
@@ -153,13 +154,15 @@ const SHELL: Spec = Spec {
     ..BASE
 };
 
-const JSON: Spec = Spec {
+/// Plain JSON has no comments. The rules keep them for the files
+/// that carry them; a `//` outside a string is never data.
+static JSON: Spec = Spec {
     keywords: JSON_KEYWORDS,
     single: Single::None,
     ..BASE
 };
 
-const TOML: Spec = Spec {
+static TOML: Spec = Spec {
     keywords: TOML_KEYWORDS,
     line_comment: "#",
     block_comment: false,
@@ -169,48 +172,52 @@ const TOML: Spec = Spec {
     ..BASE
 };
 
-const YAML: Spec = Spec {
+static YAML: Spec = Spec {
     keywords: YAML_KEYWORDS,
     line_comment: "#",
     comment_after_space: true,
     block_comment: false,
     single: Single::Str { escapes: false },
     multiline: true,
+    quote_at_value: true,
     ..BASE
 };
 
-const MARKDOWN: Spec = Spec {
-    markdown: true,
-    ..BASE
-};
+/// What a label names: a language under the code rules, or a
+/// markdown sample with rules of its own.
+#[derive(Clone, Copy)]
+enum Lang {
+    Code(&'static Spec),
+    Markdown,
+}
 
 /// Fence labels and the language each names, compared without case.
-const LABELS: &[(&str, &Spec)] = &[
-    ("rust", &RUST),
-    ("rs", &RUST),
-    ("python", &PYTHON),
-    ("py", &PYTHON),
-    ("python3", &PYTHON),
-    ("javascript", &JAVASCRIPT),
-    ("js", &JAVASCRIPT),
-    ("jsx", &JAVASCRIPT),
-    ("mjs", &JAVASCRIPT),
-    ("typescript", &JAVASCRIPT),
-    ("ts", &JAVASCRIPT),
-    ("tsx", &JAVASCRIPT),
-    ("go", &GO),
-    ("golang", &GO),
-    ("sh", &SHELL),
-    ("bash", &SHELL),
-    ("zsh", &SHELL),
-    ("shell", &SHELL),
-    ("json", &JSON),
-    ("jsonc", &JSON),
-    ("toml", &TOML),
-    ("yaml", &YAML),
-    ("yml", &YAML),
-    ("markdown", &MARKDOWN),
-    ("md", &MARKDOWN),
+static LABELS: &[(&str, Lang)] = &[
+    ("rust", Lang::Code(&RUST)),
+    ("rs", Lang::Code(&RUST)),
+    ("python", Lang::Code(&PYTHON)),
+    ("py", Lang::Code(&PYTHON)),
+    ("python3", Lang::Code(&PYTHON)),
+    ("javascript", Lang::Code(&JAVASCRIPT)),
+    ("js", Lang::Code(&JAVASCRIPT)),
+    ("jsx", Lang::Code(&JAVASCRIPT)),
+    ("mjs", Lang::Code(&JAVASCRIPT)),
+    ("typescript", Lang::Code(&JAVASCRIPT)),
+    ("ts", Lang::Code(&JAVASCRIPT)),
+    ("tsx", Lang::Code(&JAVASCRIPT)),
+    ("go", Lang::Code(&GO)),
+    ("golang", Lang::Code(&GO)),
+    ("sh", Lang::Code(&SHELL)),
+    ("bash", Lang::Code(&SHELL)),
+    ("zsh", Lang::Code(&SHELL)),
+    ("shell", Lang::Code(&SHELL)),
+    ("json", Lang::Code(&JSON)),
+    ("jsonc", Lang::Code(&JSON)),
+    ("toml", Lang::Code(&TOML)),
+    ("yaml", Lang::Code(&YAML)),
+    ("yml", Lang::Code(&YAML)),
+    ("markdown", Lang::Markdown),
+    ("md", Lang::Markdown),
 ];
 
 const RUST_KEYWORDS: &[&str] = &[
@@ -262,8 +269,12 @@ const JAVASCRIPT_KEYWORDS: &[&str] = &[
     "new",
     "null",
     "of",
+    "private",
+    "protected",
+    "public",
     "readonly",
     "return",
+    "satisfies",
     "static",
     "super",
     "switch",
@@ -318,7 +329,9 @@ const SHELL_KEYWORDS: &[&str] = &[
 ];
 const JSON_KEYWORDS: &[&str] = &["false", "null", "true"];
 const TOML_KEYWORDS: &[&str] = &["false", "inf", "nan", "true"];
-const YAML_KEYWORDS: &[&str] = &["false", "null", "true"];
+const YAML_KEYWORDS: &[&str] = &[
+    "FALSE", "False", "NULL", "Null", "TRUE", "True", "false", "null", "true",
+];
 
 /// A string under scan: what closes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +348,7 @@ struct Quote {
     lines: bool,
 }
 
-/// What carries from one line to the next.
+/// What carries from one line to the next under the code rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Code,
@@ -345,11 +358,6 @@ enum State {
     },
     /// Inside a string.
     Str(Quote),
-    /// Inside a fence of a markdown sample, opened by `run` of `ch`.
-    Fence {
-        ch: u8,
-        run: usize,
-    },
 }
 
 /// The class changes of one line, with runs of one class joined.
@@ -369,38 +377,61 @@ impl<F: FnMut(usize, Class)> Emit<F> {
 
 /// The scanner for one fence: its language and the state that
 /// carries between lines.
-pub(crate) struct Highlighter {
+pub(crate) enum Highlighter {
+    Code(Code),
+    Markdown(Markdown),
+}
+
+/// A language under the code rules.
+pub(crate) struct Code {
     spec: &'static Spec,
     state: State,
 }
 
+/// A markdown sample: the fence open inside it, as its byte and its
+/// run length.
+pub(crate) struct Markdown {
+    fence: Option<(u8, usize)>,
+}
+
 impl Highlighter {
     /// The highlighter for a fence label, or `None` for a label
-    /// outside the set.
+    /// outside the set. The label ends at whitespace, a comma, or a
+    /// brace, where the info string's own conventions start:
+    /// `rust,ignore`, `python {.numberLines}`.
     pub fn for_label(label: &str) -> Option<Self> {
-        let spec = LABELS
+        let label = label
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '{')
+            .next()
+            .unwrap_or("");
+        let lang = LABELS
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(label))
-            .map(|(_, spec)| *spec)?;
-        Some(Self {
-            spec,
-            state: State::Code,
+            .map(|(_, lang)| *lang)?;
+        Some(match lang {
+            Lang::Code(spec) => Self::Code(Code {
+                spec,
+                state: State::Code,
+            }),
+            Lang::Markdown => Self::Markdown(Markdown { fence: None }),
         })
     }
 
     /// Classify `line`, which holds no newline. `emit(at, class)`
-    /// runs at each class change in byte order, first at zero unless
-    /// the line is empty.
+    /// runs at each class change in byte order: the first at zero
+    /// unless the line is empty, each later one past the last and
+    /// inside the line.
     pub fn line(&mut self, line: &str, emit: impl FnMut(usize, Class)) {
         let mut out = Emit { emit, last: None };
-        if self.spec.markdown {
-            self.markdown_line(line.as_bytes(), &mut out);
-        } else {
-            self.code_line(line, &mut out);
+        match self {
+            Self::Code(code) => code.line(line, &mut out),
+            Self::Markdown(markdown) => markdown.line(line.as_bytes(), &mut out),
         }
     }
+}
 
-    fn code_line(&mut self, line: &str, out: &mut Emit<impl FnMut(usize, Class)>) {
+impl Code {
+    fn line(&mut self, line: &str, out: &mut Emit<impl FnMut(usize, Class)>) {
         let bytes = line.as_bytes();
         let mut at = 0usize;
         while at < bytes.len() {
@@ -413,7 +444,7 @@ impl Highlighter {
                     out.mark(at, Class::String);
                     self.string(bytes, at, quote)
                 }
-                State::Code | State::Fence { .. } => self.token(line, at, out),
+                State::Code => self.token(line, at, out),
             };
         }
         // A string that stays on its line ends with it.
@@ -442,11 +473,13 @@ impl Highlighter {
             self.state = State::Comment { depth: 1 };
             return at + 2;
         }
-        if byte == b'"'
-            || (byte == b'\'' && spec.single != Single::None && spec.single != Single::Char)
+        let quotes = !spec.quote_at_value || value_start(bytes, at);
+        if quotes
+            && (byte == b'"'
+                || (byte == b'\'' && spec.single != Single::None && spec.single != Single::Char))
         {
             let escapes = byte == b'"' || spec.single == Single::Str { escapes: true };
-            return self.open_string(bytes, at, at, escapes, false, out);
+            return self.open_string(bytes, at, at, escapes, 0, out);
         }
         if byte == b'\'' && spec.single == Single::Char {
             if let Some(end) = char_literal_end(bytes, at) {
@@ -457,11 +490,10 @@ impl Highlighter {
             return at + 1;
         }
         if byte == b'`' && spec.backtick != Backtick::None {
-            let escapes = spec.backtick == Backtick::Template;
             let quote = Quote {
                 ch: b'`',
                 triple: false,
-                escapes,
+                escapes: spec.backtick == Backtick::Template,
                 hashes: 0,
                 lines: true,
             };
@@ -499,9 +531,10 @@ impl Highlighter {
         at + 1
     }
 
-    /// A string that opens with prefix letters, `word` in the line,
-    /// before its quote: `b"…"`, `r#"…"#`, `f'…'`. Returns where the
-    /// scan continues, or `None` when the word is no prefix.
+    /// A string that opens with prefix letters, `at..end` in the
+    /// line, before its quote: `b"…"`, `r#"…"#`, `f'…'`. Returns
+    /// where the scan continues, or `None` when the word is no
+    /// prefix.
     fn prefixed_string(
         &mut self,
         bytes: &[u8],
@@ -523,43 +556,39 @@ impl Highlighter {
         } else {
             0
         };
-        let quote_at = end + hashes;
+        // More hashes than the closer can count open no string.
+        let hashes = u8::try_from(hashes).ok()?;
+        let quote_at = end + usize::from(hashes);
         let quote = *bytes.get(quote_at)?;
         let opens = quote == b'"' || (quote == b'\'' && spec.single != Single::None && !raw);
-        if !opens || hashes > usize::from(u8::MAX) {
+        if !opens {
             return None;
         }
         // A raw string has no escapes; the hashes close it.
-        Some(self.open_string(bytes, at, quote_at, !raw, raw, out))
+        Some(self.open_string(bytes, at, quote_at, !raw, hashes, out))
     }
 
     /// Open the string whose quote is at `quote_at` and whose span
-    /// starts at `from`; `hashed` counts the hashes between them as
-    /// the closer's. Returns where the scan continues.
+    /// starts at `from`; `hashes` must follow the closing quote.
+    /// Returns where the scan continues.
     fn open_string(
         &mut self,
         bytes: &[u8],
         from: usize,
         quote_at: usize,
         escapes: bool,
-        hashed: bool,
+        hashes: u8,
         out: &mut Emit<impl FnMut(usize, Class)>,
     ) -> usize {
         let spec = self.spec;
         let ch = bytes[quote_at];
         let triple = spec.triple && bytes[quote_at..].starts_with(&[ch, ch, ch]);
-        let hashes = if hashed {
-            // Bounded by the caller.
-            (quote_at - from - 1) as u8
-        } else {
-            0
-        };
         let quote = Quote {
             ch,
             triple,
             escapes,
             hashes,
-            lines: spec.multiline || triple || hashed,
+            lines: spec.multiline || triple || hashes > 0,
         };
         out.mark(from, Class::String);
         self.state = State::Str(quote);
@@ -576,18 +605,24 @@ impl Highlighter {
                 at += 2;
                 continue;
             }
+            // A doubled quote stays inside a string with no escapes:
+            // `'it''s'`.
+            if !quote.escapes && !quote.triple && byte == b'\'' && bytes.get(at + 1) == Some(&byte)
+            {
+                at += 2;
+                continue;
+            }
             if byte == quote.ch {
                 let closer = if quote.triple {
                     bytes[at..]
                         .starts_with(&[byte, byte, byte])
                         .then_some(at + 3)
                 } else {
-                    let hashes = usize::from(quote.hashes);
-                    let end = at + 1 + hashes;
-                    (bytes
+                    let end = at + 1 + usize::from(quote.hashes);
+                    bytes
                         .get(at + 1..end)
-                        .is_some_and(|run| run.iter().all(|&b| b == b'#')))
-                    .then_some(end)
+                        .is_some_and(|run| run.iter().all(|&b| b == b'#'))
+                        .then_some(end)
                 };
                 if let Some(end) = closer {
                     self.state = State::Code;
@@ -622,16 +657,18 @@ impl Highlighter {
         self.state = State::Comment { depth };
         bytes.len()
     }
+}
 
-    /// A markdown sample: a heading line is a keyword, a quote line a
-    /// comment, code spans and fenced or indented code strings.
-    fn markdown_line(&mut self, bytes: &[u8], out: &mut Emit<impl FnMut(usize, Class)>) {
+impl Markdown {
+    /// A heading line is a keyword, a quote line a comment, code
+    /// spans and fenced or indented code strings.
+    fn line(&mut self, bytes: &[u8], out: &mut Emit<impl FnMut(usize, Class)>) {
         if bytes.is_empty() {
             return;
         }
         let indent = bytes.iter().take_while(|&&byte| byte == b' ').count();
-        let rest = &bytes[indent.min(bytes.len())..];
-        if let State::Fence { ch, run } = self.state {
+        let rest = &bytes[indent..];
+        if let Some((ch, run)) = self.fence {
             out.mark(0, Class::String);
             if indent < 4
                 && let Some((close_ch, close_run)) = fence_run(rest)
@@ -639,7 +676,7 @@ impl Highlighter {
                 && close_run >= run
                 && rest[close_run..].iter().all(u8::is_ascii_whitespace)
             {
-                self.state = State::Code;
+                self.fence = None;
             }
             return;
         }
@@ -651,7 +688,7 @@ impl Highlighter {
             && (ch == b'~' || !rest[run..].contains(&b'`'))
         {
             out.mark(0, Class::String);
-            self.state = State::Fence { ch, run };
+            self.fence = Some((ch, run));
             return;
         }
         match rest.first() {
@@ -670,10 +707,10 @@ impl Highlighter {
         }
         // Code spans: a run of backticks closes at the next run of
         // the same length, or runs to the end of the line.
-        out.mark(0, Class::Plain);
         let mut at = 0usize;
         while at < bytes.len() {
             if bytes[at] != b'`' {
+                out.mark(at, Class::Plain);
                 at += 1;
                 continue;
             }
@@ -681,22 +718,19 @@ impl Highlighter {
             out.mark(at, Class::String);
             let mut close = at + run;
             loop {
-                match bytes[close..].iter().position(|&byte| byte == b'`') {
-                    None => return,
-                    Some(offset) => {
-                        let start = close + offset;
-                        let len = bytes[start..]
-                            .iter()
-                            .take_while(|&&byte| byte == b'`')
-                            .count();
-                        close = start + len;
-                        if len == run {
-                            break;
-                        }
-                    }
+                let Some(offset) = bytes[close..].iter().position(|&byte| byte == b'`') else {
+                    return;
+                };
+                let start = close + offset;
+                let len = bytes[start..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'`')
+                    .count();
+                close = start + len;
+                if len == run {
+                    break;
                 }
             }
-            out.mark(close, Class::Plain);
             at = close;
         }
     }
@@ -710,6 +744,13 @@ fn fence_run(rest: &[u8]) -> Option<(u8, usize)> {
     }
     let run = rest.iter().take_while(|&&byte| byte == ch).count();
     (run >= 3).then_some((ch, run))
+}
+
+/// Whether `at` is where a value starts: the line's start, or the
+/// first non-space after `:`, `-`, `,`, `[`, `{`.
+fn value_start(bytes: &[u8], at: usize) -> bool {
+    let before = bytes[..at].iter().rev().find(|&&byte| byte != b' ');
+    before.is_none_or(|byte| matches!(byte, b':' | b'-' | b',' | b'[' | b'{'))
 }
 
 /// A letter, an underscore, or the first byte of a non-ASCII char.
@@ -760,8 +801,12 @@ fn number_end(bytes: &[u8], at: usize, dates: bool) -> usize {
 fn char_literal_end(bytes: &[u8], at: usize) -> Option<usize> {
     let first = *bytes.get(at + 1)?;
     if first == b'\\' {
-        let close = bytes[at + 2..].iter().position(|&byte| byte == b'\'')?;
-        return Some(at + 2 + close + 1);
+        // The escaped byte cannot close: `'\''`.
+        let close = bytes
+            .get(at + 3..)?
+            .iter()
+            .position(|&byte| byte == b'\'')?;
+        return Some(at + 3 + close + 1);
     }
     if first == b'\'' {
         return None;
@@ -810,7 +855,10 @@ mod tests {
 
     #[test]
     fn keyword_lists_are_sorted_and_unique() {
-        for (label, spec) in LABELS {
+        for (label, lang) in LABELS {
+            let Lang::Code(spec) = lang else {
+                continue;
+            };
             assert!(spec.keywords.is_sorted(), "{label}");
             assert!(
                 spec.keywords.windows(2).all(|pair| pair[0] != pair[1]),
@@ -826,6 +874,11 @@ mod tests {
         assert!(Highlighter::for_label("yml").is_some());
         assert!(Highlighter::for_label("cobol").is_none());
         assert!(Highlighter::for_label("").is_none());
+        // The label ends where the info string's conventions start.
+        assert!(Highlighter::for_label("rust,ignore").is_some());
+        assert!(Highlighter::for_label("python {.numberLines}").is_some());
+        assert!(Highlighter::for_label("md title=\"x\"").is_some());
+        assert!(Highlighter::for_label(",rust").is_none());
     }
 
     #[test]
@@ -856,12 +909,33 @@ mod tests {
                 (", 'a)".into(), Plain),
             ]
         );
-        // A lifetime is plain; a raw identifier is plain.
+        // A two-letter prefix counts its hashes too; a raw string
+        // holds a quote followed by fewer hashes.
+        assert_eq!(
+            spans("rust", "br##\"a\"# b\"## + 1"),
+            vec![
+                ("br##\"a\"# b\"##".into(), Str),
+                (" + ".into(), Plain),
+                ("1".into(), Number),
+            ]
+        );
+        // A lifetime is plain; a raw identifier is plain; an escaped
+        // quote is one char literal.
         assert_eq!(
             spans("rust", "fn f<'a>(r#type: &'a str) {}"),
             vec![
                 ("fn".into(), Keyword),
                 (" f<'a>(r#type: &'a str) {}".into(), Plain),
+            ]
+        );
+        assert_eq!(
+            spans("rust", "'\\'' '\\u{1F600}' 'é'"),
+            vec![
+                ("'\\''".into(), Str),
+                (" ".into(), Plain),
+                ("'\\u{1F600}'".into(), Str),
+                (" ".into(), Plain),
+                ("'é'".into(), Str),
             ]
         );
     }
@@ -924,6 +998,17 @@ mod tests {
                 ("'x'".into(), Str),
                 ("; n := ".into(), Plain),
                 ("nil".into(), Keyword),
+            ]
+        );
+        assert_eq!(
+            spans("ts", "private x = 1 satisfies T;"),
+            vec![
+                ("private".into(), Keyword),
+                (" x = ".into(), Plain),
+                ("1".into(), Number),
+                (" ".into(), Plain),
+                ("satisfies".into(), Keyword),
+                (" T;".into(), Plain),
             ]
         );
     }
@@ -993,6 +1078,39 @@ mod tests {
     }
 
     #[test]
+    fn a_yaml_quote_opens_a_string_only_where_a_value_starts() {
+        // An apostrophe inside a plain scalar is plain, and does not
+        // carry to the next line.
+        let lines = classes(
+            "yml",
+            "  MSG: it's fine\n  OTHER: 2\n- 'a'\nlist: [\"b\", 'c']",
+        );
+        assert_eq!(lines[0], vec![(0, Plain)]);
+        assert_eq!(lines[1], vec![(0, Plain), (9, Number)]);
+        assert_eq!(lines[2], vec![(0, Plain), (2, Str)]);
+        assert_eq!(
+            lines[3],
+            vec![(0, Plain), (7, Str), (10, Plain), (12, Str), (15, Plain)]
+        );
+        // A quoted scalar still runs across lines.
+        let lines = classes("yaml", "key: \"one\ntwo\" tail");
+        assert_eq!(lines[0], vec![(0, Plain), (5, Str)]);
+        assert_eq!(lines[1], vec![(0, Str), (4, Plain)]);
+        assert_eq!(
+            spans("yaml", "flags: [True, FALSE, Null]"),
+            vec![
+                ("flags: [".into(), Plain),
+                ("True".into(), Keyword),
+                (", ".into(), Plain),
+                ("FALSE".into(), Keyword),
+                (", ".into(), Plain),
+                ("Null".into(), Keyword),
+                ("]".into(), Plain),
+            ]
+        );
+    }
+
+    #[test]
     fn a_markdown_sample_classes_its_structure() {
         let lines = classes(
             "md",
@@ -1011,22 +1129,34 @@ mod tests {
         assert_eq!(lines[7], vec![(0, Str)]);
         // `#hashtag` is no heading; an unclosed span runs to the end.
         assert_eq!(classes("md", "#tag `open")[0], vec![(0, Plain), (5, Str)]);
+        // A span at the line's start or end changes the class once.
+        assert_eq!(classes("md", "`code` and")[0], vec![(0, Str), (6, Plain)]);
+        assert_eq!(classes("md", "x `code`")[0], vec![(0, Plain), (2, Str)]);
     }
 
     #[test]
-    fn every_offset_is_a_char_boundary() {
+    fn every_offset_is_a_char_boundary_inside_the_line_and_increases() {
         let sources = [
             "let s = \"héllo\"; // ünïcode → ok",
             "x = 'ß' + \"日本\" # 注釈",
             "r := 'é'; s := `日\\本`",
             "# 見出し `コード` ``x``",
             "born = 2000-01-01 # 日付",
+            "`日本` and ``x`` `",
+            "'\\''",
         ];
         for (label, _) in LABELS {
             for source in sources {
                 let mut highlighter = Highlighter::for_label(label).unwrap();
+                let mut last = None;
                 highlighter.line(source, |at, _| {
                     assert!(source.is_char_boundary(at), "{label}: {source:?} at {at}");
+                    assert!(at < source.len(), "{label}: {source:?} at {at}");
+                    assert!(last.is_none_or(|last| at > last), "{label}: {source:?}");
+                    if last.is_none() {
+                        assert_eq!(at, 0, "{label}: {source:?}");
+                    }
+                    last = Some(at);
                 });
             }
         }

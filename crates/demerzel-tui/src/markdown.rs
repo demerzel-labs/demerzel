@@ -21,7 +21,10 @@
 //! the caller passes a byte cap and no row starts past it, so a block
 //! of rules, padded tables, or deep quotes cannot grow without bound.
 //! The render reports the cap, and the caller then shows the source as
-//! plain text.
+//! plain text. The face table has a cap of its own, a quarter of the
+//! row cap in entries — twice it in bytes — because a highlighted
+//! fence can change class at every byte. Past that cap the rest of
+//! the block keeps the code face and stays framed.
 //!
 //! The source is sanitized before it gets here, but the parser decodes
 //! character references, so control characters can come back; every
@@ -124,6 +127,7 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, seam: Seam, target: T
         out: target,
         width: usize::from(width.max(1)),
         cap,
+        face_cap: cap / 4,
         seam,
         end: source.len(),
         full: false,
@@ -275,6 +279,8 @@ struct Renderer<'t, 's> {
     /// Columns in the viewport.
     width: usize,
     cap: usize,
+    /// Entries the face table holds before highlighting stops.
+    face_cap: usize,
     seam: Seam,
     /// The source length: where an unclosed fence ends.
     end: usize,
@@ -794,14 +800,24 @@ impl<'s> Renderer<'_, 's> {
         }
         let line = std::mem::take(&mut self.line);
         let mut faces = std::mem::take(&mut self.line_faces);
-        let fence_face = self.inline_face();
-        if let Some(highlighter) = &mut self.highlighter {
+        let room = self.face_cap.saturating_sub(self.out.faces.len());
+        if let Some(highlighter) = &mut self.highlighter
+            && room > 0
+        {
             // A code line: its classes replace the one face the text
-            // arrived with, each over that face.
-            let base = faces.first().map_or(fence_face, |&(_, face)| face);
+            // arrived with, each over that face. Past the room left
+            // under the face cap the rest of the line keeps the face.
+            let base = self.inline.last().copied().unwrap_or(Face::PLAIN);
             faces.clear();
+            // A class every few bytes is the usual density; one
+            // reserve covers the line instead of a chain of doublings.
+            faces.reserve((line.len() / 4).min(room + 1));
             highlighter.line(&line, |at, class| {
-                faces.push((at, base | Face::class(class)))
+                if faces.len() < room {
+                    faces.push((at, base | Face::class(class)));
+                } else if faces.last().is_some_and(|&(_, face)| face != base) {
+                    faces.push((at, base));
+                }
             });
         }
         let avail = u16::try_from(self.avail()).unwrap_or(u16::MAX);
@@ -1269,6 +1285,75 @@ mod tests {
         assert_eq!(shown[9].1[1], (bar, code | Face::KEYWORD));
         // An inline code span is not a fence.
         assert_eq!(rows("`let`", 80)[0].1, vec![(0, code)]);
+        // A tab widens before the scan, so the offsets are over the
+        // shown line.
+        let shown = rows("```rust\n\tlet x\n```", 80);
+        assert_eq!(shown[1].0, "│     let x");
+        assert_eq!(shown[1].1[2], (bar + 4, code | Face::KEYWORD));
+        // A second fence starts fresh: the comment the first left
+        // open does not carry, and an unknown label gets no classes.
+        let shown = rows(
+            "```rust\n/* open\n```\n\n```rust\nlet y\n```\n\n```cobol\nlet z\n```",
+            80,
+        );
+        assert_eq!(shown[5].1[1], (bar, code | Face::KEYWORD));
+        assert_eq!(shown[9].1, vec![(0, Face::MARKER), (bar, code)]);
+    }
+
+    #[test]
+    fn a_fence_continued_past_the_cap_is_highlighted_from_a_fresh_state() {
+        let carry = "```rust\n";
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        let mut faces = Vec::new();
+        assert!(render(
+            &format!("{carry}let b = 2; /* open\n```\n"),
+            80,
+            usize::MAX,
+            Seam {
+                carried: carry.len(),
+                cut: false,
+            },
+            Target {
+                text: &mut text,
+                rows: &mut starts,
+                faces: &mut faces,
+            },
+        ));
+        assert_eq!(&text[..starts[1] as usize], "│ let b = 2; /* open");
+        assert_eq!(faces[1], ("│ ".len() as u32, Face::CODE | Face::KEYWORD));
+        assert!(faces.iter().any(|&(_, face)| face.has(Face::COMMENT)));
+    }
+
+    #[test]
+    fn the_face_cap_keeps_the_frame_and_drops_the_classes() {
+        // Two thousand `1+` pairs change class at every byte: with a
+        // cap of 4,096 bytes the face table holds 1,024 entries, so
+        // the classes stop inside the line and the fence stays code.
+        let source = format!("```rust\n{}\n```\n", "1+".repeat(2000));
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        let mut faces = Vec::new();
+        assert!(render(
+            &source,
+            4010,
+            4096,
+            Seam::default(),
+            Target {
+                text: &mut text,
+                rows: &mut starts,
+                faces: &mut faces,
+            },
+        ));
+        assert_eq!(starts.len(), 3);
+        assert!(faces.len() > 1000 && faces.len() < 1030, "{}", faces.len());
+        assert_eq!(faces.last().map(|&(_, face)| face), Some(Face::MARKER));
+        assert_eq!(faces[faces.len() - 2].1, Face::CODE);
+        assert!(
+            faces
+                .iter()
+                .any(|&(_, face)| face == Face::CODE | Face::NUMBER)
+        );
     }
 
     #[test]

@@ -123,6 +123,7 @@ impl Pty {
             .env("XDG_CONFIG_HOME", dirs.path().join("config"))
             .env("XDG_DATA_HOME", &data)
             .env("TERM", "xterm-256color")
+            .env_remove("NO_COLOR")
             .env_remove("DEMERZEL_PROVIDER")
             .env_remove("DEMERZEL_MODEL")
             .env_remove("DEMERZEL_BASE_URL")
