@@ -33,7 +33,7 @@ pub struct Capabilities {
 /// One model request. The system prompt stays separate from history so
 /// prompt assembly can keep the prefix stable. Build one with
 /// [`Request::new`]; the struct is non-exhaustive so later fields
-/// (cache breakpoints, per-request reasoning effort) stay additive.
+/// (cache breakpoints, for one) stay additive.
 ///
 /// `messages` can hold two same-role messages in a row — a repaired or
 /// limit-cut turn produces that shape. An adapter whose wire format
@@ -67,9 +67,11 @@ impl Request {
 
 /// How hard the model reasons on a request: three levels every
 /// provider maps to its own knob. Ordered, so a config rule can say
-/// "not above".
+/// "not above"; a later level must land in rank order. Non-exhaustive,
+/// so that level stays additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Effort {
     Low,
     Medium,
@@ -95,9 +97,7 @@ impl std::str::FromStr for Effort {
             "low" => Ok(Effort::Low),
             "medium" => Ok(Effort::Medium),
             "high" => Ok(Effort::High),
-            other => Err(format!(
-                "`{other}` is not an effort; use low, medium, or high"
-            )),
+            other => Err(format!("must be `low`, `medium`, or `high`, not `{other}`")),
         }
     }
 }

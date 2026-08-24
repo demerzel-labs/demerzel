@@ -615,6 +615,9 @@ async fn the_plain_interface_shares_the_command_registry() {
     pty.send(b"/model gpt-test\r");
     pty.wait_for("model: gpt-test");
     pty.wait_for(PROMPT);
+    pty.send(b"/effort low\r");
+    pty.wait_for("effort: low");
+    pty.wait_for(PROMPT);
     pty.send(b"hello\r");
     pty.wait_for("plain reply");
     pty.wait_for(PROMPT);

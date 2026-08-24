@@ -275,8 +275,16 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
     if let Some(thinking) = &config.thinking {
         body["thinking"] = thinking.clone();
     }
+    // Effort steers the depth of adaptive thinking; the two fields go
+    // together, and the effort sets how much of the budget the model
+    // spends.
     if let Some(effort) = request.effort {
-        body["output_config"] = json!({"effort": effort.as_str()});
+        match body["output_config"].as_object_mut() {
+            Some(output) => {
+                output.insert("effort".to_string(), json!(effort.as_str()));
+            }
+            None => body["output_config"] = json!({"effort": effort.as_str()}),
+        }
     }
     body
 }

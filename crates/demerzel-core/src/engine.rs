@@ -271,6 +271,7 @@ impl<'a> Engine<'a> {
             self.session.cwd(),
             self.provider.id(),
             model,
+            self.config.effort,
         ))?;
         if model != self.config.model {
             for message in &mut self.history {
@@ -307,16 +308,12 @@ impl<'a> Engine<'a> {
     ) -> Result<TurnOutcome, EngineError> {
         let result = self.run_turn(text, sink, approver).await;
         match &result {
-            Ok(outcome) => self
-                .session
-                .append_turn(outcome.as_str(), None, self.config.effort)?,
+            Ok(outcome) => self.session.append_turn(outcome.as_str(), None)?,
             Err(EngineError::Provider(error)) => {
                 let message = error.to_string();
-                let _ = self.session.append_turn(
-                    "error",
-                    Some(capped(&message, MAX_TURN_ERROR_BYTES)),
-                    self.config.effort,
-                );
+                let _ = self
+                    .session
+                    .append_turn("error", Some(capped(&message, MAX_TURN_ERROR_BYTES)));
             }
             Err(EngineError::Session(_)) => {}
         }
@@ -400,11 +397,17 @@ impl<'a> Engine<'a> {
         request
     }
 
-    /// Set the reasoning effort for the requests that follow. The
-    /// turn record names the effort a turn ran at, so nothing else
-    /// changes here.
-    pub fn set_effort(&mut self, effort: Effort) {
+    /// Set the reasoning effort for the requests that follow. A fresh
+    /// meta record names it, the way a model switch leaves its trail.
+    pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
         self.config.effort = Some(effort);
+        self.session.append_meta(&SessionMeta::now(
+            self.session.cwd(),
+            self.provider.id(),
+            &self.config.model,
+            self.config.effort,
+        ))?;
+        Ok(())
     }
 
     /// Append one message to the session file and the history, in that
@@ -803,7 +806,7 @@ mod tests {
 
     fn session_in(dir: &tempfile::TempDir) -> Session {
         SessionStore::at(dir.path())
-            .create(dir.path(), "scripted", "test-model")
+            .create(dir.path(), "scripted", "test-model", None)
             .unwrap()
     }
 
@@ -1372,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn set_effort_reaches_later_requests_and_the_turn_record() {
+    fn set_effort_reaches_later_requests_and_records_a_meta() {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
         let tools = FakeTools;
@@ -1380,24 +1383,26 @@ mod tests {
 
         let sink = noop_sink();
         block_on(engine.user_turn("first".into(), &sink, &mut ApproveAll)).unwrap();
-        engine.set_effort(Effort::High);
+        engine.set_effort(Effort::High).unwrap();
         block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
 
         let requests = provider.requests();
         assert_eq!(requests[0].effort, None);
         assert_eq!(requests[1].effort, Some(Effort::High));
 
-        // Each turn record names the effort its requests carried.
+        // The switch left a meta record naming the effort, and the
+        // last meta describes the run that continues.
         let raw = std::fs::read_to_string(engine.session().path()).unwrap();
-        let turns: Vec<serde_json::Value> = raw
+        let metas: Vec<serde_json::Value> = raw
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
-            .filter(|record: &serde_json::Value| record["type"] == "turn")
+            .filter(|record: &serde_json::Value| record["type"] == "meta")
             .collect();
-        assert_eq!(turns.len(), 2);
-        assert!(turns[0].get("effort").is_none());
-        assert_eq!(turns[1]["effort"], "high");
-        assert!(replay(engine.session().path()).is_ok());
+        assert_eq!(metas.len(), 2);
+        assert!(metas[0].get("effort").is_none());
+        assert_eq!(metas[1]["effort"], "high");
+        let replayed = replay(engine.session().path()).unwrap();
+        assert_eq!(replayed.meta.unwrap().effort.as_deref(), Some("high"));
     }
 
     #[test]

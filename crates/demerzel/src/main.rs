@@ -40,7 +40,7 @@ struct Cli {
 
     /// Reasoning effort: low, medium, or high. DEMERZEL_EFFORT sets
     /// it too.
-    #[arg(long, global = true, value_name = "LEVEL")]
+    #[arg(long, global = true)]
     effort: Option<Effort>,
 
     /// Run the write and execute tools without approval prompts.

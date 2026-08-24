@@ -120,8 +120,10 @@ impl Driver for TuiDriver<'_> {
                 return Submission::Note(model_note(&self.model));
             }
             Some(Effect::SetEffort(effort)) => {
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.set_effort(effort);
+                if let Some(engine) = self.engine.as_mut()
+                    && let Err(error) = engine.set_effort(effort)
+                {
+                    return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.effort = effort;
                 return Submission::Note(effort_note(effort));
@@ -130,7 +132,10 @@ impl Driver for TuiDriver<'_> {
         }
         Submission::Run(Box::pin(async move {
             if self.engine.is_none() {
-                match self.runtime.open_session(self.resume, &self.model) {
+                match self
+                    .runtime
+                    .open_session(self.resume, &self.model, self.effort)
+                {
                     Ok((session, history)) => {
                         events.session(Some(session.id().to_string()));
                         if !history.is_empty() {

@@ -177,6 +177,7 @@ def main() -> int:
         {
             "provider": trace["provider"],
             "model": trace["model"],
+            "effort": trace.get("effort"),
             "runs": trace["runs"],
             "definition": (
                 "hit_rate = cache_read_tokens / input_tokens; input_tokens counts the "

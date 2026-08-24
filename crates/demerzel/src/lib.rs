@@ -140,10 +140,8 @@ impl Runtime {
 
         let provider = Self::build_provider(&config)?;
 
-        let mut engine_config = EngineConfig::new(config.model.clone());
-        engine_config.effort = Some(config.effort);
         Ok(Self {
-            engine_config,
+            engine_config: EngineConfig::new(config.model.clone()),
             config,
             provider,
             registry,
@@ -224,6 +222,7 @@ impl Runtime {
         &self,
         resume: bool,
         model: &str,
+        effort: Effort,
     ) -> Result<(Session, Vec<Message>), RunError> {
         if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
             let (mut session, replay) = Session::resume(&path)?;
@@ -245,13 +244,17 @@ impl Runtime {
                     &self.config.project_dir,
                     self.provider.id(),
                     model,
+                    Some(effort),
                 ))?;
                 return Ok((session, replay.messages));
             }
         }
-        let session = self
-            .store
-            .create(&self.config.project_dir, self.provider.id(), model)?;
+        let session = self.store.create(
+            &self.config.project_dir,
+            self.provider.id(),
+            model,
+            Some(effort),
+        )?;
         Ok((session, Vec::new()))
     }
 
@@ -290,8 +293,11 @@ impl Runtime {
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
-        let (session, history) =
-            self.open_session(self.config.continue_last, &self.config.model)?;
+        let (session, history) = self.open_session(
+            self.config.continue_last,
+            &self.config.model,
+            self.config.effort,
+        )?;
         let mut engine = self.engine(session, history, &self.config.model, self.config.effort);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }

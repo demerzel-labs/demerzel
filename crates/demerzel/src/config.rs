@@ -23,8 +23,9 @@ use demerzel_core::{ApprovalMode, Effort};
 
 /// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
-/// The reasoning effort when nothing sets one.
-pub const DEFAULT_EFFORT: Effort = Effort::Medium;
+/// The reasoning effort when nothing sets one. High: the Messages
+/// API's own default, and the level a coding agent wants.
+pub const DEFAULT_EFFORT: Effort = Effort::High;
 
 /// Environment variables, one per flag.
 pub const ENV_PROVIDER: &str = "DEMERZEL_PROVIDER";
@@ -247,7 +248,7 @@ fn parse_tui(
 fn expect_effort(key: &str, value: toml::Value) -> Result<Effort, String> {
     expect_string(key, value)?
         .parse()
-        .map_err(|error| format!("`{key}`: {error}"))
+        .map_err(|error| format!("`{key}` {error}"))
 }
 
 fn expect_bool(key: &str, value: toml::Value) -> Result<bool, String> {
@@ -455,10 +456,13 @@ pub fn resolve(
         .unwrap_or_else(|| Setting::new(None, Origin::Default));
 
     // Within one layer the provider table's `effort` wins over the
-    // top-level one. Trust rule: the project file can lower the
-    // effort the user file set, never raise it — effort is spend, and
-    // a project file travels with the repository. A flag or the
-    // environment decides outright, so no warning then.
+    // top-level one; unlike `model`, a level belongs to no provider,
+    // so a layer that names another provider still lends its
+    // top-level `effort`. Trust rule: the project file can lower the
+    // effort, never raise it above the user file's level or the
+    // default — a high effort costs more, and a project file travels
+    // with the repository. A flag or the environment decides
+    // outright, so no warning then.
     let layer_effort = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
             l.providers
@@ -480,16 +484,15 @@ pub fn resolve(
             })
         });
     let user_effort = layer_effort(user, Origin::User);
+    let effort_baseline = user_effort
+        .as_ref()
+        .map_or(DEFAULT_EFFORT, |setting| setting.value);
     let project_effort = match layer_effort(project, Origin::Project) {
-        Some(setting)
-            if user_effort
-                .as_ref()
-                .is_some_and(|user| setting.value > user.value) =>
-        {
+        Some(setting) if setting.value > effort_baseline => {
             if flag_or_env_effort.is_none() {
                 warnings.push(format!(
                     "ignored: the project file sets effort = {}; a project file \
-                     cannot raise the effort above the user file's",
+                     cannot raise the effort; use --effort, {ENV_EFFORT}, or the user file",
                     setting.value
                 ));
             }
@@ -669,7 +672,7 @@ mod tests {
     #[test]
     fn effort_resolves_by_layer_and_the_project_file_cannot_raise_it() {
         let settings = resolve_clean(&Flags::default(), &no_env, None, None);
-        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.value, Effort::High);
         assert_eq!(settings.effort.origin, Origin::Default);
 
         let user = layer("effort = \"low\"\n[providers.openai-codex]\neffort = \"high\"");
@@ -690,21 +693,23 @@ mod tests {
             "another provider takes the top-level key"
         );
 
-        // The project file lowers, never raises.
-        let user = layer("effort = \"medium\"");
+        // The project file lowers, never raises: not above the user
+        // file's level, and not above the default when the user file
+        // is silent.
+        let user = layer("effort = \"low\"");
         let project = layer("effort = \"low\"");
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
         assert_eq!(settings.effort.value, Effort::Low);
         assert_eq!(settings.effort.origin, Origin::Project);
-        let project = layer("effort = \"high\"");
+        let project = layer("effort = \"medium\"");
         let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
-        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.value, Effort::Low);
         assert_eq!(settings.effort.origin, Origin::User);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("effort"));
-        // Over the default, the project file sets anything.
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
-        assert_eq!(settings.effort.value, Effort::High);
+        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.origin, Origin::Project);
 
         // A flag or the environment decides outright; a bad variable
         // is ignored with a warning.
@@ -720,7 +725,7 @@ mod tests {
         assert_eq!(settings.effort.origin, Origin::Env);
         let env = |name: &str| (name == ENV_EFFORT).then(|| "max".to_string());
         let (settings, warnings) = resolve(&Flags::default(), &env, None, None);
-        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.value, Effort::High);
         assert!(warnings[0].contains(ENV_EFFORT));
 
         assert!(

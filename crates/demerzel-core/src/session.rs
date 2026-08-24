@@ -54,6 +54,12 @@ pub struct SessionMeta {
     /// Adapter id, e.g. "openai-codex".
     pub provider: String,
     pub model: String,
+    /// The reasoning effort the run's requests carry, by its level
+    /// name; absent when the provider's default applies. A name, not
+    /// the enum, so a reader keeps the file when a later build writes
+    /// a level it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// RFC 3339 creation time.
     pub created: String,
 }
@@ -61,13 +67,14 @@ pub struct SessionMeta {
 impl SessionMeta {
     /// Metadata for a run starting now. The stored `cwd` is canonical,
     /// so one project has one spelling across resumes.
-    pub fn now(cwd: &Path, provider: &str, model: &str) -> Self {
+    pub fn now(cwd: &Path, provider: &str, model: &str, effort: Option<Effort>) -> Self {
         let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         Self {
             schema: SCHEMA_VERSION,
             cwd: canonical.display().to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
+            effort: effort.map(|effort| effort.as_str().to_string()),
             created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         }
     }
@@ -105,15 +112,11 @@ pub enum SessionRecord {
     /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
     /// the first five are the engine's turn outcomes by their
     /// `as_str` names, and `error` marks a provider failure, with the
-    /// message in `error`, cut at 1 KiB. `effort` is the reasoning
-    /// effort the turn's requests carried, absent when the provider's
-    /// default applied.
+    /// message in `error`, cut at 1 KiB.
     Turn {
         outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<Effort>,
     },
     /// A record type from a newer schema. Replay skips it, so old
     /// binaries read new files. The harness never writes this variant.
@@ -144,8 +147,6 @@ enum RecordRef<'a> {
         outcome: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        effort: Option<Effort>,
     },
 }
 
@@ -193,7 +194,13 @@ impl SessionStore {
 
     /// Create a new session file for the project and write its meta
     /// record.
-    pub fn create(&self, project: &Path, provider: &str, model: &str) -> io::Result<Session> {
+    pub fn create(
+        &self,
+        project: &Path,
+        provider: &str,
+        model: &str,
+        effort: Option<Effort>,
+    ) -> io::Result<Session> {
         let dir = self.sessions_dir(project);
         std::fs::create_dir_all(&dir)?;
         let mut attempt = 0;
@@ -216,7 +223,7 @@ impl SessionStore {
             cwd: project.to_path_buf(),
             buf: Vec::new(),
         };
-        session.append_meta(&SessionMeta::now(project, provider, model))?;
+        session.append_meta(&SessionMeta::now(project, provider, model, effort))?;
         Ok(session)
     }
 
@@ -297,14 +304,9 @@ impl Session {
                 answer: answer.as_deref(),
             },
             SessionRecord::Usage(usage) => RecordRef::Usage(usage),
-            SessionRecord::Turn {
-                outcome,
-                error,
-                effort,
-            } => RecordRef::Turn {
+            SessionRecord::Turn { outcome, error } => RecordRef::Turn {
                 outcome,
                 error: error.as_deref(),
-                effort: *effort,
             },
             // Replay-only marker; there is nothing to write.
             SessionRecord::Unknown => return Ok(()),
@@ -350,17 +352,8 @@ impl Session {
 
     /// Close one user turn with its outcome. See
     /// [`SessionRecord::Turn`] for the outcome vocabulary.
-    pub fn append_turn(
-        &mut self,
-        outcome: &str,
-        error: Option<&str>,
-        effort: Option<Effort>,
-    ) -> io::Result<()> {
-        self.append_ref(&RecordRef::Turn {
-            outcome,
-            error,
-            effort,
-        })
+    pub fn append_turn(&mut self, outcome: &str, error: Option<&str>) -> io::Result<()> {
+        self.append_ref(&RecordRef::Turn { outcome, error })
     }
 
     fn append_ref(&mut self, record: &RecordRef<'_>) -> io::Result<()> {
@@ -603,7 +596,9 @@ mod tests {
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
 
-        let mut session = store.create(&project, "openai-codex", "gpt-test").unwrap();
+        let mut session = store
+            .create(&project, "openai-codex", "gpt-test", None)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
             .unwrap();
@@ -660,7 +655,6 @@ mod tests {
         let turn = SessionRecord::Turn {
             outcome: "completed".into(),
             error: None,
-            effort: Some(Effort::High),
         };
         let value = serde_json::to_value(&turn).unwrap();
         assert_eq!(value["type"], "turn");
@@ -669,7 +663,6 @@ mod tests {
         let failed = SessionRecord::Turn {
             outcome: "error".into(),
             error: Some("rate limited".into()),
-            effort: None,
         };
         let value = serde_json::to_value(&failed).unwrap();
         assert_eq!(value["error"], "rate limited");
@@ -677,7 +670,7 @@ mod tests {
         // The borrowed append path serializes the identical shape.
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
         session
             .append_approval(
                 "bash",
@@ -698,7 +691,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let mut session = store.create(&project, "p", "m").unwrap();
+        let mut session = store.create(&project, "p", "m", None).unwrap();
         session
             .append_message(&text_message(Role::User, "one"))
             .unwrap();
@@ -718,7 +711,7 @@ mod tests {
     fn a_torn_final_line_is_dropped_and_truncated_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
             .unwrap();
@@ -749,7 +742,7 @@ mod tests {
     fn a_torn_tail_longer_than_one_scan_block_is_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
             .unwrap();
@@ -777,9 +770,9 @@ mod tests {
     fn append_matches_the_owned_record_serialization_for_every_variant() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m").unwrap();
+        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
         let records = [
-            SessionRecord::Meta(SessionMeta::now(dir.path(), "p2", "m2")),
+            SessionRecord::Meta(SessionMeta::now(dir.path(), "p2", "m2", None)),
             SessionRecord::Message(text_message(Role::Assistant, "hi")),
             SessionRecord::Approval {
                 tool: "bash".into(),
@@ -798,12 +791,10 @@ mod tests {
             SessionRecord::Turn {
                 outcome: "completed".into(),
                 error: None,
-                effort: None,
             },
             SessionRecord::Turn {
                 outcome: "error".into(),
                 error: Some("server error: 503".into()),
-                effort: None,
             },
         ];
         for record in &records {
@@ -822,7 +813,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let mut session = store.create(&project, "p", "m").unwrap();
+        let mut session = store.create(&project, "p", "m", None).unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
             .unwrap();
@@ -875,8 +866,8 @@ mod tests {
         let project = dir.path().to_path_buf();
         assert!(store.latest(&project).unwrap().is_none());
 
-        let first = store.create(&project, "p", "m").unwrap();
-        let second = store.create(&project, "p", "m").unwrap();
+        let first = store.create(&project, "p", "m", None).unwrap();
+        let second = store.create(&project, "p", "m", None).unwrap();
         let latest = store.latest(&project).unwrap().unwrap();
         assert_eq!(latest, second.path());
         assert_ne!(first.path(), second.path());
@@ -887,7 +878,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let session = store.create(&project, "p", "m").unwrap();
+        let session = store.create(&project, "p", "m", None).unwrap();
         let path = session.path().to_path_buf();
         drop(session);
 

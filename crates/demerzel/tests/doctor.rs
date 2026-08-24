@@ -153,14 +153,14 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("provider = openai-codex (default)"), "{out}");
     assert!(out.contains("tui.mouse = on (default)"), "{out}");
     assert!(out.contains("tui.markdown = on (default)"), "{out}");
-    assert!(out.contains("effort = medium (default)"), "{out}");
+    assert!(out.contains("effort = high (default)"), "{out}");
 
     bed.write_user_config(
-        "model = \"user-model\"\nhistory_file = false\neffort = \"high\"\n[tui]\nmouse = false\nmarkdown = false",
+        "model = \"user-model\"\nhistory_file = false\neffort = \"low\"\n[tui]\nmouse = false\nmarkdown = false",
     );
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = user-model (user file)"), "{out}");
-    assert!(out.contains("effort = high (user file)"), "{out}");
+    assert!(out.contains("effort = low (user file)"), "{out}");
     assert!(out.contains("history_file = off (user file)"), "{out}");
     assert!(out.contains("tui.mouse = off (user file)"), "{out}");
     assert!(out.contains("tui.markdown = off (user file)"), "{out}");

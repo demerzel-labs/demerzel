@@ -400,8 +400,11 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         continue;
                     }
                     Some(Effect::SetEffort(level)) => {
-                        if let Some(engine) = engine.as_mut() {
-                            engine.set_effort(level);
+                        if let Some(engine) = engine.as_mut()
+                            && let Err(error) = engine.set_effort(level)
+                        {
+                            eprintln!("demerzel: {error}");
+                            continue;
                         }
                         effort = level;
                         eprintln!("{}", effort_note(effort));
@@ -410,7 +413,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session(resume, &model)?;
+                    let (session, history) = runtime.open_session(resume, &model, effort)?;
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
