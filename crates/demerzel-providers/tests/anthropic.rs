@@ -47,24 +47,27 @@ async fn the_request_effort_lands_in_output_config() {
             json!({"type": "message_stop"}),
         ])
     };
-    let mock = MockServer::start(vec![done(), done()], vec![]).await;
+    let mock = MockServer::start(vec![done(), done(), done(), done()], vec![]).await;
     let provider = provider_for(&mock);
 
-    let mut with_effort = request(Vec::new(), Vec::new());
-    with_effort.effort = Some(Effort::Low);
-    collect(provider.stream(with_effort).await.unwrap()).await;
-    collect(
-        provider
-            .stream(request(Vec::new(), Vec::new()))
-            .await
-            .unwrap(),
-    )
-    .await;
+    for effort in [
+        Some(Effort::Low),
+        None,
+        Some(Effort::Ultra),
+        Some(Effort::None),
+    ] {
+        let mut request = request(Vec::new(), Vec::new());
+        request.effort = effort;
+        collect(provider.stream(request).await.unwrap()).await;
+    }
 
     let received = mock.received();
     assert_eq!(received[0].body["output_config"]["effort"], "low");
     assert_eq!(received[0].body["thinking"]["type"], "adaptive");
     assert!(received[1].body.get("output_config").is_none());
+    // The Messages API takes `low` through `max`: the ends clamp.
+    assert_eq!(received[2].body["output_config"]["effort"], "max");
+    assert_eq!(received[3].body["output_config"]["effort"], "low");
 }
 
 #[tokio::test]

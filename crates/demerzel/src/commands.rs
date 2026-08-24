@@ -27,8 +27,8 @@ const COMMANDS: &[Command] = &[
         help: "show or switch the session model",
     },
     Command {
-        usage: "/effort [low|medium|high]",
-        help: "show or set the reasoning effort",
+        usage: "/effort [level]",
+        help: "show or set the reasoning effort: none, minimal, low, medium, high, xhigh, max, ultra",
     },
     Command {
         usage: "/new",
@@ -103,9 +103,9 @@ pub(crate) fn dispatch(line: &str, current_model: &str, current_effort: Effort) 
                 (None, _) => Effect::Note(effort_note(current_effort)),
                 (Some(level), None) => match level.parse() {
                     Ok(effort) => Effect::SetEffort(effort),
-                    Err(_) => Effect::Note("usage: /effort [low|medium|high]".to_string()),
+                    Err(_) => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
                 },
-                _ => Effect::Note("usage: /effort [low|medium|high]".to_string()),
+                _ => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
             }
         }
         other => Effect::Note(unknown_command(other)),
@@ -179,7 +179,11 @@ mod tests {
             panic!("expected the current effort");
         };
         assert_eq!(note, "effort: low");
-        let Some(Effect::Note(note)) = dispatch("/effort max", "m", Effort::Low) else {
+        let Some(Effect::SetEffort(effort)) = dispatch("/effort xhigh", "m", Effort::Low) else {
+            panic!("expected an effort change");
+        };
+        assert_eq!(effort, Effort::XHigh);
+        let Some(Effect::Note(note)) = dispatch("/effort extreme", "m", Effort::Low) else {
             panic!("expected usage");
         };
         assert!(note.starts_with("usage: /effort"));

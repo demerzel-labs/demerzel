@@ -65,26 +65,64 @@ impl Request {
     }
 }
 
-/// How hard the model reasons on a request: three levels every
-/// provider maps to its own knob. Ordered, so a config rule can say
-/// "not above"; a later level must land in rank order. Non-exhaustive,
-/// so that level stays additive.
+/// How hard the model reasons on a request. The levels are the
+/// Codex vocabulary, by rank; each adapter maps them to its own
+/// knob, and one that takes fewer levels clamps at its ends. Ordered,
+/// so a config rule can say "not above"; a later level must land in
+/// rank order. Non-exhaustive, so that level stays additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Effort {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
+    Ultra,
 }
 
 impl Effort {
+    /// Every level, by rank.
+    pub const ALL: [Effort; 8] = [
+        Effort::None,
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::XHigh,
+        Effort::Max,
+        Effort::Ultra,
+    ];
+
+    /// The level names, by rank, for help and error text.
+    pub const NAMES: &'static str = "none, minimal, low, medium, high, xhigh, max, ultra";
+
     /// The level's wire and config name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Effort::None => "none",
+            Effort::Minimal => "minimal",
             Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+            Effort::Ultra => "ultra",
+        }
+    }
+
+    /// The level, held inside `[low, high]`, for a knob with a
+    /// narrower range.
+    pub fn clamp(self, low: Effort, high: Effort) -> Effort {
+        if self < low {
+            low
+        } else if self > high {
+            high
+        } else {
+            self
         }
     }
 }
@@ -93,12 +131,10 @@ impl std::str::FromStr for Effort {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "low" => Ok(Effort::Low),
-            "medium" => Ok(Effort::Medium),
-            "high" => Ok(Effort::High),
-            other => Err(format!("must be `low`, `medium`, or `high`, not `{other}`")),
-        }
+        Effort::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+            .ok_or_else(|| format!("must be one of {}, not `{value}`", Effort::NAMES))
     }
 }
 

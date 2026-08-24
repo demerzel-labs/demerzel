@@ -24,7 +24,7 @@ All keys are optional.
 provider = "openai-codex"        # or "anthropic"
 model = "gpt-5.6-sol"
 approval = "ask"                 # read-only | ask | auto
-effort = "high"                  # low | medium | high
+effort = "high"                  # none … ultra, see Reasoning effort
 history_file = true              # file-backed input history
 
 [providers.openai-codex]
@@ -59,14 +59,18 @@ A top-level `effort` applies to any provider.
 
 ## Reasoning effort
 
-`effort` sets how hard the model reasons on each request. The Codex
-adapter sends it as `reasoning.effort`. The Anthropic adapter sends
-it as `output_config.effort`, next to adaptive thinking. The level
-goes on every request, so a model that does not accept the field
-refuses the call; the current models accept it. Unknown keys warn on
-stderr and do not stop the run.
+`effort` sets how hard the model reasons on each request. The levels,
+by rank: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+`ultra`. The Codex adapter sends the level as `reasoning.effort`; the
+model catalog says which levels a model takes. The Anthropic adapter
+sends `output_config.effort`, next to adaptive thinking; the Messages
+API takes `low` through `max`, so the adapter clamps `none` and
+`minimal` to `low` and `ultra` to `max`. The level goes on every
+request, so a model that does not accept the field refuses the call;
+the current models accept it. Unknown keys warn on stderr and do not
+stop the run.
 
-`/effort [low|medium|high]` shows or sets the level for the session.
+`/effort [level]` shows or sets the level for the session.
 Each `meta` record in the session file names the effort in force, so
 a reader can tell what a run used. A resumed session takes its level
 from config, not from the file.
@@ -82,7 +86,7 @@ privilege, move credentials, or raise cost:
 - It cannot turn `history_file` or `tui.mouse` on against a user file
   that turned them off.
 - It cannot raise `effort` above the user file's level, or above the
-  default.
+  default `high`.
 
 A flag or a variable decides outright. Ignored project keys warn on
 stderr and in `doctor`.

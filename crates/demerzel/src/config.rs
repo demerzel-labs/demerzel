@@ -723,15 +723,20 @@ mod tests {
         let env = |name: &str| (name == ENV_EFFORT).then(|| "high".to_string());
         let settings = resolve_clean(&Flags::default(), &env, None, None);
         assert_eq!(settings.effort.origin, Origin::Env);
-        let env = |name: &str| (name == ENV_EFFORT).then(|| "max".to_string());
+        let env = |name: &str| (name == ENV_EFFORT).then(|| "extreme".to_string());
         let (settings, warnings) = resolve(&Flags::default(), &env, None, None);
         assert_eq!(settings.effort.value, Effort::High);
         assert!(warnings[0].contains(ENV_EFFORT));
 
         assert!(
-            Layer::parse("effort = \"max\"")
+            Layer::parse("effort = \"extreme\"")
                 .unwrap_err()
                 .contains("effort")
+        );
+        assert_eq!(
+            layer("effort = \"ultra\"").effort,
+            Some(Effort::Ultra),
+            "every level parses"
         );
     }
 

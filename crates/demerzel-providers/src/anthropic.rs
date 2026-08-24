@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
+use demerzel_core::{ContentBlock, Effort, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
 use crate::retry::{backoff, retry_after, retry_delay};
@@ -277,8 +277,10 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
     }
     // Effort steers the depth of adaptive thinking; the two fields go
     // together, and the effort sets how much of the budget the model
-    // spends.
+    // spends. The Messages API takes `low` through `max`; the levels
+    // outside that range clamp to its ends.
     if let Some(effort) = request.effort {
+        let effort = effort.clamp(Effort::Low, Effort::Max);
         match body["output_config"].as_object_mut() {
             Some(output) => {
                 output.insert("effort".to_string(), json!(effort.as_str()));

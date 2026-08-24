@@ -38,8 +38,8 @@ struct Cli {
     #[arg(long, global = true)]
     base_url: Option<String>,
 
-    /// Reasoning effort: low, medium, or high. DEMERZEL_EFFORT sets
-    /// it too.
+    /// Reasoning effort: none, minimal, low, medium, high, xhigh, max,
+    /// or ultra. DEMERZEL_EFFORT sets it too.
     #[arg(long, global = true)]
     effort: Option<Effort>,
 

@@ -221,7 +221,7 @@ async fn the_request_effort_lands_in_the_reasoning_field() {
     let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
 
     let mut with_effort = request(Vec::new(), Vec::new());
-    with_effort.effort = Some(Effort::High);
+    with_effort.effort = Some(Effort::XHigh);
     collect(provider.stream(with_effort).await.unwrap()).await;
     collect(
         provider
@@ -232,7 +232,7 @@ async fn the_request_effort_lands_in_the_reasoning_field() {
     .await;
 
     let received = mock.received();
-    assert_eq!(received[0].body["reasoning"]["effort"], "high");
+    assert_eq!(received[0].body["reasoning"]["effort"], "xhigh");
     assert_eq!(received[0].body["reasoning"]["summary"], "auto");
     // No effort on the request: the provider's own default applies,
     // and the summary setting stays.
