@@ -1,7 +1,7 @@
 {
   "benchmark": "metrics",
   "bin": "target/release/demerzel",
-  "git_rev": "b2e78f6",
+  "git_rev": "81e5843",
   "git_dirty": false,
   "date": "2026-08-23",
   "os": "macos-aarch64",
