@@ -275,6 +275,9 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
     if let Some(thinking) = &config.thinking {
         body["thinking"] = thinking.clone();
     }
+    if let Some(effort) = request.effort {
+        body["output_config"] = json!({"effort": effort.as_str()});
+    }
     body
 }
 

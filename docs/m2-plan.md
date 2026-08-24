@@ -144,11 +144,13 @@ M2 keys, all optional:
 provider = "openai-codex"        # or "anthropic"
 model = "gpt-5.6-sol"
 approval = "ask"                 # read-only | ask | auto
+effort = "medium"                # low | medium | high (added 2026-08-24)
 history_file = true              # file-backed REPL/TUI input history
 
 [providers.openai-codex]
 base_url = "https://chatgpt.com/backend-api/codex"
 model = "gpt-5.6-sol"
+effort = "high"                  # per-provider override
 
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
@@ -166,6 +168,13 @@ Rules:
   M3; the shape above stays valid when they land.
 - In one layer, a `[providers.<id>]` value is more specific than the
   top-level `model`, so it wins. Across layers, the higher layer wins.
+- `effort` (added 2026-08-24) sets the reasoning effort every request
+  carries: `--effort`, `DEMERZEL_EFFORT`, the project file, the user
+  file, then the default `medium`. A `[providers.<id>]` value wins
+  over the top-level one in the same layer. `/effort` changes it for
+  the session. Each `turn` record in the session file names the
+  effort its requests carried. A project file can lower the effort
+  the user file set, never raise it: effort is spend.
 - Trust rule (step-2 review decision): a project file travels with the
   repository, so it cannot raise privilege. It cannot raise the
   approval mode above the user setting, it cannot set `base_url`, and

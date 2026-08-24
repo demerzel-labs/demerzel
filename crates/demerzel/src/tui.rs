@@ -6,12 +6,12 @@
 //! every preview, so the interface crate needs no knowledge of tools.
 
 use demerzel_core::{
-    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
+    ApprovalAnswer, Approver, BoxFuture, Effort, Engine, EngineEvent, EventSink, TurnOutcome,
 };
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
 use serde_json::Value;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
@@ -37,6 +37,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         runtime: &runtime,
         engine: None,
         model: config.model.clone(),
+        effort: config.effort,
         resume: config.continue_last,
     };
     demerzel_tui::run(&mut driver, options)
@@ -51,6 +52,8 @@ struct TuiDriver<'r> {
     engine: Option<Engine<'r>>,
     /// The session model. `/model` switches it.
     model: String,
+    /// The session effort; `/effort` sets it.
+    effort: Effort,
     /// Whether the next open resumes the latest session. `/new`
     /// clears it.
     resume: bool,
@@ -97,7 +100,7 @@ impl Driver for TuiDriver<'_> {
         events: EventSender,
         approvals: ApprovalChannel,
     ) -> Submission<'_> {
-        match dispatch(&line, &self.model) {
+        match dispatch(&line, &self.model, self.effort) {
             Some(Effect::Exit) => return Submission::Exit,
             Some(Effect::Note(note)) => return Submission::Note(note),
             Some(Effect::NewSession) => {
@@ -116,6 +119,13 @@ impl Driver for TuiDriver<'_> {
                 events.model(name);
                 return Submission::Note(model_note(&self.model));
             }
+            Some(Effect::SetEffort(effort)) => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.set_effort(effort);
+                }
+                self.effort = effort;
+                return Submission::Note(effort_note(effort));
+            }
             None => {}
         }
         Submission::Run(Box::pin(async move {
@@ -130,7 +140,11 @@ impl Driver for TuiDriver<'_> {
                                 history.len()
                             ));
                         }
-                        self.engine = Some(self.runtime.engine(session, history, &self.model));
+                        self.engine =
+                            Some(
+                                self.runtime
+                                    .engine(session, history, &self.model, self.effort),
+                            );
                     }
                     Err(error) => {
                         events.error(format!("demerzel: {error}"));

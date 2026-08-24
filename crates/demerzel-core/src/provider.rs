@@ -14,6 +14,8 @@ use std::time::Duration;
 use futures_core::Stream;
 use serde_json::Value;
 
+use serde::{Deserialize, Serialize};
+
 use crate::message::{Message, SealedPayload, StopReason, Usage};
 use crate::tool::{BoxFuture, ToolDefinition};
 
@@ -45,6 +47,9 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<u64>,
+    /// How hard the model reasons on this request. `None` leaves the
+    /// provider's own default.
+    pub effort: Option<Effort>,
 }
 
 impl Request {
@@ -55,7 +60,51 @@ impl Request {
             messages: Vec::new(),
             tools: Vec::new(),
             max_output_tokens: None,
+            effort: None,
         }
+    }
+}
+
+/// How hard the model reasons on a request: three levels every
+/// provider maps to its own knob. Ordered, so a config rule can say
+/// "not above".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    /// The level's wire and config name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+}
+
+impl std::str::FromStr for Effort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Effort::Low),
+            "medium" => Ok(Effort::Medium),
+            "high" => Ok(Effort::High),
+            other => Err(format!(
+                "`{other}` is not an effort; use low, medium, or high"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

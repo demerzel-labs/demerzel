@@ -34,7 +34,8 @@ pub struct CodexConfig {
     /// Total attempts for retryable failures (429, 5xx, network).
     pub max_attempts: u32,
     pub base_delay: Duration,
-    /// `reasoning` request field, sent as-is when set.
+    /// `reasoning` request field, sent as-is when set; the request's
+    /// effort lands in it as `effort`.
     pub reasoning: Option<Value>,
 }
 
@@ -45,7 +46,7 @@ impl Default for CodexConfig {
             originator: "codex_cli_rs".to_string(),
             max_attempts: 4,
             base_delay: Duration::from_millis(500),
-            reasoning: Some(json!({"effort": "low", "summary": "auto"})),
+            reasoning: Some(json!({"summary": "auto"})),
         }
     }
 }
@@ -234,6 +235,9 @@ fn build_body(request: &Request, reasoning: Option<&Value>) -> Value {
     }
     if let Some(reasoning) = reasoning {
         body["reasoning"] = reasoning.clone();
+    }
+    if let Some(effort) = request.effort {
+        body["reasoning"]["effort"] = json!(effort.as_str());
     }
     if let Some(max) = request.max_output_tokens {
         body["max_output_tokens"] = json!(max);

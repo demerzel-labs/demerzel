@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
 use demerzel::{RunConfig, Runtime, doctor, login};
-use demerzel_core::{ApprovalMode, TurnOutcome};
+use demerzel_core::{ApprovalMode, Effort, TurnOutcome};
 
 /// Demerzel: a terminal coding agent.
 #[derive(Debug, Parser)]
@@ -37,6 +37,11 @@ struct Cli {
     /// Endpoint base URL. DEMERZEL_BASE_URL sets it too.
     #[arg(long, global = true)]
     base_url: Option<String>,
+
+    /// Reasoning effort: low, medium, or high. DEMERZEL_EFFORT sets
+    /// it too.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    effort: Option<Effort>,
 
     /// Run the write and execute tools without approval prompts.
     #[arg(long, global = true, conflicts_with = "read_only")]
@@ -73,6 +78,7 @@ impl Cli {
             provider: self.provider.clone(),
             model: self.model.clone(),
             base_url: self.base_url.clone(),
+            effort: self.effort,
             approval: if self.read_only {
                 Some(ApprovalMode::ReadOnly)
             } else if self.auto {
@@ -290,6 +296,7 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.provider = settings.provider.value;
     config.model = settings.model.value;
     config.base_url = settings.base_url.value;
+    config.effort = settings.effort.value;
     config.continue_last = cli.continue_last;
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;

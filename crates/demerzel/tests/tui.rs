@@ -747,3 +747,30 @@ async fn the_markdown_config_key_shows_the_raw_text() {
     pty.send(CTRL_D);
     pty.wait_exit();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_effort_flag_and_command_reach_the_requests() {
+    let mock = MockServer::start(
+        vec![text_turn("low reply"), text_turn("high reply")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &["--effort", "low"]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"/effort\r");
+    pty.wait_for("effort: low");
+    pty.send(b"one\r");
+    pty.wait_for("low reply");
+    pty.send(b"/effort high\r");
+    pty.wait_for("effort: high");
+    pty.send(b"two\r");
+    pty.wait_for("high reply");
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    let requests = mock.received();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "low");
+    assert_eq!(requests[1].body["reasoning"]["effort"], "high");
+}

@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, model_note};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
@@ -366,6 +366,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mut engine: Option<Engine<'_>> = None;
     // The interface owns the session model: `/model` switches it.
     let mut model = runtime.config().model.clone();
+    let mut effort = runtime.config().effort;
     // `/new` turns the next open into a fresh session, `-c` or not.
     let mut resume = runtime.config().continue_last;
     loop {
@@ -375,7 +376,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                match dispatch(line, &model) {
+                match dispatch(line, &model, effort) {
                     Some(Effect::Exit) => break,
                     Some(Effect::Note(note)) => {
                         eprintln!("{note}");
@@ -398,6 +399,14 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         eprintln!("{}", model_note(&model));
                         continue;
                     }
+                    Some(Effect::SetEffort(level)) => {
+                        if let Some(engine) = engine.as_mut() {
+                            engine.set_effort(level);
+                        }
+                        effort = level;
+                        eprintln!("{}", effort_note(effort));
+                        continue;
+                    }
                     None => {}
                 }
                 if engine.is_none() {
@@ -409,7 +418,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             history.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, history, &model));
+                    engine = Some(runtime.engine(session, history, &model, effort));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(engine, line.to_string(), &reader, &mut sigint).await;

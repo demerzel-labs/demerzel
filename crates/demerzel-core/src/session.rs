@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::approval::{ApprovalDecision, ApprovalMode};
 use crate::message::{Message, Usage};
 use crate::paths;
+use crate::provider::Effort;
 
 /// Version of the session-file schema, written into every meta record.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -104,11 +105,15 @@ pub enum SessionRecord {
     /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
     /// the first five are the engine's turn outcomes by their
     /// `as_str` names, and `error` marks a provider failure, with the
-    /// message in `error`, cut at 1 KiB.
+    /// message in `error`, cut at 1 KiB. `effort` is the reasoning
+    /// effort the turn's requests carried, absent when the provider's
+    /// default applied.
     Turn {
         outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<Effort>,
     },
     /// A record type from a newer schema. Replay skips it, so old
     /// binaries read new files. The harness never writes this variant.
@@ -139,6 +144,8 @@ enum RecordRef<'a> {
         outcome: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<Effort>,
     },
 }
 
@@ -290,9 +297,14 @@ impl Session {
                 answer: answer.as_deref(),
             },
             SessionRecord::Usage(usage) => RecordRef::Usage(usage),
-            SessionRecord::Turn { outcome, error } => RecordRef::Turn {
+            SessionRecord::Turn {
+                outcome,
+                error,
+                effort,
+            } => RecordRef::Turn {
                 outcome,
                 error: error.as_deref(),
+                effort: *effort,
             },
             // Replay-only marker; there is nothing to write.
             SessionRecord::Unknown => return Ok(()),
@@ -338,8 +350,17 @@ impl Session {
 
     /// Close one user turn with its outcome. See
     /// [`SessionRecord::Turn`] for the outcome vocabulary.
-    pub fn append_turn(&mut self, outcome: &str, error: Option<&str>) -> io::Result<()> {
-        self.append_ref(&RecordRef::Turn { outcome, error })
+    pub fn append_turn(
+        &mut self,
+        outcome: &str,
+        error: Option<&str>,
+        effort: Option<Effort>,
+    ) -> io::Result<()> {
+        self.append_ref(&RecordRef::Turn {
+            outcome,
+            error,
+            effort,
+        })
     }
 
     fn append_ref(&mut self, record: &RecordRef<'_>) -> io::Result<()> {
@@ -639,6 +660,7 @@ mod tests {
         let turn = SessionRecord::Turn {
             outcome: "completed".into(),
             error: None,
+            effort: Some(Effort::High),
         };
         let value = serde_json::to_value(&turn).unwrap();
         assert_eq!(value["type"], "turn");
@@ -647,6 +669,7 @@ mod tests {
         let failed = SessionRecord::Turn {
             outcome: "error".into(),
             error: Some("rate limited".into()),
+            effort: None,
         };
         let value = serde_json::to_value(&failed).unwrap();
         assert_eq!(value["error"], "rate limited");
@@ -775,10 +798,12 @@ mod tests {
             SessionRecord::Turn {
                 outcome: "completed".into(),
                 error: None,
+                effort: None,
             },
             SessionRecord::Turn {
                 outcome: "error".into(),
                 error: Some("server error: 503".into()),
+                effort: None,
             },
         ];
         for record in &records {

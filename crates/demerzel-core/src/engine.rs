@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{Capabilities, Provider, ProviderError, Request, StreamEvent};
+use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, StreamEvent};
 use crate::session::{Session, SessionMeta};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
@@ -46,6 +46,9 @@ pub struct EngineConfig {
     /// Model calls allowed for one user turn before the loop stops.
     pub max_model_calls: u32,
     pub max_output_tokens: Option<u64>,
+    /// The reasoning effort every request carries; `None` leaves the
+    /// provider's default.
+    pub effort: Option<Effort>,
 }
 
 impl EngineConfig {
@@ -55,6 +58,7 @@ impl EngineConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             max_model_calls: 32,
             max_output_tokens: None,
+            effort: None,
         }
     }
 }
@@ -303,12 +307,16 @@ impl<'a> Engine<'a> {
     ) -> Result<TurnOutcome, EngineError> {
         let result = self.run_turn(text, sink, approver).await;
         match &result {
-            Ok(outcome) => self.session.append_turn(outcome.as_str(), None)?,
+            Ok(outcome) => self
+                .session
+                .append_turn(outcome.as_str(), None, self.config.effort)?,
             Err(EngineError::Provider(error)) => {
                 let message = error.to_string();
-                let _ = self
-                    .session
-                    .append_turn("error", Some(capped(&message, MAX_TURN_ERROR_BYTES)));
+                let _ = self.session.append_turn(
+                    "error",
+                    Some(capped(&message, MAX_TURN_ERROR_BYTES)),
+                    self.config.effort,
+                );
             }
             Err(EngineError::Session(_)) => {}
         }
@@ -388,7 +396,15 @@ impl<'a> Engine<'a> {
             request.tools = self.tool_definitions.clone();
         }
         request.max_output_tokens = self.config.max_output_tokens;
+        request.effort = self.config.effort;
         request
+    }
+
+    /// Set the reasoning effort for the requests that follow. The
+    /// turn record names the effort a turn ran at, so nothing else
+    /// changes here.
+    pub fn set_effort(&mut self, effort: Effort) {
+        self.config.effort = Some(effort);
     }
 
     /// Append one message to the session file and the history, in that
@@ -1353,6 +1369,35 @@ mod tests {
         assert_eq!(replayed.messages, engine.history());
         let canonical = dir.path().canonicalize().unwrap();
         assert_eq!(replayed.meta.unwrap().cwd, canonical.display().to_string());
+    }
+
+    #[test]
+    fn set_effort_reaches_later_requests_and_the_turn_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        let sink = noop_sink();
+        block_on(engine.user_turn("first".into(), &sink, &mut ApproveAll)).unwrap();
+        engine.set_effort(Effort::High);
+        block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
+
+        let requests = provider.requests();
+        assert_eq!(requests[0].effort, None);
+        assert_eq!(requests[1].effort, Some(Effort::High));
+
+        // Each turn record names the effort its requests carried.
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        let turns: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["type"] == "turn")
+            .collect();
+        assert_eq!(turns.len(), 2);
+        assert!(turns[0].get("effort").is_none());
+        assert_eq!(turns[1]["effort"], "high");
+        assert!(replay(engine.session().path()).is_ok());
     }
 
     #[test]
