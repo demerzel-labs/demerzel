@@ -122,7 +122,7 @@ impl App {
         let keys = spawn_input_thread();
         let (display_tx, displays) = mpsc::unbounded_channel();
         let (approval_tx, approvals) = mpsc::unbounded_channel();
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(options.markdown);
         if let Some(banner) = &options.banner {
             transcript.push_line(Kind::Notice, banner);
         }

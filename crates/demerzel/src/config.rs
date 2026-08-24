@@ -83,6 +83,9 @@ pub struct Settings {
 pub struct TuiSettings {
     /// Mouse capture in the full-screen interface, for wheel scroll.
     pub mouse: Setting<bool>,
+    /// Markdown rendering of model replies in the full-screen
+    /// interface; off shows the raw text.
+    pub markdown: Setting<bool>,
 }
 
 impl Settings {
@@ -118,6 +121,7 @@ struct ProviderKeys {
 #[derive(Debug, Default, PartialEq)]
 struct TuiKeys {
     mouse: Option<bool>,
+    markdown: Option<bool>,
 }
 
 /// One parsed config file.
@@ -223,6 +227,7 @@ fn parse_tui(
         let path = format!("tui.{key}");
         match key.as_str() {
             "mouse" => into.mouse = Some(expect_bool(&path, value)?),
+            "markdown" => into.markdown = Some(expect_bool(&path, value)?),
             _ => warnings.push(format!("unknown key `{path}`")),
         }
     }
@@ -463,6 +468,11 @@ pub fn resolve(
         .or(user_mouse)
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
 
+    // Cosmetic: either file can set it, the project file first.
+    let markdown = layer_key(project, Origin::Project, |l| l.tui.markdown)
+        .or_else(|| layer_key(user, Origin::User, |l| l.tui.markdown))
+        .unwrap_or_else(|| Setting::new(true, Origin::Default));
+
     (
         Settings {
             provider,
@@ -470,7 +480,7 @@ pub fn resolve(
             base_url,
             approval,
             history_file,
-            tui: TuiSettings { mouse },
+            tui: TuiSettings { mouse, markdown },
         },
         warnings,
     )
@@ -571,6 +581,24 @@ mod tests {
         let project = layer("[tui]\nmouse = true");
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
         assert!(settings.tui.mouse.value);
+    }
+
+    #[test]
+    fn the_markdown_key_resolves_project_over_user_over_default() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert!(settings.tui.markdown.value);
+        assert_eq!(settings.tui.markdown.origin, Origin::Default);
+
+        let user = layer("[tui]\nmarkdown = false");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert!(!settings.tui.markdown.value);
+        assert_eq!(settings.tui.markdown.origin, Origin::User);
+
+        // Cosmetic: the project file can turn it either way.
+        let project = layer("[tui]\nmarkdown = true");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert!(settings.tui.markdown.value);
+        assert_eq!(settings.tui.markdown.origin, Origin::Project);
     }
 
     #[test]

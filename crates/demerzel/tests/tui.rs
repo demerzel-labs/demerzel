@@ -696,3 +696,54 @@ async fn the_mouse_config_key_turns_capture_off() {
     let text = String::from_utf8_lossy(&raw);
     assert!(!text.contains(MOUSE_CAPTURE), "capture must stay off");
 }
+
+/// A reply with one of each markdown element the renderer formats.
+const FORMATTED_REPLY: &str = "# Title\n\nSome prose.\n\n- first item\n- second item\n\n\
+                               | name | n |\n|---|---|\n| ab | 1 |\n\n\
+                               ```rust\nfn main() {}\n```\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_renders_as_markdown() {
+    let mock = MockServer::start(vec![text_turn(FORMATTED_REPLY)], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"show\r");
+    // The usage notice is the last thing the turn draws. A resize
+    // makes the next draw repaint the whole screen, so every row
+    // reaches the stream in order; the key is that draw.
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("# Title");
+    pty.wait_for("• first item");
+    pty.wait_for("• second item");
+    pty.wait_for("name │ n");
+    pty.wait_for("ab │ 1");
+    pty.wait_for("╭─ rust");
+    pty.wait_for("│ fn main() {}");
+    pty.wait_for("╰─");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_markdown_config_key_shows_the_raw_text() {
+    let mock = MockServer::start(vec![text_turn(FORMATTED_REPLY)], Vec::new()).await;
+    let mut pty =
+        Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmarkdown = false\n"));
+
+    pty.wait_for(PROMPT);
+    pty.send(b"show\r");
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("# Title");
+    pty.wait_for("- first item");
+    pty.wait_for("| name | n |");
+    pty.wait_for("```rust");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}

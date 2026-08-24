@@ -8,12 +8,13 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
 use crate::input::Input;
+use crate::markdown::Face;
 use crate::transcript::{Kind, Transcript};
 use crate::wrap::display_width;
 
@@ -133,6 +134,31 @@ fn style(kind: Kind) -> Style {
     }
 }
 
+/// A face over the block's own style. Terminal attributes and one
+/// color until the theme lands.
+fn face_style(kind: Kind, face: Face) -> Style {
+    let mut style = style(kind);
+    if face.has(Face::HEADING) || face.has(Face::STRONG) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if face.has(Face::EMPHASIS) {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if face.has(Face::STRIKE) {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    if face.has(Face::CODE) {
+        style = style.fg(Color::Cyan);
+    }
+    if face.has(Face::LINK) {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if face.has(Face::URL) || face.has(Face::MARKER) {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
+}
+
 /// Show the tail of the transcript, or the browsed window above it.
 /// Only the blocks the viewport and the scroll need lay out, and a
 /// block lays out once per width, so a long session pays for its
@@ -173,7 +199,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
             if lines.len() >= height {
                 break 'collect;
             }
-            lines.push(Line::styled(block.row(index), style(block.kind)));
+            if block.plain() {
+                lines.push(Line::styled(block.row(index), style(block.kind)));
+            } else {
+                let mut spans = Vec::new();
+                block.spans(index, |face, text| {
+                    spans.push(Span::styled(text, face_style(block.kind, face)));
+                });
+                lines.push(Line::from(spans));
+            }
         }
         skip = 0;
     }
@@ -304,7 +338,7 @@ mod tests {
 
     #[test]
     fn a_fresh_screen_shows_the_bar_and_the_prompt() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let input = Input::new();
         let status = status();
         let (lines, rows) = render(
@@ -324,7 +358,7 @@ mod tests {
 
     #[test]
     fn the_status_bar_names_the_session_and_the_totals() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let input = Input::new();
         let status = Status {
             session: Some("s-9".into()),
@@ -352,7 +386,7 @@ mod tests {
 
     #[test]
     fn a_narrow_bar_cuts_from_the_right() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let input = Input::new();
         let status = status();
         let (lines, _) = render(
@@ -370,7 +404,7 @@ mod tests {
 
     #[test]
     fn a_two_row_screen_drops_the_bar_and_keeps_the_prompt() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "tail");
         let input = Input::new();
         let status = status();
@@ -391,7 +425,7 @@ mod tests {
 
     #[test]
     fn the_transcript_tail_sticks_to_the_bottom_of_the_pane() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
@@ -413,7 +447,7 @@ mod tests {
 
     #[test]
     fn scroll_moves_the_window_and_clamps_at_the_top() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
@@ -462,7 +496,7 @@ mod tests {
 
     #[test]
     fn browse_mode_shows_the_rows_below_and_holds_still_as_rows_arrive() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
@@ -513,7 +547,7 @@ line 12",
 
     #[test]
     fn long_entries_wrap_inside_the_pane() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "alpha beta gamma");
         let input = Input::new();
         let status = status();
@@ -534,7 +568,7 @@ line 12",
 
     #[test]
     fn a_long_input_windows_around_the_cursor() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let mut input = Input::new();
         input.set(&"abcdefghij".repeat(3));
         let status = status();
@@ -556,7 +590,7 @@ line 12",
     #[test]
     fn a_wide_char_at_the_window_edge_keeps_the_cursor_aligned() {
         let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let mut input = Input::new();
         input.set("日本日本日");
         let status = status();
@@ -582,8 +616,41 @@ line 12",
     }
 
     #[test]
+    fn markdown_rows_carry_their_faces_into_the_frame() {
+        let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
+        let mut transcript = Transcript::new(true);
+        transcript.push_delta(Kind::Text, "# Title\n\nplain `code`");
+        let input = Input::new();
+        let status = status();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    View {
+                        transcript: &mut transcript,
+                        input: &input,
+                        status: &status,
+                        approval: None,
+                    },
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // The mark, the heading, and the code each read apart from
+        // the plain text; which attribute is the theme's call.
+        let plain = buffer[(0u16, 2u16)].style();
+        assert_eq!(buffer[(0u16, 0u16)].symbol(), "#");
+        assert_ne!(buffer[(0u16, 0u16)].style(), plain);
+        assert_eq!(buffer[(2u16, 0u16)].symbol(), "T");
+        assert_ne!(buffer[(2u16, 0u16)].style(), plain);
+        assert_ne!(buffer[(2u16, 0u16)].style(), buffer[(0u16, 0u16)].style());
+        assert_eq!(buffer[(6u16, 2u16)].symbol(), "c");
+        assert_ne!(buffer[(6u16, 2u16)].style(), plain);
+    }
+
+    #[test]
     fn an_approval_question_replaces_the_prompt() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::new(false);
         let input = Input::new();
         let status = status();
         let (lines, _) = render(

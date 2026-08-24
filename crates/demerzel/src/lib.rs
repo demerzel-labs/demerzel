@@ -72,6 +72,8 @@ pub struct RunConfig {
     /// Capture the mouse in the full-screen interface, so the wheel
     /// scrolls the transcript.
     pub mouse: bool,
+    /// Render model replies as markdown in the full-screen interface.
+    pub markdown: bool,
 }
 
 impl RunConfig {
@@ -89,6 +91,7 @@ impl RunConfig {
             auth: None,
             history_path: None,
             mouse: true,
+            markdown: true,
         }
     }
 }

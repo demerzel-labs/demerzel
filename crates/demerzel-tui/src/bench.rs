@@ -22,9 +22,11 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(width: u16, height: u16) -> Self {
+    /// A screen of one size; `markdown` picks whether streamed text
+    /// renders as markdown or lays out as plain text.
+    pub fn new(width: u16, height: u16, markdown: bool) -> Self {
         Self {
-            transcript: Transcript::new(),
+            transcript: Transcript::new(markdown),
             input: Input::new(),
             status: Status {
                 model: "bench-model".into(),
@@ -75,5 +77,14 @@ impl Screen {
     /// Blocks the transcript holds.
     pub fn blocks(&self) -> usize {
         self.transcript.blocks().len()
+    }
+
+    /// Blocks whose rows come from a markdown render, among the
+    /// blocks laid out so far.
+    pub fn rendered_blocks(&self) -> usize {
+        self.transcript
+            .blocks()
+            .filter(|block| block.rendered())
+            .count()
     }
 }
