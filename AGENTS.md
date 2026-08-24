@@ -75,10 +75,13 @@ milestone plan lands:
   [`docs/plan.md`](docs/plan.md) — and simplification — speculative
   abstraction, dead config surface, single-use indirection. Fold the
   findings into the plan docs.
-- The metrics receipt: build the release binary, run
-  `bench/metrics.py`, and commit the JSON it writes to
-  `bench/results/`. Compare it against the previous milestone's
-  receipt in the alignment review.
+- The metrics receipts, one per reference machine (Linux and macOS,
+  see [`docs/bench-platforms.md`](docs/bench-platforms.md)): build
+  the release binary, run `bench/metrics.py`, and commit the JSON it
+  writes to `bench/results/`. Compare each against the previous
+  milestone's receipt from the same machine in the alignment review.
+  When one machine is unreachable, its receipt lands as a follow-up
+  commit and does not block the close-out.
 
 ## Source rules
 

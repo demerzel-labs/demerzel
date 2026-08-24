@@ -6,9 +6,12 @@ the platform most day-to-day developers use, so its numbers matter at
 least as much. The plan also restates the binary-size posture: size is
 a budget with receipts, not a wall.
 
-Status (2026-08-23): draft, in review. The build order runs before the
-M2 close-out, because the close-out receipts must come from both
-platforms.
+Status (2026-08-23, updated at the M2 close-out): steps 1 and 2 are
+merged (PR #29, PR #30). The first macOS receipts are committed, on
+mains power. Steps 3 and 4 run alongside M2.5: they gate the M2.5
+measurement pass (step 10 of that plan), not its start. The Linux
+receipts for step 2 pend on the Linux reference machine and land as a
+follow-up receipts commit.
 
 ## Goals
 
@@ -192,17 +195,20 @@ Each step is one PR.
    `render/run.sh`, and `metrics.py` produce receipts on both
    reference machines.*
 3. **macOS memory probe.** `process_memory` via `proc_pid_rusage`;
-   `memory/idle.py` reports footprint on macOS. *Verify: idle receipts
+   `memory/idle.py` reports footprint on macOS. Runs alongside M2.5;
+   must land before the M2.5 measurement pass. *Verify: idle receipts
    from both machines; the macOS gate calibration lands in
    `docs/plan.md`.*
 4. **macOS cold boot decision.** Try `purge` with `mincore`
-   verification. *Verify: a receipt either way; the support matrix
-   updated.*
-5. **M2 close-out.** The alignment review and the metrics receipts,
-   now from both machines. The close-out definition in `AGENTS.md`
-   gains the second machine.
+   verification. Runs alongside M2.5; must land before the M2.5
+   measurement pass. *Verify: a receipt either way; the support
+   matrix updated.*
+5. **M2 close-out.** The alignment review and the metrics receipts.
+   The close-out definition in `AGENTS.md` gains the second machine.
+   Done 2026-08-23; the Linux metrics receipt lands as a follow-up
+   when the Linux machine is up.
 
-M2.5 starts after step 5. The M2.5 render-bench gates then read
+M2.5 starts after step 5. The M2.5 render-bench gates read
 per-machine: each machine compares against its own M2-era baseline,
 and the first macOS baseline comes from step 2's receipts.
 

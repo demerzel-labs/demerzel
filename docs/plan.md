@@ -139,6 +139,21 @@ the harness degrades features per capability instead of assuming them. Model
 roles (`default`, `fast`, `plan`, …) map to provider+model pairs in config, with
 fallback chains — per-role routing is config, not code.
 
+Decisions from the alignment review of 2026-08-23 (the M2 close-out):
+
+- The crates, the contracts, and the seams match this plan; no
+  simplification cut was needed.
+- Watched surface: five of the six capability flags are declared by
+  the adapters and read by nothing — only `tool_calls` branches the
+  harness. The flags stay as the declared contract for M3 (parallel
+  tool calls, degradation), but a flag still unread at the M3
+  close-out gets removed.
+- Contract growth M1 to M2, from the metrics receipts: the provider
+  trait, the engine events, and the tool set are unchanged; config
+  grew its first 8 keys; the CLI gained `plain` and `provider`.
+  Lines 7,876 to 15,618; direct dependencies 18 to 23, all named in
+  milestone plans.
+
 ### Sessions
 
 Append-only JSONL, one file per session, project-scoped under XDG data. The
