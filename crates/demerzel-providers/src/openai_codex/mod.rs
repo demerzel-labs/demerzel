@@ -281,6 +281,15 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             .map(StreamEvent::ReasoningDelta)
             .map(|e| vec![Ok(e)])
             .unwrap_or_default(),
+        // The summary arrives in parts; each part after the first is
+        // a paragraph of its own.
+        "response.reasoning_summary_part.added" => {
+            if value["summary_index"].as_u64().unwrap_or(0) > 0 {
+                vec![Ok(StreamEvent::ReasoningDelta("\n\n".to_string()))]
+            } else {
+                Vec::new()
+            }
+        }
         "response.output_item.added" => {
             let item = &value["item"];
             if item["type"] == "function_call" {

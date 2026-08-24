@@ -167,6 +167,42 @@ async fn serializes_the_request_per_the_codex_contract() {
 }
 
 #[tokio::test]
+async fn reasoning_summary_parts_arrive_as_paragraphs() {
+    let dir = tempfile::tempdir().unwrap();
+    let part = |index: u64| {
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1", "summary_index": index,
+            "part": {"type": "summary_text", "text": ""}
+        })
+    };
+    let events = vec![
+        part(0),
+        json!({"type": "response.reasoning_summary_text.delta", "delta": "**First**"}),
+        part(1),
+        json!({"type": "response.reasoning_summary_text.delta", "delta": "**Second**"}),
+        completed(json!({"input_tokens": 1, "output_tokens": 1})),
+    ];
+    let mock = MockServer::start(vec![MockResponse::stream(events)], vec![]).await;
+    let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
+
+    let stream = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .unwrap();
+    let reasoning: String = collect(stream)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .filter_map(|event| match event {
+            StreamEvent::ReasoningDelta(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "**First**\n\n**Second**");
+}
+
+#[tokio::test]
 async fn assembles_the_stream_into_neutral_events() {
     let dir = tempfile::tempdir().unwrap();
     let events = vec![
