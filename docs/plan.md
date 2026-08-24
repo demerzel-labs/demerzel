@@ -193,8 +193,17 @@ MEMORY.md pattern in Claude Code.
   catalog behind a BM25 search tool.
 - **Subagents** returning typed, schema-validated results — no prose parsing.
 - **Theming** for the TUI (M2.5).
-- Deferred until proven necessary: a WASM plugin ABI. Subprocess hooks + MCP
-  cover the extension surface without bloating the binary.
+- Deferred until proven necessary: an in-process scripting layer.
+  Subprocess hooks + MCP cover the extension surface without bloating
+  the binary, and hooks are not hot-path — a ~1 ms fork-exec at loop
+  events is invisible. The trigger for in-process is a per-keystroke
+  or per-frame extension point: the status line, keybindings, custom
+  interface widgets. **Lua is the named candidate** (decided
+  2026-08-23), ahead of a WASM ABI: an embedded Lua costs a few
+  hundred KB inside the size budget, starts fast, and matches the
+  terminal-tool culture this audience lives in (Neovim, wezterm).
+  Config stays TOML either way: config must read back statically for
+  `doctor` and the precedence display, so it never becomes a script.
 
 ### Loop-efficiency checklist
 
