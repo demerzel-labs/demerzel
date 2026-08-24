@@ -2,18 +2,27 @@
 //! and the guarantee that all of it reverts on every exit path,
 //! panics included.
 
-use std::io::Stdout;
+use std::io::{Stdout, Write as _};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-};
+use ratatui::crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::crossterm::{cursor, execute};
+
+/// Mouse reporting for buttons and the wheel, with SGR coordinates:
+/// modes 1000 and 1006. Not any-motion reporting (mode 1003), which
+/// would wake the loop on every pointer move.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+
+/// Whether the mouse is captured, so restore releases it only then:
+/// the release sequence must not reach a terminal whose mouse mode
+/// belongs to someone else.
+static MOUSE: AtomicBool = AtomicBool::new(false);
 
 /// The live terminal. Dropping it restores the caller's screen.
 pub struct Guard {
@@ -43,9 +52,13 @@ impl Guard {
             let _ = disable_raw_mode();
             return Err(error);
         }
-        if mouse && let Err(error) = execute!(std::io::stdout(), EnableMouseCapture) {
-            restore();
-            return Err(error);
+        if mouse {
+            MOUSE.store(true, Ordering::Relaxed);
+            let mut stdout = std::io::stdout();
+            if let Err(error) = stdout.write_all(MOUSE_ON).and_then(|()| stdout.flush()) {
+                restore();
+                return Err(error);
+            }
         }
         match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
             Ok(terminal) => Ok(Self { terminal }),
@@ -63,12 +76,14 @@ impl Drop for Guard {
     }
 }
 
-/// Release the mouse, leave the alternate screen and raw mode. Safe
-/// to call twice, and with the mouse never captured.
+/// Release the mouse when it was captured, leave the alternate screen
+/// and raw mode. Safe to call twice.
 fn restore() {
+    if MOUSE.swap(false, Ordering::Relaxed) {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    }
     let _ = execute!(
         std::io::stdout(),
-        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         cursor::Show

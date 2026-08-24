@@ -6,8 +6,9 @@
 //! the last width, as byte offsets into its text. The renderer walks
 //! blocks from the bottom until the viewport is full, so a long
 //! session pays for its window, not its history. A streamed delta
-//! touches only the open block, and that block's layout catches up by
-//! re-wrapping its last logical line, not the whole block.
+//! touches only the open block, and that block's layout catches up
+//! from its last row, not from its start: a wrap break depends only
+//! on the text before it, so the rows already laid out stay valid.
 //!
 //! Two caps bound memory and per-frame work. The block count cap
 //! drops the oldest blocks. The per-block byte cap closes a block that
@@ -17,9 +18,11 @@
 //!
 //! The view is `scroll`: rows between the bottom of the viewport and
 //! the end of the transcript. Zero is follow mode, the view sticks to
-//! the bottom. A positive value is browse mode: rows that arrive below
-//! the viewport add to it, so the view stays where the user put it,
-//! and the same number names the rows below for the indicator.
+//! the bottom. A positive value is browse mode. Rows that arrive or
+//! change at or below the top of the viewport add to it, so the row
+//! the user reads stays where it is, and the same number names the
+//! rows below the viewport for the indicator. A width change returns
+//! to follow mode: the rows the number counted no longer exist.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -27,11 +30,14 @@ use std::collections::VecDeque;
 use crate::wrap::row_starts;
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
-pub const MAX_BLOCKS: usize = 2_000;
+const MAX_BLOCKS: usize = 2_000;
 
 /// Byte cap for one block. A streamed block that reaches it closes
 /// and the stream continues in a new block; a pushed block splits.
 pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
+
+// Row starts are `u16` offsets into a block's text.
+const _: () = assert!(MAX_BLOCK_BYTES <= u16::MAX as usize + 1);
 
 /// What a block is. Kinds map to terminal-native styles until the
 /// theme lands.
@@ -59,11 +65,12 @@ struct Layout {
     width: u16,
     /// Byte offset where each row starts. A row ends where the next
     /// row starts, less the newline that ended its logical line.
-    rows: Vec<u32>,
-    /// Rows of the logical lines before the last one. Appended text
-    /// can change only the last line, so these stay across a sync.
+    rows: Vec<u16>,
+    /// Rows that stay valid when text is appended: all but the last
+    /// row, because a wrap break depends only on the text before it.
     stable: usize,
-    /// Byte offset where the last logical line starts.
+    /// Byte offset where the last row starts; the point a sync lays
+    /// out from.
     tail: usize,
     /// Text arrived since the rows were laid out.
     dirty: bool,
@@ -92,35 +99,42 @@ impl Block {
     }
 
     /// Whether the rows hold for `width` with no text pending.
-    pub(crate) fn clean(&self, width: u16) -> bool {
+    #[cfg(test)]
+    fn clean(&self, width: u16) -> bool {
         self.layout.width == width && !self.layout.dirty
     }
 
-    /// Bring the rows up to date at `width`. Returns the rows the
-    /// block gained since its last sync at this width: all of them
-    /// for a block laid out for the first time, none for a layout at
-    /// a new width, where a row count means nothing.
-    pub(crate) fn sync(&mut self, width: u16) -> usize {
+    /// Whether the block was laid out at any width.
+    fn laid(&self) -> bool {
+        self.layout.width != 0
+    }
+
+    /// Bring the rows up to date at `width`. Returns the change in the
+    /// row count since the last sync at this width: every row for a
+    /// block laid out for the first time, zero for a layout at a new
+    /// width, where a row count means nothing.
+    pub(crate) fn sync(&mut self, width: u16) -> isize {
+        debug_assert!(width > 0, "zero width is the never-laid-out mark");
         if self.layout.width != width {
-            let first = self.layout.width == 0;
+            let first = !self.laid();
             self.layout.width = width;
             self.layout.rows.clear();
             self.lay_out_from(0);
             self.layout.dirty = false;
-            return if first { self.layout.rows.len() } else { 0 };
+            return if first { row_delta(0, self.rows()) } else { 0 };
         }
         if !self.layout.dirty {
             return 0;
         }
-        let before = self.layout.rows.len();
+        let before = self.rows();
         self.layout.rows.truncate(self.layout.stable);
         let tail = self.layout.tail;
         self.lay_out_from(tail);
         self.layout.dirty = false;
-        self.layout.rows.len().saturating_sub(before)
+        row_delta(before, self.rows())
     }
 
-    /// Wrap the logical lines from byte `from` on and append their
+    /// Wrap the text from byte `from` — a row start — and append the
     /// row starts. A trailing newline ends the last line; it opens no
     /// empty one.
     fn lay_out_from(&mut self, from: usize) {
@@ -138,11 +152,11 @@ impl Block {
                 layout.tail = start;
                 break;
             }
-            layout.stable = layout.rows.len();
-            layout.tail = start;
             row_starts(line, layout.width, |offset| {
-                layout.rows.push((start + offset) as u32);
+                layout.rows.push((start + offset) as u16);
             });
+            layout.stable = layout.rows.len() - 1;
+            layout.tail = usize::from(layout.rows[layout.stable]);
             match next {
                 Some(next) => start = next,
                 None => break,
@@ -157,12 +171,12 @@ impl Block {
 
     /// One row at the synced width.
     pub(crate) fn row(&self, index: usize) -> &str {
-        let start = self.layout.rows[index] as usize;
+        let start = usize::from(self.layout.rows[index]);
         let end = self
             .layout
             .rows
             .get(index + 1)
-            .map_or(self.text.len(), |&next| next as usize);
+            .map_or(self.text.len(), |&next| usize::from(next));
         let row = &self.text[start..end];
         row.strip_suffix('\n').unwrap_or(row)
     }
@@ -174,8 +188,10 @@ impl Block {
         self.layout.dirty = true;
         let overflow = split_at_cap(&mut self.text);
         if overflow.is_some() {
-            // The cut can land inside the laid-out tail: the next
-            // sync lays the closed block out whole.
+            // The closed block keeps no room for a stream it no
+            // longer carries, and its cut can land inside the
+            // laid-out tail: the next sync lays it out whole.
+            self.text.shrink_to_fit();
             self.relayout_whole();
         }
         overflow
@@ -196,10 +212,15 @@ impl Block {
     }
 }
 
+fn row_delta(before: usize, after: usize) -> isize {
+    // Row counts stay far below `isize::MAX`: the byte cap bounds them.
+    after as isize - before as isize
+}
+
 /// The scrollable session log.
 pub struct Transcript {
     blocks: VecDeque<Block>,
-    /// Blocks dropped from the front, so tool-block indices stay
+    /// Blocks dropped from the front, so absolute block indices stay
     /// stable.
     dropped: usize,
     /// The kind of the last block while it still streams.
@@ -210,8 +231,12 @@ pub struct Transcript {
     /// Rows between the viewport bottom and the transcript end. The
     /// renderer clamps it against the rows that exist.
     scroll: usize,
-    /// The width of the last frame; zero before the first.
+    /// The viewport of the last frame; zero before the first.
     width: u16,
+    height: u16,
+    /// The absolute block count at the last frame: blocks past it
+    /// arrived since.
+    frame_end: usize,
 }
 
 impl Transcript {
@@ -223,6 +248,8 @@ impl Transcript {
             tools: HashMap::new(),
             scroll: 0,
             width: 0,
+            height: 0,
+            frame_end: 0,
         }
     }
 
@@ -248,12 +275,12 @@ impl Transcript {
             && let Some(last) = self.blocks.back_mut()
         {
             if let Some(overflow) = last.append(delta) {
-                self.push_block(kind, overflow);
+                self.push_blocks(kind, &overflow);
             }
         } else {
-            let mut text = String::with_capacity(delta.len().min(MAX_BLOCK_BYTES));
+            let mut text = String::new();
             push_sanitized(&mut text, delta);
-            self.push_block(kind, text);
+            self.push_blocks(kind, &text);
         }
         self.open = Some(kind);
     }
@@ -262,14 +289,16 @@ impl Transcript {
     /// or a pasted prompt is one block of several lines.
     pub fn push_line(&mut self, kind: Kind, text: &str) {
         self.open = None;
-        let mut clean = String::with_capacity(text.len().min(MAX_BLOCK_BYTES));
+        let mut clean = String::new();
         push_sanitized(&mut clean, text);
-        self.push_block(kind, clean);
+        self.push_blocks(kind, &clean);
     }
 
     /// One status block for a started tool call, updatable by id.
     pub fn tool_start(&mut self, id: &str, name: &str) {
-        self.push_line(Kind::Tool, &format!("· {name} …"));
+        // The name is model-controlled: one line, inside the cap, as
+        // every tool-line write.
+        self.push_line(Kind::Tool, &tool_text(&format!("· {name} …")));
         let index = self.dropped + self.blocks.len() - 1;
         self.tools.insert(id.to_string(), (index, name.to_string()));
     }
@@ -301,8 +330,6 @@ impl Transcript {
             if let Some(offset) = index.checked_sub(self.dropped)
                 && offset < self.blocks.len()
             {
-                // The name is model-controlled: it goes through the
-                // same sanitizer and cap as every other write.
                 let text = tool_text(&format!("✗ {name}: interrupted"));
                 self.blocks[offset].set_text(text);
             }
@@ -339,44 +366,64 @@ impl Transcript {
         self.scroll = self.scroll.min(rows_above);
     }
 
-    /// Start a frame at `width`: lay out every block that changed since
-    /// the last frame, and keep a browsing view anchored by adding the
-    /// rows that arrived below it. Blocks that changed form a suffix
-    /// — new blocks append, and only the open block streams — so the
-    /// walk stops at the first block that is clean. A width change
-    /// lays nothing out here: the renderer lays out the blocks it
-    /// shows, and the scroll clamps.
-    pub(crate) fn begin_frame(&mut self, width: u16) {
+    /// Start a frame on a viewport of `width` by `height`. A width
+    /// change returns to follow mode. In browse mode, the walk lays
+    /// out the blocks from the end up to the top of the viewport —
+    /// the blocks the frame shows or counts, no others — and adds the
+    /// rows they gained or lost to the scroll, so the row the user
+    /// reads stays where it is. A block above the viewport changes
+    /// nothing: its rows sit above the number. A block never laid out
+    /// before, and older than the last frame, sat above the viewport
+    /// too, so its rows count as old.
+    pub(crate) fn begin_frame(&mut self, width: u16, height: u16) {
+        self.height = height;
         if width != self.width {
             self.width = width;
-            return;
+            self.scroll = 0;
         }
-        let mut added = 0;
-        for block in self.blocks.iter_mut().rev() {
-            if block.clean(width) {
-                break;
-            }
-            added += block.sync(width);
-        }
+        let end = self.dropped + self.blocks.len();
         if self.scroll > 0 {
-            self.scroll = self.scroll.saturating_add(added);
+            let top = self.scroll.saturating_add(usize::from(height));
+            let mut walked = 0usize;
+            let mut delta = 0isize;
+            for (offset, block) in self.blocks.iter_mut().enumerate().rev() {
+                if walked >= top {
+                    break;
+                }
+                let new = self.dropped + offset >= self.frame_end;
+                let laid = block.laid();
+                let before = block.rows();
+                let change = block.sync(width);
+                if new || laid {
+                    delta += change;
+                }
+                walked += match (new, laid) {
+                    (true, _) => 0,
+                    (false, true) => before,
+                    (false, false) => block.rows(),
+                };
+            }
+            self.scroll = self.scroll.saturating_add_signed(delta);
         }
+        self.frame_end = end;
     }
 
-    /// Append `text` as blocks: one, or several when it exceeds the
-    /// byte cap. `text` is sanitized already.
-    fn push_block(&mut self, kind: Kind, mut text: String) {
+    /// Append sanitized `text` as blocks of at most the byte cap. Each
+    /// block gets an allocation of its own size, so a large paste
+    /// costs its length once.
+    fn push_blocks(&mut self, kind: Kind, text: &str) {
+        let mut rest = text;
         loop {
-            let rest = split_at_cap(&mut text);
-            self.blocks.push_back(Block::new(kind, text));
+            let (head, tail) = rest.split_at(cap_boundary(rest));
+            self.blocks.push_back(Block::new(kind, head.to_string()));
             while self.blocks.len() > MAX_BLOCKS {
                 self.blocks.pop_front();
                 self.dropped += 1;
             }
-            match rest {
-                Some(tail) => text = tail,
-                None => break,
+            if tail.is_empty() {
+                break;
             }
+            rest = tail;
         }
     }
 }
@@ -386,21 +433,27 @@ fn tool_text(raw: &str) -> String {
     let mut text = String::new();
     push_sanitized(&mut text, raw);
     let mut text = text.replace('\n', " ");
-    let _ = split_at_cap(&mut text);
+    text.truncate(cap_boundary(&text));
     text
 }
 
-/// When `text` exceeds the cap, cut it at the last char boundary
-/// inside the cap and return the tail.
-fn split_at_cap(text: &mut String) -> Option<String> {
+/// The byte cap, or the last char boundary inside it.
+fn cap_boundary(text: &str) -> usize {
     if text.len() <= MAX_BLOCK_BYTES {
-        return None;
+        return text.len();
     }
     let mut cut = MAX_BLOCK_BYTES;
     while !text.is_char_boundary(cut) {
         cut -= 1;
     }
-    Some(text.split_off(cut))
+    cut
+}
+
+/// When `text` exceeds the cap, cut it at the last char boundary
+/// inside the cap and return the tail.
+fn split_at_cap(text: &mut String) -> Option<String> {
+    let cut = cap_boundary(text);
+    (cut < text.len()).then(|| text.split_off(cut))
 }
 
 /// Append `text` with control characters neutralized: tabs become
@@ -446,6 +499,13 @@ mod tests {
         body.split('\n')
             .flat_map(|line| wrap(line, width).into_iter().map(str::to_string))
             .collect()
+    }
+
+    /// A frame as the renderer runs it: the anchor walk, then every
+    /// block laid out.
+    fn frame(t: &mut Transcript, width: u16, height: u16) {
+        t.begin_frame(width, height);
+        rows(t, width);
     }
 
     #[test]
@@ -507,10 +567,13 @@ mod tests {
     #[test]
     fn an_incremental_layout_matches_a_fresh_one() {
         // Deltas of every shape — mid-word, at a space, with one or
-        // several newlines, wide chars — at several widths: the rows
-        // after each delta must equal the rows of the whole text.
+        // several newlines, wide chars, one line that wraps many
+        // times — at several widths: the rows after each delta must
+        // equal the rows of the whole text.
         let text = "the quick brown fox\njumps over the lazy dog 日本語 text\n\nand a blank line\n\
-                    then a much longer line that wraps more than once at every width tried\n";
+                    then a much longer line that wraps more than once at every width tried, \
+                    and keeps going without a newline so the layout must resume from a row, \
+                    not a line, 日本語の文字 included\n";
         for width in [5u16, 12, 33, 80] {
             let mut t = Transcript::new();
             let mut whole = String::new();
@@ -535,6 +598,18 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_lays_out_from_the_last_row_not_the_last_line() {
+        let mut t = Transcript::new();
+        t.push_delta(Kind::Text, "one two three four five six");
+        rows(&mut t, 8);
+        let block = t.blocks_mut().next_back().unwrap();
+        assert_eq!(block.rows(), 4);
+        // Every row but the last stays; the sync resumes at the last.
+        assert_eq!(block.layout.stable, 3);
+        assert_eq!(block.layout.tail, usize::from(block.layout.rows[3]));
+    }
+
+    #[test]
     fn a_width_change_lays_the_block_out_again() {
         let mut t = Transcript::new();
         t.push_delta(Kind::Text, "one two three");
@@ -545,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_reports_the_rows_a_delta_added() {
+    fn sync_reports_the_rows_a_change_added_or_removed() {
         let mut t = Transcript::new();
         t.push_delta(Kind::Text, "one");
         let block = t.blocks_mut().next_back().unwrap();
@@ -561,6 +636,9 @@ mod tests {
         assert!(!block.clean(8));
         assert_eq!(block.sync(8), 2);
         assert_eq!(block.sync(8), 0);
+        // A rewrite to fewer rows reports the loss.
+        block.set_text("ok".into());
+        assert_eq!(block.sync(8), -2);
     }
 
     #[test]
@@ -654,6 +732,26 @@ mod tests {
     }
 
     #[test]
+    fn a_large_paste_costs_its_length_once() {
+        // Each block owns an allocation of its own size: no block
+        // keeps the buffer of the whole paste.
+        let paste = "a line of pasted text\n".repeat(50_000);
+        let mut t = Transcript::new();
+        t.push_line(Kind::Prompt, &paste);
+        let mut t2 = Transcript::new();
+        t2.push_delta(Kind::Text, "start");
+        t2.push_delta(Kind::Text, &paste);
+        for block in t.blocks().chain(t2.blocks()) {
+            assert!(
+                block.text.capacity() <= MAX_BLOCK_BYTES + "start".len(),
+                "capacity {}",
+                block.text.capacity()
+            );
+        }
+        assert_eq!(t.blocks().len(), paste.len().div_ceil(MAX_BLOCK_BYTES));
+    }
+
+    #[test]
     fn close_marks_unanswered_calls_as_interrupted_and_forgets_them() {
         let mut t = Transcript::new();
         t.tool_start("call_1", "bash");
@@ -667,12 +765,18 @@ mod tests {
     }
 
     #[test]
-    fn the_interrupted_marker_sanitizes_a_hostile_tool_name() {
+    fn tool_lines_sanitize_a_hostile_tool_name_on_every_path() {
         let mut t = Transcript::new();
         t.tool_start("call_1", "ba\x1b[2Jsh\nSECOND");
+        assert_eq!(rows(&mut t, 80), vec!["· ba[2Jsh SECOND …"]);
         t.close();
         let last = t.blocks().last().unwrap();
         assert_eq!(last.text(), "✗ ba[2Jsh SECOND: interrupted");
+        // A name past the cap stays one block, so the update finds it.
+        let mut t = Transcript::new();
+        t.tool_start("call_2", &"n".repeat(2 * MAX_BLOCK_BYTES));
+        t.tool_end("call_2", "ok", false);
+        assert_eq!(blocks(&t), vec![(Kind::Tool, "· ok")]);
     }
 
     #[test]
@@ -700,34 +804,98 @@ mod tests {
         for i in 0..10 {
             t.push_line(Kind::Text, &format!("line {i}"));
         }
-        // The first frame at a width lays out what it shows; the
-        // test lays out everything, as a full-height frame would.
-        t.begin_frame(40);
-        rows(&mut t, 40);
+        frame(&mut t, 40, 4);
         t.scroll_up(4);
         // Rows that arrive below the viewport deepen the scroll by
         // their count, so the rows on screen do not move.
         t.push_line(Kind::Text, "one more");
         t.push_delta(Kind::Text, "and a stream\nof two rows");
-        t.begin_frame(40);
+        frame(&mut t, 40, 4);
         assert_eq!(t.scroll(), 7);
         // A delta that adds no row changes nothing.
         t.push_delta(Kind::Text, " still");
-        t.begin_frame(40);
+        frame(&mut t, 40, 4);
         assert_eq!(t.scroll(), 7);
-        // A width change leaves the scroll to the renderer's clamp.
-        t.push_line(Kind::Text, "after a resize");
-        t.begin_frame(20);
-        assert_eq!(t.scroll(), 7);
+        // A width change returns to follow mode.
+        frame(&mut t, 20, 4);
+        assert_eq!(t.scroll(), 0);
+    }
+
+    #[test]
+    fn a_rewritten_block_below_the_viewport_top_moves_the_anchor() {
+        // A tool block behind a clean notice grows: the walk reaches
+        // it, and the rows it gained keep the view in place.
+        let mut t = Transcript::new();
+        for i in 0..20 {
+            t.push_line(Kind::Text, &format!("line {i:02}"));
+        }
+        t.tool_start("c1", "bash");
+        t.push_line(Kind::Notice, "note");
+        frame(&mut t, 40, 10);
+        t.scroll_up(2);
+        t.tool_end(
+            "c1",
+            "a much longer summary that certainly wraps across three rows of a forty column pane",
+            false,
+        );
+        frame(&mut t, 40, 10);
+        assert_eq!(t.scroll(), 4);
+
+        // A block that shrinks reports the loss.
+        let mut t = Transcript::new();
+        for i in 0..20 {
+            t.push_line(Kind::Text, &format!("line {i:02}"));
+        }
+        t.tool_start(
+            "c1",
+            "a tool name so long that its pending line wraps to three rows in a narrow pane",
+        );
+        t.push_delta(Kind::Text, "streaming");
+        frame(&mut t, 40, 10);
+        t.scroll_up(3);
+        t.tool_end("c1", "ok", false);
+        t.push_delta(Kind::Text, " more");
+        frame(&mut t, 40, 10);
+        assert_eq!(t.scroll(), 1);
+    }
+
+    #[test]
+    fn blocks_above_the_viewport_leave_the_anchor_alone() {
+        // A tool call at the top, then a long history: the first
+        // frame lays out only what it shows.
+        let mut t = Transcript::new();
+        t.tool_start("c1", "bash");
+        for i in 0..30 {
+            t.push_line(Kind::Text, &format!("line {i:02}"));
+        }
+        t.begin_frame(40, 4);
+        for block in t.blocks_mut().rev().take(4) {
+            block.sync(40);
+        }
+        // Scrolling into blocks the frame never laid out counts
+        // nothing: they sat above the viewport all along.
+        t.scroll_up(20);
+        t.begin_frame(40, 4);
+        assert_eq!(t.scroll(), 20);
+        // A rewrite above the viewport changes nothing; an arrival
+        // below it counts.
+        t.tool_end(
+            "c1",
+            "a long summary that wraps to more rows than the pending line had, well above",
+            false,
+        );
+        t.push_line(Kind::Text, "arrived");
+        t.begin_frame(40, 4);
+        assert_eq!(t.scroll(), 21);
     }
 
     #[test]
     fn follow_mode_ignores_arrivals_and_end_returns_to_it() {
         let mut t = Transcript::new();
         t.push_line(Kind::Text, "first");
-        t.begin_frame(40);
+        frame(&mut t, 40, 4);
         t.push_line(Kind::Text, "second");
-        t.begin_frame(40);
+        frame(&mut t, 40, 4);
         assert_eq!(t.scroll(), 0);
         assert!(!t.browsing());
         t.scroll_up(3);

@@ -142,8 +142,8 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
         return;
     }
     let height = usize::from(area.height);
-    transcript.begin_frame(area.width);
-    let want = height + transcript.scroll();
+    transcript.begin_frame(area.width, area.height);
+    let want = height.saturating_add(transcript.scroll());
 
     // Bottom-first: lay out blocks until the viewport and the offset
     // are covered.
@@ -417,9 +417,21 @@ mod tests {
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        transcript.scroll_up(3);
         let input = Input::new();
         let status = status();
+        // The first frame sets the width; a scroll before it would
+        // reset with the width change.
+        render(
+            40,
+            4,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+            },
+        );
+        transcript.scroll_up(3);
         let (lines, _) = render(
             40,
             4,

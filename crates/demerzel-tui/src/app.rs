@@ -339,8 +339,8 @@ impl App {
     }
 
     /// Apply one terminal event. Only an event that changes what the
-    /// screen shows marks a frame: mouse motion and focus changes
-    /// arrive often and must not wake one.
+    /// screen shows marks a frame: mouse motion arrives often and
+    /// must not wake one.
     fn terminal_event(&mut self, event: Event, phase: Phase) -> Action {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -372,6 +372,25 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent, phase: Phase) -> Action {
+        // The browse keys work at every prompt, the approval question
+        // included: the call under question may sit above the window.
+        match key.code {
+            KeyCode::PageUp => {
+                self.transcript.scroll_up(usize::from(self.page.max(1)));
+                return Action::None;
+            }
+            KeyCode::PageDown => {
+                self.transcript.scroll_down(usize::from(self.page.max(1)));
+                return Action::None;
+            }
+            // End returns a browsed transcript to follow mode; at the
+            // bottom it is the cursor key, with Ctrl-E as the twin.
+            KeyCode::End if self.transcript.browsing() => {
+                self.transcript.follow();
+                return Action::None;
+            }
+            _ => {}
+        }
         if matches!(self.mode, Mode::Approval { .. }) {
             return self.approval_key(key);
         }
@@ -409,9 +428,6 @@ impl App {
             KeyCode::Left => self.input.left(),
             KeyCode::Right => self.input.right(),
             KeyCode::Home => self.input.home(),
-            // End returns a browsed transcript to follow mode; at the
-            // bottom it is the cursor key, with Ctrl-E as the twin.
-            KeyCode::End if self.transcript.browsing() => self.transcript.follow(),
             KeyCode::End => self.input.end(),
             KeyCode::Up => {
                 if let Some(text) = self.history.up(self.input.text()) {
@@ -425,8 +441,6 @@ impl App {
                     self.input.set(&text);
                 }
             }
-            KeyCode::PageUp => self.transcript.scroll_up(usize::from(self.page.max(1))),
-            KeyCode::PageDown => self.transcript.scroll_down(usize::from(self.page.max(1))),
             _ => {}
         }
         Action::None

@@ -24,7 +24,9 @@ const CTRL_D: &[u8] = b"\x04";
 const END: &[u8] = b"\x1b[F";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
-/// The first sequence mouse capture turns on.
+/// Mouse reporting mode 1000, the first sequence capture turns on.
+/// The mode is the only sign of capture a PTY can observe, so the
+/// test pins it; the interface owns the sequence, not a dependency.
 const MOUSE_CAPTURE: &str = "\x1b[?1000h";
 
 fn text_delta(text: &str) -> Value {
@@ -653,18 +655,20 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     // The usage notice is the last thing the turn draws.
     pty.wait_for("2 cached");
     // A resize makes the next draw repaint the whole screen, so the
-    // browsed window and the indicator reach the stream in full.
-    pty.resize(90, 30);
+    // browsed window and the indicator reach the stream in full. The
+    // height changes, not the width: a width change returns the view
+    // to follow mode.
+    pty.resize(100, 29);
     pty.send(WHEEL_UP);
     pty.send(WHEEL_UP);
     // Two notches of three rows: the window moved up six rows past
-    // the usage notice and the last five reply rows, so it opens on
-    // row 27; the indicator counts the six below.
-    pty.wait_for("row 27 of the long reply");
+    // the usage notice and the last five reply rows, so a 27-row
+    // pane opens on row 28; the indicator counts the six below.
+    pty.wait_for("row 28 of the long reply");
     pty.wait_for("6 below");
     // End returns to the bottom of the transcript.
     pty.send(END);
-    pty.resize(80, 30);
+    pty.resize(100, 30);
     pty.send(b"x");
     pty.wait_for("row 59 of the long reply");
     pty.send(CTRL_C);
@@ -679,7 +683,7 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_mouse_key_turns_capture_off() {
+async fn the_mouse_config_key_turns_capture_off() {
     let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
     let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = false\n"));
 

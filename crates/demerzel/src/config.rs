@@ -74,6 +74,13 @@ pub struct Settings {
     /// `None` keeps the M1 rule: the REPL asks, one-shot is read-only.
     pub approval: Setting<Option<ApprovalMode>>,
     pub history_file: Setting<bool>,
+    /// The `[tui]` table.
+    pub tui: TuiSettings,
+}
+
+/// The resolved `[tui]` keys.
+#[derive(Debug, Clone)]
+pub struct TuiSettings {
     /// Mouse capture in the full-screen interface, for wheel scroll.
     pub mouse: Setting<bool>,
 }
@@ -107,8 +114,7 @@ struct ProviderKeys {
     model: Option<String>,
 }
 
-/// Interface keys from the `[tui]` table. Cosmetic: a project file
-/// can set them, they raise no privilege.
+/// Interface keys from the `[tui]` table.
 #[derive(Debug, Default, PartialEq)]
 struct TuiKeys {
     mouse: Option<bool>,
@@ -440,9 +446,20 @@ pub fn resolve(
         .or(user_history)
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
 
-    // Cosmetic keys carry no trust rule: the project file wins.
-    let mouse = layer_key(project, Origin::Project, |l| l.tui.mouse)
-        .or_else(|| layer_key(user, Origin::User, |l| l.tui.mouse))
+    // Trust rule: the project file can turn mouse capture off, never
+    // on against a user who turned it off — capture takes the
+    // terminal's own text selection, and the user knows their
+    // terminal.
+    let user_mouse = layer_key(user, Origin::User, |l| l.tui.mouse);
+    let project_mouse = match layer_key(project, Origin::Project, |l| l.tui.mouse) {
+        Some(setting) if setting.value && user_mouse.as_ref().is_some_and(|user| !user.value) => {
+            warnings.push("ignored: the project file cannot turn mouse capture on".to_string());
+            None
+        }
+        other => other,
+    };
+    let mouse = project_mouse
+        .or(user_mouse)
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
 
     (
@@ -452,7 +469,7 @@ pub fn resolve(
             base_url,
             approval,
             history_file,
-            mouse,
+            tui: TuiSettings { mouse },
         },
         warnings,
     )
@@ -524,24 +541,35 @@ mod tests {
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
-        assert!(settings.mouse.value);
-        assert_eq!(settings.mouse.origin, Origin::Default);
+        assert!(settings.tui.mouse.value);
+        assert_eq!(settings.tui.mouse.origin, Origin::Default);
         assert_eq!(settings.approval_mode(true), ApprovalMode::Ask);
         assert_eq!(settings.approval_mode(false), ApprovalMode::ReadOnly);
     }
 
     #[test]
-    fn the_tui_table_sets_mouse_capture_and_the_project_file_wins() {
+    fn the_project_file_cannot_turn_mouse_capture_on() {
         let user = layer("[tui]\nmouse = false");
         let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
-        assert!(!settings.mouse.value);
-        assert_eq!(settings.mouse.origin, Origin::User);
+        assert!(!settings.tui.mouse.value);
+        assert_eq!(settings.tui.mouse.origin, Origin::User);
 
-        // Cosmetic: the project file can set it either way.
         let project = layer("[tui]\nmouse = true");
-        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
-        assert!(settings.mouse.value);
-        assert_eq!(settings.mouse.origin, Origin::Project);
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert!(!settings.tui.mouse.value);
+        assert_eq!(settings.tui.mouse.origin, Origin::User);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mouse capture"));
+
+        // Off is always accepted; on over the default is a no-op.
+        let project = layer("[tui]\nmouse = false");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
+        assert!(!settings.tui.mouse.value);
+        assert_eq!(settings.tui.mouse.origin, Origin::Project);
+
+        let project = layer("[tui]\nmouse = true");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
+        assert!(settings.tui.mouse.value);
     }
 
     #[test]

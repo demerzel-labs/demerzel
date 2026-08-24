@@ -6,6 +6,12 @@
 
 use unicode_width::UnicodeWidthChar;
 
+/// Bytes one row can hold past its columns: room for wide chars and
+/// a few combining marks per cell. A run of zero-width chars breaks
+/// here, so a row never grows without bound.
+const ROW_BYTES_PER_COLUMN: usize = 8;
+const ROW_BYTES_SLACK: usize = 64;
+
 /// Feed `row` the byte offset where each row of `line` starts when
 /// wrapped at `width` columns, first row at zero. A break lands after
 /// the last space inside the window when one exists, else before the
@@ -13,6 +19,7 @@ use unicode_width::UnicodeWidthChar;
 /// transcript splits on newlines before it lays out a line.
 pub fn row_starts(line: &str, width: u16, mut row: impl FnMut(usize)) {
     let width = usize::from(width.max(1));
+    let max_bytes = width * ROW_BYTES_PER_COLUMN + ROW_BYTES_SLACK;
     let mut start = 0usize;
     let mut cols = 0usize;
     let mut last_space: Option<usize> = None;
@@ -20,7 +27,7 @@ pub fn row_starts(line: &str, width: u16, mut row: impl FnMut(usize)) {
     row(0);
     for (index, ch) in line.char_indices() {
         let ch_cols = ch.width().unwrap_or(0);
-        if cols + ch_cols > width && index > start {
+        if (cols + ch_cols > width || index - start >= max_bytes) && index > start {
             // Break after the space when the window holds one; the
             // space stays on the finished row.
             let break_at = match last_space {
@@ -130,6 +137,19 @@ mod tests {
             }
             assert_eq!(wrap(line, width).concat(), line);
         }
+    }
+
+    #[test]
+    fn a_run_of_zero_width_chars_still_breaks_into_rows() {
+        // Zero-width chars fill no column, so columns alone would
+        // never break the row; the byte bound does.
+        let line = "\u{200b}".repeat(10_000);
+        let rows = wrap(&line, 10);
+        assert!(rows.len() > 100, "{} rows", rows.len());
+        for row in &rows {
+            assert!(row.len() <= 10 * ROW_BYTES_PER_COLUMN + ROW_BYTES_SLACK);
+        }
+        assert_eq!(rows.concat(), line);
     }
 
     #[test]

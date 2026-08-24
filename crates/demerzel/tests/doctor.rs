@@ -151,11 +151,13 @@ fn doctor_shows_the_layer_that_set_each_key() {
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = gpt-5.6-sol (default)"), "{out}");
     assert!(out.contains("provider = openai-codex (default)"), "{out}");
+    assert!(out.contains("tui.mouse = on (default)"), "{out}");
 
-    bed.write_user_config("model = \"user-model\"\nhistory_file = false");
+    bed.write_user_config("model = \"user-model\"\nhistory_file = false\n[tui]\nmouse = false");
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = user-model (user file)"), "{out}");
     assert!(out.contains("history_file = off (user file)"), "{out}");
+    assert!(out.contains("tui.mouse = off (user file)"), "{out}");
 
     bed.write_project_config("model = \"project-model\"\napproval = \"read-only\"");
     let (out, _) = bed.doctor(&[]);

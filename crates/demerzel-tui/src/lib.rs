@@ -67,8 +67,10 @@ pub trait Driver {
     ) -> Submission<'_>;
 }
 
-/// Interface settings for one session.
-#[derive(Debug, Default)]
+/// Interface settings for one session. Start from [`Options::default`]
+/// and set fields; the struct grows with the interface.
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct Options {
     /// The input-history file, shared with the REPL. `None` keeps
     /// history in memory only.
@@ -80,10 +82,21 @@ pub struct Options {
     pub model: String,
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
-    /// Capture the mouse, so the wheel scrolls the transcript. Off,
-    /// the terminal keeps its own text selection; the `Default` value
-    /// is off.
+    /// Capture the mouse, so the wheel scrolls the transcript. On by
+    /// default; off, the terminal keeps its own text selection.
     pub mouse: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            history_path: None,
+            banner: None,
+            model: String::new(),
+            mode: String::new(),
+            mouse: true,
+        }
+    }
 }
 
 /// Run the interface until the user ends the session.
