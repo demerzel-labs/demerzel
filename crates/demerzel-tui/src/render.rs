@@ -137,16 +137,26 @@ fn style(kind: Kind) -> Style {
 /// A face over the block's own style. Terminal attributes and one
 /// color until the theme lands.
 fn face_style(kind: Kind, face: Face) -> Style {
-    let base = style(kind);
-    match face {
-        Face::Plain => base,
-        Face::Heading | Face::Strong => base.add_modifier(Modifier::BOLD),
-        Face::Emphasis => base.add_modifier(Modifier::ITALIC),
-        Face::Strike => base.add_modifier(Modifier::CROSSED_OUT),
-        Face::Code => base.fg(Color::Cyan),
-        Face::Link => base.add_modifier(Modifier::UNDERLINED),
-        Face::Url | Face::Marker => base.add_modifier(Modifier::DIM),
+    let mut style = style(kind);
+    if face.has(Face::HEADING) || face.has(Face::STRONG) {
+        style = style.add_modifier(Modifier::BOLD);
     }
+    if face.has(Face::EMPHASIS) {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if face.has(Face::STRIKE) {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    if face.has(Face::CODE) {
+        style = style.fg(Color::Cyan);
+    }
+    if face.has(Face::LINK) {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if face.has(Face::URL) || face.has(Face::MARKER) {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
 }
 
 /// Show the tail of the transcript, or the browsed window above it.

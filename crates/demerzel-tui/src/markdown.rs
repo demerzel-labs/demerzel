@@ -37,25 +37,52 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::wrap::{display_width, row_starts};
 
-/// The style class of one span. The frame maps faces to styles; the
-/// theme owns that map once it lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Face {
+/// The style classes of one span, as a set: strong text inside a
+/// link carries both. The frame maps a set to one style; the theme
+/// owns that map once it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Face(u8);
+
+impl Face {
     /// Body text in the block's own style.
-    Plain,
-    Heading,
-    Strong,
-    Emphasis,
-    Strike,
+    pub const PLAIN: Face = Face(0);
+    pub const HEADING: Face = Face(1);
+    pub const STRONG: Face = Face(1 << 1);
+    pub const EMPHASIS: Face = Face(1 << 2);
+    pub const STRIKE: Face = Face(1 << 3);
     /// Inline code and the lines of a code block.
-    Code,
+    pub const CODE: Face = Face(1 << 4);
     /// The text of a link.
-    Link,
+    pub const LINK: Face = Face(1 << 5);
     /// The destination shown after a link's text.
-    Url,
+    pub const URL: Face = Face(1 << 6);
     /// Structure the renderer adds: heading marks, list markers,
     /// quote bars, code frames, rules, table lines.
-    Marker,
+    pub const MARKER: Face = Face(1 << 7);
+
+    /// Whether every class in `other` is in this set.
+    pub fn has(self, other: Face) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for Face {
+    type Output = Face;
+
+    fn bitor(self, other: Face) -> Face {
+        Face(self.0 | other.0)
+    }
+}
+
+/// Where a block's source was cut at the byte cap inside a fence.
+/// `carried` is the length of the fence opener the caller put in
+/// front of this block's source, so the fence renders as code with
+/// no second frame; `cut` says the fence runs on into the next block,
+/// so the frame does not close here.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Seam {
+    pub carried: usize,
+    pub cut: bool,
 }
 
 /// Where the rows land: one text buffer, the byte offset where each
@@ -74,14 +101,16 @@ pub(crate) struct Target<'a> {
 /// buffer can run past the cap by one row: the check runs where a
 /// row starts.
 #[must_use]
-pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -> bool {
+pub(crate) fn render(source: &str, width: u16, cap: usize, seam: Seam, target: Target<'_>) -> bool {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     let mut renderer = Renderer {
         out: target,
         width: usize::from(width.max(1)),
         cap,
+        seam,
+        end: source.len(),
         full: false,
-        face: Face::Plain,
+        face: Face::PLAIN,
         prefix: String::new(),
         markers: Vec::new(),
         marker_text: String::new(),
@@ -89,7 +118,7 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -
         inline: Vec::new(),
         line: String::new(),
         line_faces: Vec::new(),
-        line_face: Face::Plain,
+        line_face: Face::PLAIN,
         starts: Vec::new(),
         need_gap: false,
         links: Vec::new(),
@@ -97,8 +126,8 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -
         cell_text: String::new(),
         cell_faces: Vec::new(),
     };
-    for event in Parser::new_ext(source, options) {
-        renderer.event(event);
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        renderer.event(event, range);
         if renderer.full {
             return false;
         }
@@ -107,14 +136,53 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, target: Target<'_>) -
     !renderer.full
 }
 
+/// The fence still open at the end of `text`, as its opener line with
+/// a newline, given the opener `carry` already in force at the start.
+/// A block cut at the byte cap inside a fence hands this to the block
+/// that continues it. The scan follows the fence rules: three or more
+/// backticks or tildes after at most three spaces open one; a closer
+/// is the same character, at least as long, alone on its line.
+pub(crate) fn open_fence(carry: Option<&str>, text: &str) -> Option<String> {
+    let mut open: Option<(char, usize, &str)> = None;
+    let carry = carry.map(|line| line.trim_end_matches('\n'));
+    for line in carry.into_iter().chain(text.split('\n')) {
+        let fence = line.trim_start_matches(' ');
+        if line.len() - fence.len() > 3 {
+            continue;
+        }
+        let Some(ch) = fence.chars().next() else {
+            continue;
+        };
+        if ch != '`' && ch != '~' {
+            continue;
+        }
+        let run = fence.chars().take_while(|&c| c == ch).count();
+        if run < 3 {
+            continue;
+        }
+        let info = &fence[run..];
+        match open {
+            Some((open_ch, open_run, _)) => {
+                if ch == open_ch && run >= open_run && info.trim().is_empty() {
+                    open = None;
+                }
+            }
+            None if ch == '~' || !info.contains('`') => open = Some((ch, run, line)),
+            None => {}
+        }
+    }
+    open.map(|(_, _, line)| format!("{line}\n"))
+}
+
 /// One list container: its next ordinal when ordered, the indent its
 /// open item pushed onto the prefix and the prefix length with it,
-/// and whether its items hold paragraphs — a loose list, whose items
-/// part with a blank row.
+/// the items opened so far, and whether its items hold paragraphs —
+/// a loose list, whose items part with a blank row.
 struct ListState {
     next: Option<u64>,
     item_cols: usize,
     item_prefix: usize,
+    items: usize,
     loose: bool,
 }
 
@@ -158,6 +226,9 @@ struct Renderer<'t, 's> {
     /// Columns in the viewport.
     width: usize,
     cap: usize,
+    seam: Seam,
+    /// The source length: where an unclosed fence ends.
+    end: usize,
     /// The rows reached the cap; nothing more lands.
     full: bool,
     /// The face the output currently carries.
@@ -170,6 +241,7 @@ struct Renderer<'t, 's> {
     marker_text: String,
     lists: Vec<ListState>,
     /// The inline face stack: emphasis, strong, links, headings, code.
+    /// Each entry holds the classes of everything open around it.
     inline: Vec<Face>,
     /// The logical line under construction, with its face changes.
     line: String,
@@ -189,19 +261,22 @@ struct Renderer<'t, 's> {
 }
 
 impl<'s> Renderer<'_, 's> {
-    fn event(&mut self, event: Event<'s>) {
+    fn event(&mut self, event: Event<'s>, range: Range<usize>) {
         match event {
-            Event::Start(tag) => self.start(tag),
-            Event::End(tag) => self.end(tag),
+            Event::Start(tag) => self.start(tag, range),
+            Event::End(tag) => self.end(tag, range),
             Event::Text(text) => {
-                if self.inline.last() == Some(&Face::Code) {
+                if self.inline_face().has(Face::CODE) {
                     // Inside a code block: every newline ends a row.
                     self.push_lines(&text);
                 } else {
                     self.push_inline(&text);
                 }
             }
-            Event::Code(code) => self.push_text(&code, Face::Code),
+            Event::Code(code) => {
+                let face = self.inline_face() | Face::CODE;
+                self.push_text(&code, face);
+            }
             // Raw markup stays as text; a newline inside an HTML
             // block ends the row.
             Event::Html(html) | Event::InlineHtml(html) => self.push_lines(&html),
@@ -212,7 +287,7 @@ impl<'s> Renderer<'_, 's> {
                 let cols = self.avail();
                 if self.begin_row() {
                     self.push_prefix();
-                    self.set_face(Face::Marker);
+                    self.set_face(Face::MARKER);
                     for _ in 0..cols {
                         self.out.text.push('─');
                     }
@@ -227,19 +302,25 @@ impl<'s> Renderer<'_, 's> {
         }
     }
 
-    fn start(&mut self, tag: Tag<'s>) {
+    fn start(&mut self, tag: Tag<'s>, range: Range<usize>) {
         match tag {
             Tag::Paragraph => {
                 self.flush_pending();
-                self.gap();
                 // The parser wraps item text in a paragraph only in a
                 // loose list. A paragraph deeper inside the item — in
-                // a quote — says nothing about the list.
+                // a quote — says nothing about the list. A list found
+                // loose at its second item or later owes the gap its
+                // first items' ends did not know to leave.
                 if let Some(list) = self.lists.last_mut()
                     && self.prefix.len() == list.item_prefix
+                    && !list.loose
                 {
                     list.loose = true;
+                    if list.items > 1 {
+                        self.need_gap = true;
+                    }
                 }
+                self.gap();
             }
             Tag::Heading { level, .. } => {
                 self.flush_pending();
@@ -252,8 +333,8 @@ impl<'s> Renderer<'_, 's> {
                     HeadingLevel::H5 => "##### ",
                     HeadingLevel::H6 => "###### ",
                 };
-                self.push_text(marks, Face::Marker);
-                self.inline.push(Face::Heading);
+                self.push_text(marks, Face::MARKER);
+                self.push_face(Face::HEADING);
             }
             Tag::BlockQuote(_) => {
                 self.flush_pending();
@@ -263,9 +344,12 @@ impl<'s> Renderer<'_, 's> {
             Tag::CodeBlock(kind) => {
                 self.flush_pending();
                 self.gap();
-                if self.begin_row() {
+                // A fence carried over from the block before is
+                // already framed there.
+                let carried = range.start < self.seam.carried;
+                if !carried && self.begin_row() {
                     self.push_prefix();
-                    self.push_out("╭─", Face::Marker);
+                    self.push_out("╭─", Face::MARKER);
                     if let CodeBlockKind::Fenced(info) = kind
                         && let Some(language) = info.split_whitespace().next()
                     {
@@ -284,7 +368,7 @@ impl<'s> Renderer<'_, 's> {
                     }
                 }
                 self.prefix.push_str("│ ");
-                self.inline.push(Face::Code);
+                self.push_face(Face::CODE);
             }
             Tag::HtmlBlock => {
                 self.flush_pending();
@@ -300,6 +384,7 @@ impl<'s> Renderer<'_, 's> {
                     next: first,
                     item_cols: 0,
                     item_prefix: 0,
+                    items: 0,
                     loose: false,
                 });
             }
@@ -324,6 +409,7 @@ impl<'s> Renderer<'_, 's> {
                 if let Some(list) = self.lists.last_mut() {
                     list.item_cols = cols;
                     list.item_prefix = self.prefix.len();
+                    list.items += 1;
                 }
             }
             Tag::Table(aligns) => {
@@ -343,16 +429,16 @@ impl<'s> Renderer<'_, 's> {
                 }
             }
             Tag::TableCell => {}
-            Tag::Emphasis => self.inline.push(Face::Emphasis),
-            Tag::Strong => self.inline.push(Face::Strong),
-            Tag::Strikethrough => self.inline.push(Face::Strike),
+            Tag::Emphasis => self.push_face(Face::EMPHASIS),
+            Tag::Strong => self.push_face(Face::STRONG),
+            Tag::Strikethrough => self.push_face(Face::STRIKE),
             Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                 self.links.push(Link {
                     dest: dest_url,
                     from: self.line.len(),
                     split: false,
                 });
-                self.inline.push(Face::Link);
+                self.push_face(Face::LINK);
             }
             // Extensions that are off never produce these.
             Tag::FootnoteDefinition(_)
@@ -365,7 +451,7 @@ impl<'s> Renderer<'_, 's> {
         }
     }
 
-    fn end(&mut self, tag: TagEnd) {
+    fn end(&mut self, tag: TagEnd, range: Range<usize>) {
         match tag {
             TagEnd::Paragraph | TagEnd::HtmlBlock => {
                 self.flush_pending();
@@ -388,9 +474,12 @@ impl<'s> Renderer<'_, 's> {
                 self.flush_pending();
                 self.inline.pop();
                 self.pop_prefix("│ ".len());
-                if self.begin_row() {
+                // A fence cut at the byte cap closes in the block that
+                // continues it.
+                let cut = self.seam.cut && range.end >= self.end;
+                if !cut && self.begin_row() {
                     self.push_prefix();
-                    self.push_out("╰─", Face::Marker);
+                    self.push_out("╰─", Face::MARKER);
                 }
                 self.need_gap = true;
             }
@@ -440,7 +529,7 @@ impl<'s> Renderer<'_, 's> {
                 }
                 self.line.clear();
                 self.line_faces.clear();
-                self.line_face = Face::Plain;
+                self.line_face = Face::PLAIN;
             }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.inline.pop();
@@ -466,11 +555,11 @@ impl<'s> Renderer<'_, 's> {
                     return;
                 }
                 if has_text {
-                    self.push_text(" (", Face::Url);
-                    self.push_text(&link.dest, Face::Url);
-                    self.push_text(")", Face::Url);
+                    self.push_text(" (", Face::URL);
+                    self.push_text(&link.dest, Face::URL);
+                    self.push_text(")", Face::URL);
                 } else {
-                    self.push_text(&link.dest, Face::Url);
+                    self.push_text(&link.dest, Face::URL);
                 }
             }
             TagEnd::FootnoteDefinition
@@ -493,9 +582,20 @@ impl<'s> Renderer<'_, 's> {
         self.prefix.truncate(keep);
     }
 
+    /// The classes of everything open around the text.
+    fn inline_face(&self) -> Face {
+        self.inline.last().copied().unwrap_or(Face::PLAIN)
+    }
+
+    /// Open one more inline class inside the ones already open.
+    fn push_face(&mut self, face: Face) {
+        let face = self.inline_face() | face;
+        self.inline.push(face);
+    }
+
     /// Append inline text in the current inline face.
     fn push_inline(&mut self, text: &str) {
-        let face = self.inline.last().copied().unwrap_or(Face::Plain);
+        let face = self.inline_face();
         self.push_text(text, face);
     }
 
@@ -561,7 +661,7 @@ impl<'s> Renderer<'_, 's> {
                 let before = faces
                     .len()
                     .checked_sub(2)
-                    .map_or(Face::Plain, |index| faces[index].1);
+                    .map_or(Face::PLAIN, |index| faces[index].1);
                 if before == face {
                     faces.pop();
                 } else if let Some(last) = faces.last_mut() {
@@ -587,7 +687,7 @@ impl<'s> Renderer<'_, 's> {
     /// The container prefix at the start of a row. Each pending list
     /// marker takes the place of its item's indent, once.
     fn push_prefix(&mut self) {
-        self.set_face(Face::Marker);
+        self.set_face(Face::MARKER);
         let Self {
             out,
             prefix,
@@ -611,7 +711,7 @@ impl<'s> Renderer<'_, 's> {
         if self.need_gap {
             self.need_gap = false;
             if !self.out.rows.is_empty() && self.begin_row() {
-                self.set_face(Face::Marker);
+                self.set_face(Face::MARKER);
                 self.out.text.push_str(self.prefix.trim_end());
             }
         }
@@ -632,7 +732,7 @@ impl<'s> Renderer<'_, 's> {
             // be waste.
             self.line.clear();
             self.line_faces.clear();
-            self.line_face = Face::Plain;
+            self.line_face = Face::PLAIN;
             return;
         }
         let line = std::mem::take(&mut self.line);
@@ -657,14 +757,14 @@ impl<'s> Renderer<'_, 's> {
         self.line.clear();
         self.line_faces = faces;
         self.line_faces.clear();
-        self.line_face = Face::Plain;
+        self.line_face = Face::PLAIN;
     }
 
     /// Copy `line[from..to]` to the output with its faces.
     fn push_span(&mut self, line: &str, faces: &[(usize, Face)], from: usize, to: usize) {
         let mut next = faces.partition_point(|&(at, _)| at <= from);
         let face = if next == 0 {
-            Face::Plain
+            Face::PLAIN
         } else {
             faces[next - 1].1
         };
@@ -741,7 +841,7 @@ impl<'s> Renderer<'_, 's> {
                 }
                 if head && self.begin_row() {
                     self.push_prefix();
-                    self.set_face(Face::Marker);
+                    self.set_face(Face::MARKER);
                     let mut used = 0usize;
                     for (column, width) in widths.iter().enumerate() {
                         if column > 0 && !self.push_cut("─┼─", &mut used, avail) {
@@ -785,17 +885,13 @@ impl<'s> Renderer<'_, 's> {
         avail: usize,
     ) -> bool {
         let mut next = 0usize;
-        let mut face = Face::Plain;
+        let mut face = Face::PLAIN;
         for (at, ch) in text.char_indices() {
             while next < faces.len() && faces[next].0 <= at {
                 face = faces[next].1;
                 next += 1;
             }
-            let shown = if head && face == Face::Plain {
-                Face::Strong
-            } else {
-                face
-            };
+            let shown = if head { face | Face::STRONG } else { face };
             let cols = ch.width().unwrap_or(0);
             if *used + cols > avail {
                 return false;
@@ -813,7 +909,7 @@ impl<'s> Renderer<'_, 's> {
         if *used + cols > avail {
             return false;
         }
-        self.push_out(text, Face::Marker);
+        self.push_out(text, Face::MARKER);
         *used += cols;
         true
     }
@@ -832,6 +928,7 @@ mod tests {
             source,
             width,
             usize::MAX,
+            Seam::default(),
             Target {
                 text: &mut text,
                 rows: &mut starts,
@@ -849,7 +946,7 @@ mod tests {
             let mut row_faces = Vec::new();
             let first = faces.partition_point(|&(at, _)| (at as usize) <= from);
             let face = if first == 0 {
-                Face::Plain
+                Face::PLAIN
             } else {
                 faces[first - 1].1
             };
@@ -873,6 +970,33 @@ mod tests {
             .collect()
     }
 
+    /// The row texts of `source` rendered with `seam`.
+    fn rows_with(source: &str, width: u16, seam: Seam) -> Vec<String> {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        let mut faces = Vec::new();
+        assert!(render(
+            source,
+            width,
+            usize::MAX,
+            seam,
+            Target {
+                text: &mut text,
+                rows: &mut starts,
+                faces: &mut faces,
+            },
+        ));
+        (0..starts.len())
+            .map(|index| {
+                let from = starts[index] as usize;
+                let to = starts
+                    .get(index + 1)
+                    .map_or(text.len(), |&next| next as usize);
+                text[from..to].to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn a_paragraph_wraps_and_a_newline_inside_it_ends_the_row() {
         assert_eq!(texts("one two three", 8), vec!["one two ", "three"]);
@@ -892,9 +1016,9 @@ mod tests {
     fn headings_keep_their_level_marks() {
         let rows = rows("# Title\n\n### Sub *em*", 80);
         assert_eq!(rows[0].0, "# Title");
-        assert_eq!(rows[0].1, vec![(0, Face::Marker), (2, Face::Heading)]);
+        assert_eq!(rows[0].1, vec![(0, Face::MARKER), (2, Face::HEADING)]);
         assert_eq!(rows[2].0, "### Sub em");
-        assert_eq!(rows[2].1[2], (8, Face::Emphasis));
+        assert_eq!(rows[2].1[2], (8, Face::HEADING | Face::EMPHASIS));
     }
 
     #[test]
@@ -904,16 +1028,40 @@ mod tests {
         assert_eq!(
             rows[0].1,
             vec![
-                (0, Face::Plain),
-                (2, Face::Strong),
-                (3, Face::Plain),
-                (4, Face::Code),
-                (5, Face::Plain),
-                (6, Face::Strike),
-                (7, Face::Plain),
-                (8, Face::Emphasis),
+                (0, Face::PLAIN),
+                (2, Face::STRONG),
+                (3, Face::PLAIN),
+                (4, Face::CODE),
+                (5, Face::PLAIN),
+                (6, Face::STRIKE),
+                (7, Face::PLAIN),
+                (8, Face::EMPHASIS),
             ]
         );
+    }
+
+    #[test]
+    fn nested_inline_classes_compose() {
+        let rows = rows(
+            "***both*** and [**bold link**](https://x) and *a `c` b*",
+            80,
+        );
+        assert_eq!(rows[0].0, "both and bold link (https://x) and a c b");
+        assert_eq!(
+            rows[0].1,
+            vec![
+                (0, Face::STRONG | Face::EMPHASIS),
+                (4, Face::PLAIN),
+                (9, Face::LINK | Face::STRONG),
+                (18, Face::URL),
+                (30, Face::PLAIN),
+                (35, Face::EMPHASIS),
+                (37, Face::EMPHASIS | Face::CODE),
+                (38, Face::EMPHASIS),
+            ]
+        );
+        assert!((Face::STRONG | Face::LINK).has(Face::LINK));
+        assert!(!Face::STRONG.has(Face::LINK));
     }
 
     #[test]
@@ -921,7 +1069,7 @@ mod tests {
         let rows = rows("aa **bb cc** dd", 6);
         assert_eq!(rows[0].0, "aa bb ");
         assert_eq!(rows[1].0, "cc dd");
-        assert_eq!(rows[1].1, vec![(0, Face::Strong), (2, Face::Plain)]);
+        assert_eq!(rows[1].1, vec![(0, Face::STRONG), (2, Face::PLAIN)]);
     }
 
     #[test]
@@ -973,7 +1121,7 @@ mod tests {
                 "╰─"
             ]
         );
-        assert_eq!(rows[1].1, vec![(0, Face::Marker), ("│ ".len(), Face::Code)]);
+        assert_eq!(rows[1].1, vec![(0, Face::MARKER), ("│ ".len(), Face::CODE)]);
         // No language: the frame alone. An indented block is one too.
         assert_eq!(texts("```\nx\n```", 80), vec!["╭─", "│ x", "╰─"]);
         assert_eq!(texts("    x\n", 80), vec!["╭─", "│ x", "╰─"]);
@@ -1003,11 +1151,11 @@ mod tests {
         assert_eq!(
             rows[0].1,
             vec![
-                (0, Face::Plain),
-                (4, Face::Link),
-                (8, Face::Url),
-                (24, Face::Plain),
-                (29, Face::Link),
+                (0, Face::PLAIN),
+                (4, Face::LINK),
+                (8, Face::URL),
+                (24, Face::PLAIN),
+                (29, Face::LINK),
             ]
         );
         // An image with no alt text shows the source alone.
@@ -1022,7 +1170,7 @@ mod tests {
             vec!["name │  n", "─────┼───", "ab   │  1", "c    │ 22"]
         );
         let rows = rows(source, 80);
-        assert_eq!(rows[0].1[0], (0, Face::Strong));
+        assert_eq!(rows[0].1[0], (0, Face::STRONG));
         // A separator that would cross the width stays out whole; a
         // cell cuts.
         assert_eq!(texts(source, 6), vec!["name", "────", "ab  ", "c   "]);
@@ -1116,6 +1264,54 @@ mod tests {
             texts("- > q\n- a\n  - b", 80),
             vec!["• │ q", "• a", "  • b"]
         );
+        // A list found loose at its second item still parts the
+        // first two.
+        assert_eq!(
+            texts("- > q\n\n- next\n\n- third", 80),
+            vec!["• │ q", "", "• next", "", "• third"]
+        );
+    }
+
+    #[test]
+    fn a_fence_cut_at_the_cap_carries_into_the_next_block() {
+        assert_eq!(
+            open_fence(None, "text\n```rust\nfn a() {}\n"),
+            Some("```rust\n".into())
+        );
+        assert_eq!(open_fence(None, "```\nx\n```\nafter"), None);
+        // A closer must match the opener's character and length.
+        assert_eq!(open_fence(None, "````\n```\nx"), Some("````\n".into()));
+        assert_eq!(open_fence(None, "~~~\n```\nx"), Some("~~~\n".into()));
+        // The carry seeds the scan; a closer in the text ends it.
+        assert_eq!(open_fence(Some("```rust\n"), "x\n```\n"), None);
+        assert_eq!(
+            open_fence(Some("```rust\n"), "x\n"),
+            Some("```rust\n".into())
+        );
+        // Backticks in the info string open nothing.
+        assert_eq!(open_fence(None, "``` a`b\nx"), None);
+
+        // The head of a cut fence keeps its frame open; the
+        // continuation renders as code with no second frame.
+        let head = rows_with(
+            "```rust\nfn a() {}\n",
+            80,
+            Seam {
+                carried: 0,
+                cut: true,
+            },
+        );
+        assert_eq!(head, vec!["╭─ rust", "│ fn a() {}"]);
+        let carry = "```rust\n";
+        let tail = rows_with(
+            &format!("{carry}fn b() {{}}\n```\nafter"),
+            80,
+            Seam {
+                carried: carry.len(),
+                cut: false,
+            },
+        );
+        assert_eq!(tail, vec!["│ fn b() {}", "╰─", "", "after"]);
     }
 
     #[test]
@@ -1127,6 +1323,7 @@ mod tests {
             "plain prose\n\nand a second paragraph that wraps",
             12,
             usize::MAX,
+            Seam::default(),
             Target {
                 text: &mut text,
                 rows: &mut starts,
@@ -1151,6 +1348,7 @@ mod tests {
             &source,
             120,
             4096,
+            Seam::default(),
             Target {
                 text: &mut text,
                 rows: &mut starts,
@@ -1171,6 +1369,7 @@ mod tests {
             &source,
             120,
             1024,
+            Seam::default(),
             Target {
                 text: &mut text,
                 rows: &mut starts,

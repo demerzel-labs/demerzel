@@ -12,7 +12,10 @@
 //! up from its last row, not from its start: a wrap break depends
 //! only on the text before it, so the rows already laid out stay
 //! valid. A markdown block renders again whole: a delta can close a
-//! fence or an emphasis that opened rows earlier.
+//! fence or an emphasis that opened rows earlier. A block cut at the
+//! byte cap inside a fence hands the fence opener to the block that
+//! continues it, so the code stays code and the frame does not
+//! repeat at the seam.
 //!
 //! Two caps bound memory and per-frame work. The block count cap
 //! drops the oldest blocks. The per-block byte cap closes a block that
@@ -31,7 +34,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-use crate::markdown::{self, Face, Target};
+use crate::markdown::{self, Face, Seam, Target};
 use crate::wrap::row_starts;
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
@@ -104,17 +107,37 @@ pub struct Block {
     /// renders. Fixed at birth, so a block is always laid out one
     /// way and its rows always index one buffer.
     markdown: bool,
+    /// The fence opener the block before was cut inside, rendered in
+    /// front of this block's text. Not part of the text: the plain
+    /// view shows the source as it came.
+    carry: Option<String>,
+    /// The block was cut at the byte cap inside a fence that the next
+    /// block continues.
+    cut: bool,
     layout: Layout,
 }
 
 impl Block {
-    fn new(kind: Kind, text: String, markdown: bool) -> Self {
+    fn new(kind: Kind, text: String, markdown: bool, carry: Option<String>) -> Self {
         Self {
             kind,
             text,
             markdown,
+            carry,
+            cut: false,
             layout: Layout::default(),
         }
+    }
+
+    /// Close a block the byte cap cut: when the cut landed inside a
+    /// fence, mark it and return the opener for the next block.
+    fn cut_at_cap(&mut self) -> Option<String> {
+        if !self.markdown {
+            return None;
+        }
+        let carry = markdown::open_fence(self.carry.as_deref(), &self.text);
+        self.cut = carry.is_some();
+        carry
     }
 
     #[cfg(test)]
@@ -175,7 +198,20 @@ impl Block {
                 rows: &mut layout.rows,
                 faces: &mut layout.faces,
             };
-            if markdown::render(&self.text, layout.width, MAX_RENDER_BYTES, target) {
+            let seam = Seam {
+                carried: self.carry.as_ref().map_or(0, String::len),
+                cut: self.cut,
+            };
+            // A carried opener joins the source for the parse only.
+            let joined;
+            let source = match &self.carry {
+                Some(carry) => {
+                    joined = format!("{carry}{}", self.text);
+                    joined.as_str()
+                }
+                None => self.text.as_str(),
+            };
+            if markdown::render(source, layout.width, MAX_RENDER_BYTES, seam, target) {
                 layout.dirty = false;
                 return;
             }
@@ -262,7 +298,7 @@ impl Block {
         let faces = &self.layout.faces;
         let mut next = faces.partition_point(|&(at, _)| at as usize <= from);
         let mut face = if next == 0 {
-            Face::Plain
+            Face::PLAIN
         } else {
             faces[next - 1].1
         };
@@ -377,12 +413,13 @@ impl Transcript {
             && let Some(last) = self.blocks.back_mut()
         {
             if let Some(overflow) = last.append(delta) {
-                self.push_blocks(kind, &overflow);
+                let carry = last.cut_at_cap();
+                self.push_blocks(kind, &overflow, carry);
             }
         } else {
             let mut text = String::with_capacity(delta.len());
             push_sanitized(&mut text, delta);
-            self.push_blocks(kind, &text);
+            self.push_blocks(kind, &text, None);
         }
         self.open = Some(kind);
     }
@@ -393,7 +430,7 @@ impl Transcript {
         self.open = None;
         let mut clean = String::with_capacity(text.len());
         push_sanitized(&mut clean, text);
-        self.push_blocks(kind, &clean);
+        self.push_blocks(kind, &clean, None);
     }
 
     /// One status block for a started tool call, updatable by id.
@@ -509,16 +546,22 @@ impl Transcript {
         self.frame_end = end;
     }
 
-    /// Append sanitized `text` as blocks of at most the byte cap. Each
-    /// block gets an allocation of its own size, so a large paste
-    /// costs its length once.
-    fn push_blocks(&mut self, kind: Kind, text: &str) {
+    /// Append sanitized `text` as blocks of at most the byte cap, the
+    /// first with `carry` in front of it. Each block gets an
+    /// allocation of its own size, so a large paste costs its length
+    /// once.
+    fn push_blocks(&mut self, kind: Kind, text: &str, mut carry: Option<String>) {
         let mut rest = text;
         loop {
             let (head, tail) = rest.split_at(cap_boundary(rest));
             let markdown = self.markdown && kind == Kind::Text;
-            self.blocks
-                .push_back(Block::new(kind, head.to_string(), markdown));
+            let mut block = Block::new(kind, head.to_string(), markdown, carry);
+            carry = if tail.is_empty() {
+                None
+            } else {
+                block.cut_at_cap()
+            };
+            self.blocks.push_back(block);
             while self.blocks.len() > MAX_BLOCKS {
                 self.blocks.pop_front();
                 self.dropped += 1;
@@ -1034,12 +1077,12 @@ mod tests {
         assert_eq!(
             spans[0],
             vec![
-                (Face::Marker, "# ".to_string()),
-                (Face::Heading, "Title".to_string())
+                (Face::MARKER, "# ".to_string()),
+                (Face::HEADING, "Title".to_string())
             ]
         );
-        assert_eq!(spans[4], vec![(Face::Plain, "# not a heading".to_string())]);
-        assert_eq!(spans[5], vec![(Face::Plain, "- not a list".to_string())]);
+        assert_eq!(spans[4], vec![(Face::PLAIN, "# not a heading".to_string())]);
+        assert_eq!(spans[5], vec![(Face::PLAIN, "- not a list".to_string())]);
         let blocks: Vec<_> = t.blocks().collect();
         assert!(!blocks[0].plain());
         assert!(blocks[1].plain());
@@ -1105,6 +1148,42 @@ mod tests {
         assert!(!block.layout.fallback);
         assert!(block.rendered());
         assert_eq!(block.row(0), "──────────");
+    }
+
+    #[test]
+    fn a_fence_cut_at_the_byte_cap_stays_code_across_the_split() {
+        // One fence longer than a block: the code stays code in every
+        // block, one frame opens it and one closes it, and the prose
+        // after the closer is prose.
+        let mut source = String::from("```rust\n");
+        while source.len() < MAX_BLOCK_BYTES + 1024 {
+            source.push_str("let value = 1;\n");
+        }
+        source.push_str("```\n\nafter");
+        for step in [source.len(), 7] {
+            let mut t = Transcript::new(true);
+            let mut cut = 0;
+            while cut < source.len() {
+                let end = (cut + step).min(source.len());
+                t.push_delta(Kind::Text, &source[cut..end]);
+                cut = end;
+            }
+            assert_eq!(t.blocks().len(), 2, "step {step}");
+            let rows = rows(&mut t, 80);
+            let opens = rows.iter().filter(|row| row.starts_with("╭─")).count();
+            let closes = rows.iter().filter(|row| row.starts_with("╰─")).count();
+            assert_eq!((opens, closes), (1, 1), "step {step}");
+            assert_eq!(rows[0], "╭─ rust");
+            assert_eq!(rows[rows.len() - 1], "after");
+            let code = &rows[1..rows.len() - 3];
+            assert!(code.iter().all(|row| row.starts_with("│ ")), "step {step}");
+            // The plain view shows the source as it came: no opener
+            // twice.
+            let mut plain = Transcript::new(false);
+            plain.push_delta(Kind::Text, &source);
+            let joined: String = plain.blocks().map(|b| b.text()).collect();
+            assert_eq!(joined, source);
+        }
     }
 
     #[test]
