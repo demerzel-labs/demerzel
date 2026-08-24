@@ -141,15 +141,16 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, seam: Seam, target: T
 /// A block cut at the byte cap inside a fence hands this to the block
 /// that continues it. The scan follows the fence rules: three or more
 /// backticks or tildes after at most three spaces open one; a closer
-/// is the same character, at least as long, alone on its line.
+/// is the same character, at least as long, alone on its line. It
+/// looks past list markers and quote bars, so a fence inside an item
+/// or a quote counts; a fence indented deeper than that does not, and
+/// its cut hands over nothing. The parser then closes the head's
+/// fence and reads the tail as prose, which is the fail-safe side.
 pub(crate) fn open_fence(carry: Option<&str>, text: &str) -> Option<String> {
     let mut open: Option<(char, usize, &str)> = None;
     let carry = carry.map(|line| line.trim_end_matches('\n'));
     for line in carry.into_iter().chain(text.split('\n')) {
-        let fence = line.trim_start_matches(' ');
-        if line.len() - fence.len() > 3 {
-            continue;
-        }
+        let fence = strip_containers(line);
         let Some(ch) = fence.chars().next() else {
             continue;
         };
@@ -172,6 +173,36 @@ pub(crate) fn open_fence(carry: Option<&str>, text: &str) -> Option<String> {
         }
     }
     open.map(|(_, _, line)| format!("{line}\n"))
+}
+
+/// `line` past its container marks: up to three spaces, then any
+/// number of quote bars and list markers, each with its spaces.
+fn strip_containers(line: &str) -> &str {
+    let mut rest = line;
+    loop {
+        let trimmed = rest.trim_start_matches(' ');
+        if rest.len() - trimmed.len() > 3 {
+            return "";
+        }
+        let after = if let Some(after) = trimmed.strip_prefix('>') {
+            after
+        } else if let Some(after) = trimmed
+            .strip_prefix(['-', '*', '+'])
+            .and_then(|after| after.strip_prefix(' '))
+        {
+            after
+        } else {
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            match (digits, trimmed[digits..].chars().next()) {
+                (1..=9, Some('.' | ')')) => match trimmed[digits + 1..].strip_prefix(' ') {
+                    Some(after) => after,
+                    None => return trimmed,
+                },
+                _ => return trimmed,
+            }
+        };
+        rest = after;
+    }
 }
 
 /// One list container: its next ordinal when ordered, the indent its
@@ -1290,6 +1321,17 @@ mod tests {
         );
         // Backticks in the info string open nothing.
         assert_eq!(open_fence(None, "``` a`b\nx"), None);
+        // A fence on an item's marker line or behind a quote bar
+        // counts, and its closer under the marker closes it.
+        assert_eq!(open_fence(None, "- ```\n  code\n  ```\nprose"), None);
+        assert_eq!(
+            open_fence(None, "1. ```rust\n   code"),
+            Some("1. ```rust\n".into())
+        );
+        assert_eq!(open_fence(None, "> ```\n> x\n> ```"), None);
+        assert_eq!(open_fence(None, "> - ```\n>   x"), Some("> - ```\n".into()));
+        // Four spaces is indented code, not a fence.
+        assert_eq!(open_fence(None, "    ```\nx"), None);
 
         // The head of a cut fence keeps its frame open; the
         // continuation renders as code with no second frame.

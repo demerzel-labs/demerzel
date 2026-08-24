@@ -247,6 +247,8 @@ struct StreamState {
     terminal: bool,
     /// Maps wire item ids to call ids for argument-delta events.
     call_ids: HashMap<String, String>,
+    /// A reasoning item opened; the next one starts a paragraph.
+    saw_reasoning: bool,
 }
 
 impl PayloadMapper for StreamState {
@@ -282,7 +284,8 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             .map(|e| vec![Ok(e)])
             .unwrap_or_default(),
         // The summary arrives in parts; each part after the first is
-        // a paragraph of its own.
+        // a paragraph of its own. The part index restarts with each
+        // reasoning item, so a second item opens a paragraph too.
         "response.reasoning_summary_part.added" => {
             if value["summary_index"].as_u64().unwrap_or(0) > 0 {
                 vec![Ok(StreamEvent::ReasoningDelta("\n\n".to_string()))]
@@ -292,6 +295,14 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.output_item.added" => {
             let item = &value["item"];
+            if item["type"] == "reasoning" {
+                let part = std::mem::replace(&mut state.saw_reasoning, true);
+                return if part {
+                    vec![Ok(StreamEvent::ReasoningDelta("\n\n".to_string()))]
+                } else {
+                    Vec::new()
+                };
+            }
             if item["type"] == "function_call" {
                 state.saw_tool_call = true;
                 let call_id = item["call_id"].as_str().unwrap_or_default().to_string();

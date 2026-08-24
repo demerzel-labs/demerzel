@@ -176,11 +176,17 @@ async fn reasoning_summary_parts_arrive_as_paragraphs() {
             "part": {"type": "summary_text", "text": ""}
         })
     };
+    let item = |id: &str| json!({"type": "response.output_item.added", "item": {"type": "reasoning", "id": id}});
     let events = vec![
+        item("rs_1"),
         part(0),
         json!({"type": "response.reasoning_summary_text.delta", "delta": "**First**"}),
         part(1),
         json!({"type": "response.reasoning_summary_text.delta", "delta": "**Second**"}),
+        // A second reasoning item restarts the part index.
+        item("rs_2"),
+        part(0),
+        json!({"type": "response.reasoning_summary_text.delta", "delta": "**Third**"}),
         completed(json!({"input_tokens": 1, "output_tokens": 1})),
     ];
     let mock = MockServer::start(vec![MockResponse::stream(events)], vec![]).await;
@@ -199,7 +205,7 @@ async fn reasoning_summary_parts_arrive_as_paragraphs() {
             _ => None,
         })
         .collect();
-    assert_eq!(reasoning, "**First**\n\n**Second**");
+    assert_eq!(reasoning, "**First**\n\n**Second**\n\n**Third**");
 }
 
 #[tokio::test]
