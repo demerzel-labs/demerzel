@@ -734,7 +734,13 @@ async fn a_reply_renders_as_markdown() {
     pty.wait_for("╰─");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
-    pty.wait_exit();
+    let raw = pty.wait_exit();
+    // The fence is highlighted: the keyword `fn` ends where a style
+    // change starts. Which style is the theme's business.
+    assert!(
+        raw.windows(3).any(|bytes| bytes == b"fn\x1b"),
+        "no style change after the keyword"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

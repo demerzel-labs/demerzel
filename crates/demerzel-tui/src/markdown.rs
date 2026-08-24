@@ -35,13 +35,14 @@ use pulldown_cmark::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
+use crate::highlight::{Class, Highlighter};
 use crate::wrap::{display_width, row_starts};
 
 /// The style classes of one span, as a set: strong text inside a
 /// link carries both. The frame maps a set to one style; the theme
 /// owns that map once it lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Face(u8);
+pub(crate) struct Face(u16);
 
 impl Face {
     /// Body text in the block's own style.
@@ -59,6 +60,22 @@ impl Face {
     /// Structure the renderer adds: heading marks, list markers,
     /// quote bars, code frames, rules, table lines.
     pub const MARKER: Face = Face(1 << 7);
+    /// The highlight classes of a code fence, over `CODE`.
+    pub const KEYWORD: Face = Face(1 << 8);
+    pub const STRING: Face = Face(1 << 9);
+    pub const COMMENT: Face = Face(1 << 10);
+    pub const NUMBER: Face = Face(1 << 11);
+
+    /// The face of one highlight class.
+    fn class(class: Class) -> Face {
+        match class {
+            Class::Plain => Face::PLAIN,
+            Class::Keyword => Face::KEYWORD,
+            Class::String => Face::STRING,
+            Class::Comment => Face::COMMENT,
+            Class::Number => Face::NUMBER,
+        }
+    }
 
     /// Whether every class in `other` is in this set.
     pub fn has(self, other: Face) -> bool {
@@ -119,6 +136,7 @@ pub(crate) fn render(source: &str, width: u16, cap: usize, seam: Seam, target: T
         line: String::new(),
         line_faces: Vec::new(),
         line_face: Face::PLAIN,
+        highlighter: None,
         starts: Vec::new(),
         need_gap: false,
         links: Vec::new(),
@@ -278,6 +296,10 @@ struct Renderer<'t, 's> {
     line: String,
     line_faces: Vec<(usize, Face)>,
     line_face: Face,
+    /// The scanner of the open fence, when its label names a language
+    /// the highlighter knows. Each code line goes through it when it
+    /// flushes, whole, whatever events it arrived in.
+    highlighter: Option<Highlighter>,
     /// Scratch for the row starts of one line.
     starts: Vec<usize>,
     /// A block ended; the next block opens with a blank row.
@@ -378,12 +400,15 @@ impl<'s> Renderer<'_, 's> {
                 // A fence carried over from the block before is
                 // already framed there.
                 let carried = range.start < self.seam.carried;
+                let language = match &kind {
+                    CodeBlockKind::Fenced(info) => info.split_whitespace().next(),
+                    CodeBlockKind::Indented => None,
+                };
+                self.highlighter = language.and_then(Highlighter::for_label);
                 if !carried && self.begin_row() {
                     self.push_prefix();
                     self.push_out("╭─", Face::MARKER);
-                    if let CodeBlockKind::Fenced(info) = kind
-                        && let Some(language) = info.split_whitespace().next()
-                    {
+                    if let Some(language) = language {
                         // The label cuts at the width, like a table row.
                         let avail = self.avail();
                         let mut used = 2usize;
@@ -504,6 +529,7 @@ impl<'s> Renderer<'_, 's> {
                 // mid-line; a mid-line tail shows.
                 self.flush_pending();
                 self.inline.pop();
+                self.highlighter = None;
                 self.pop_prefix("│ ".len());
                 // A fence cut at the byte cap closes in the block that
                 // continues it.
@@ -767,7 +793,17 @@ impl<'s> Renderer<'_, 's> {
             return;
         }
         let line = std::mem::take(&mut self.line);
-        let faces = std::mem::take(&mut self.line_faces);
+        let mut faces = std::mem::take(&mut self.line_faces);
+        let fence_face = self.inline_face();
+        if let Some(highlighter) = &mut self.highlighter {
+            // A code line: its classes replace the one face the text
+            // arrived with, each over that face.
+            let base = faces.first().map_or(fence_face, |&(_, face)| face);
+            faces.clear();
+            highlighter.line(&line, |at, class| {
+                faces.push((at, base | Face::class(class)))
+            });
+        }
         let avail = u16::try_from(self.avail()).unwrap_or(u16::MAX);
         let mut starts = std::mem::take(&mut self.starts);
         starts.clear();
@@ -1152,7 +1188,14 @@ mod tests {
                 "╰─"
             ]
         );
-        assert_eq!(rows[1].1, vec![(0, Face::MARKER), ("│ ".len(), Face::CODE)]);
+        assert_eq!(
+            rows[1].1,
+            vec![
+                (0, Face::MARKER),
+                ("│ ".len(), Face::CODE | Face::KEYWORD),
+                ("│ fn".len(), Face::CODE)
+            ]
+        );
         // No language: the frame alone. An indented block is one too.
         assert_eq!(texts("```\nx\n```", 80), vec!["╭─", "│ x", "╰─"]);
         assert_eq!(texts("    x\n", 80), vec!["╭─", "│ x", "╰─"]);
@@ -1165,6 +1208,67 @@ mod tests {
             texts("text\n\n```py\nprint(1)\nprint(", 80),
             vec!["text", "", "╭─ py", "│ print(1)", "│ print(", "╰─"]
         );
+    }
+
+    #[test]
+    fn a_fence_with_a_known_label_gets_highlight_classes() {
+        let code = Face::CODE;
+        let bar = "│ ".len();
+        let shown = rows("```rust\nlet x = \"s\"; // c\n```", 80);
+        assert_eq!(shown[1].0, "│ let x = \"s\"; // c");
+        assert_eq!(
+            shown[1].1,
+            vec![
+                (0, Face::MARKER),
+                (bar, code | Face::KEYWORD),
+                (bar + 3, code),
+                (bar + 8, code | Face::STRING),
+                (bar + 11, code),
+                (bar + 13, code | Face::COMMENT),
+            ]
+        );
+        // A comment open on one line carries to the next.
+        let shown = rows("```rust\n/* one\ntwo */ x\n```", 80);
+        assert_eq!(
+            shown[1].1,
+            vec![(0, Face::MARKER), (bar, code | Face::COMMENT)]
+        );
+        assert_eq!(shown[2].0, "│ two */ x");
+        assert_eq!(
+            shown[2].1,
+            vec![
+                (0, Face::MARKER),
+                (bar, code | Face::COMMENT),
+                (bar + 6, code)
+            ]
+        );
+        // A class survives a wrap.
+        let shown = rows("```rust\n/*aaaa*/x\n```", 8);
+        assert_eq!(shown[1].0, "│ /*aaaa");
+        assert_eq!(
+            shown[1].1,
+            vec![(0, Face::MARKER), (bar, code | Face::COMMENT)]
+        );
+        assert_eq!(shown[2].0, "│ */x");
+        assert_eq!(
+            shown[2].1,
+            vec![
+                (0, Face::MARKER),
+                (bar, code | Face::COMMENT),
+                (bar + 2, code)
+            ]
+        );
+        // A label outside the set, and an indented block, get the
+        // code face alone. The label matches without case.
+        let shown = rows(
+            "```cobol\nlet x\n```\n\n    let y\n\n```Rust\nlet z\n```",
+            80,
+        );
+        assert_eq!(shown[1].1, vec![(0, Face::MARKER), (bar, code)]);
+        assert_eq!(shown[5].1, vec![(0, Face::MARKER), (bar, code)]);
+        assert_eq!(shown[9].1[1], (bar, code | Face::KEYWORD));
+        // An inline code span is not a fence.
+        assert_eq!(rows("`let`", 80)[0].1, vec![(0, code)]);
     }
 
     #[test]
