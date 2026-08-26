@@ -34,6 +34,16 @@ data for each number goes into `results/`. The "Benchmark program" section of
 | 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
 | 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | The cache-hit measurement is here. The rest comes with M4. |
 
+## The dogfood driver
+
+`bench/dogfood/run.sh` is not a benchmark. It drives the release binary
+under tmux against the configured provider and writes the 120x40 screen
+as text after each step: a bash call with its question, the tail and
+the expand key on a tall output, a declined call. Read the captures in
+`target/dogfood/` to check the screen without a terminal in front of
+you. It needs tmux and a logged-in provider, and it spends a few
+hundred tokens per prompt.
+
 ## How to run
 
 ```bash

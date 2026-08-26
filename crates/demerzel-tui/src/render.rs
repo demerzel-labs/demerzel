@@ -1,4 +1,6 @@
-//! Frame rendering: the transcript pane above, the input line below.
+//! Frame rendering: the transcript pane above, the progress line
+//! while a turn runs, the input line, and the status bar at the
+//! bottom.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
@@ -37,6 +39,9 @@ pub(crate) struct View<'a> {
     pub status: &'a Status,
     /// An approval question replaces the input prompt.
     pub approval: Option<&'a str>,
+    /// The progress line, shown under the transcript while a turn
+    /// runs.
+    pub progress: Option<&'a str>,
 }
 
 /// Draw one frame. Returns the transcript viewport height, the page
@@ -46,33 +51,49 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     if area.height == 0 || area.width == 0 {
         return 0;
     }
-    // The status bar takes one row when the screen has room for all
-    // three panes; a two-row screen keeps transcript and input.
+    // The status bar takes the bottom row when the screen has room
+    // for all three panes; a two-row screen keeps transcript and
+    // input. The input sits above the bar, and the progress line
+    // takes one more row above the input when it shows and the
+    // screen has a fourth row.
     let bar_rows = u16::from(area.height >= 3);
+    let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
     let input_row = Rect {
-        y: area.y + area.height - 1,
+        y: area.y + area.height - 1 - bar_rows,
         height: 1,
         ..area
     };
     let transcript_area = Rect {
-        height: area.height - 1 - bar_rows,
+        height: area.height - 1 - bar_rows - progress_rows,
         ..area
     };
 
     draw_transcript(frame, transcript_area, view.transcript);
+    if let Some(progress) = view.progress
+        && progress_rows > 0
+    {
+        let progress_row = Rect {
+            y: area.y + area.height - 2 - bar_rows,
+            height: 1,
+            ..area
+        };
+        draw_line(frame, progress_row, progress, Style::default());
+    }
     if bar_rows > 0 {
         let bar_row = Rect {
-            y: area.y + area.height - 2,
+            y: area.y + area.height - 1,
             height: 1,
             ..area
         };
         draw_status(frame, bar_row, view.status);
     }
     match view.approval {
-        Some(question) => {
-            let line = Line::styled(question, Style::default().add_modifier(Modifier::BOLD));
-            frame.render_widget(Paragraph::new(line), input_row);
-        }
+        Some(question) => draw_line(
+            frame,
+            input_row,
+            question,
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         None => draw_input(frame, input_row, view.input),
     }
     transcript_area.height
@@ -97,32 +118,44 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
         totals.as_str(),
     ];
 
-    // The walk stops at the width, so this frame-rate path never
-    // copies a segment whole — an oversized model name costs its
-    // visible columns, nothing more.
     let width = usize::from(area.width);
-    let mut shown = String::with_capacity(width * 4);
+    let (mut shown, used) = fit_row(segments, width);
+    // Pad to the full width so the whole row reads as one bar.
+    shown.extend(std::iter::repeat_n(' ', width - used));
+    let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// One row of text cut to the width: the progress line, the
+/// approval question.
+fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
+    let (shown, _) = fit_row([text], usize::from(area.width));
+    frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
+}
+
+/// The columns of `parts` that fit in `width`, joined, and the
+/// columns used. The walk stops at the width, so this frame-rate
+/// path never copies a part whole — an oversized model name or tool
+/// name costs its visible columns, nothing more. Control characters
+/// drop: a name from config, from `/model`, or from the model must
+/// never put an escape byte in the frame, the transcript's rule.
+fn fit_row<'a>(parts: impl IntoIterator<Item = &'a str>, width: usize) -> (String, usize) {
+    let mut shown = String::with_capacity(width.min(512) * 2);
     let mut used = 0usize;
-    'segments: for segment in segments {
-        for ch in segment.chars() {
-            // The model name comes from config and `/model`; an
-            // escape byte must never reach the frame, the
-            // transcript's rule.
+    'parts: for part in parts {
+        for ch in part.chars() {
             if ch.is_control() {
                 continue;
             }
             let cols = ch.width().unwrap_or(0);
             if used + cols > width {
-                break 'segments;
+                break 'parts;
             }
             shown.push(ch);
             used += cols;
         }
     }
-    // Pad to the full width so the whole row reads as one bar.
-    shown.extend(std::iter::repeat_n(' ', width - used));
-    let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_widget(Paragraph::new(line), area);
+    (shown, used)
 }
 
 fn style(kind: Kind) -> Style {
@@ -165,7 +198,7 @@ fn face_style(kind: Kind, face: Face) -> Style {
     if face.has(Face::LINK) {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
-    if face.has(Face::URL) || face.has(Face::MARKER) {
+    if face.has(Face::URL) || face.has(Face::MARKER) || face.has(Face::MUTED) {
         style = style.add_modifier(Modifier::DIM);
     }
     style
@@ -361,11 +394,12 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(rows, 2);
-        assert!(lines[2].contains("test-model · ask"), "{:?}", lines[2]);
-        assert_eq!(lines[3].trim_end(), "dmz> ".trim_end());
+        assert_eq!(lines[2].trim_end(), "dmz> ".trim_end());
+        assert!(lines[3].contains("test-model · ask"), "{:?}", lines[3]);
     }
 
     #[test]
@@ -387,12 +421,13 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert!(
-            lines[1].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
+            lines[2].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
             "{:?}",
-            lines[1]
+            lines[2]
         );
     }
 
@@ -409,9 +444,10 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
-        assert_eq!(lines[1], " test-model ");
+        assert_eq!(lines[2], " test-model ");
     }
 
     #[test]
@@ -428,6 +464,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(rows, 1);
@@ -451,6 +488,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "line 8");
@@ -475,6 +513,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         transcript.scroll_up(3);
@@ -486,6 +525,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         // The indicator sits at the right of the bottom row.
@@ -500,6 +540,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "line 0");
@@ -523,6 +564,7 @@ mod tests {
                     input: &input,
                     status: &status,
                     approval: None,
+                    progress: None,
                 },
             )
             .0
@@ -571,6 +613,7 @@ line 12",
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "alpha");
@@ -592,6 +635,7 @@ line 12",
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         // The tail is visible; the head scrolled off with the prompt.
@@ -615,6 +659,7 @@ line 12",
                         input: &input,
                         status: &status,
                         approval: None,
+                        progress: None,
                     },
                 );
             })
@@ -643,6 +688,7 @@ line 12",
                         input: &input,
                         status: &status,
                         approval: None,
+                        progress: None,
                     },
                 );
             })
@@ -661,6 +707,47 @@ line 12",
     }
 
     #[test]
+    fn the_progress_line_sits_above_the_input_and_takes_a_transcript_row() {
+        let mut transcript = Transcript::new(false);
+        for i in 0..5 {
+            transcript.push_line(Kind::Text, &format!("line {i}"));
+        }
+        let input = Input::new();
+        let status = status();
+        let (lines, rows) = render(
+            30,
+            5,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+                progress: Some("⠋ 3s · bash\x1b[2J"),
+            },
+        );
+        assert_eq!(rows, 2);
+        assert_eq!(lines[1].trim_end(), "line 4");
+        assert_eq!(lines[2].trim_end(), "⠋ 3s · bash[2J");
+        assert_eq!(lines[3].trim_end(), "dmz>");
+        assert!(lines[4].contains("test-model · ask"), "{:?}", lines[4]);
+        // A three-row screen keeps the bar and drops the line.
+        let (lines, rows) = render(
+            30,
+            3,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+                progress: Some("⠋ 3s · bash"),
+            },
+        );
+        assert_eq!(rows, 1);
+        assert_eq!(lines[1].trim_end(), "dmz>");
+        assert!(lines[2].contains("test-model"), "{:?}", lines[2]);
+    }
+
+    #[test]
     fn an_approval_question_replaces_the_prompt() {
         let mut transcript = Transcript::new(false);
         let input = Input::new();
@@ -672,9 +759,12 @@ line 12",
                 transcript: &mut transcript,
                 input: &input,
                 status: &status,
-                approval: Some("approve bash? [y]es / [a]lways / [N]o"),
+                approval: Some("approve ba\x1bsh? [y]es / [a]lways / [N]o"),
+                progress: None,
             },
         );
+        // The tool name is model-controlled: no escape reaches the
+        // row.
         assert_eq!(lines[1].trim_end(), "approve bash? [y]es / [a]lways / [N]o");
     }
 }

@@ -70,6 +70,8 @@ impl Face {
     pub const STRING: Face = Face(1 << 9);
     pub const COMMENT: Face = Face(1 << 10);
     pub const NUMBER: Face = Face(1 << 11);
+    /// Secondary text the interface adds: a tool card's output tail.
+    pub const MUTED: Face = Face(1 << 12);
 
     /// The face of one highlight class.
     fn class(class: Class) -> Face {

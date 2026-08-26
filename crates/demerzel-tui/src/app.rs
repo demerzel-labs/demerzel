@@ -8,7 +8,13 @@
 //!
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel, PageUp, and PageDown browse; End and a submitted line return
-//! to the bottom.
+//! to the bottom. Ctrl-O expands every tool card to its kept output
+//! and collapses them again.
+//!
+//! While a turn runs, a progress line above the input shows a
+//! spinner, the elapsed time, and the stage. The status bar is the
+//! bottom row, under the input. A tick timer wakes the
+//! loop for it during the turn only; at idle nothing wakes.
 
 use std::future::poll_fn;
 use std::io;
@@ -22,6 +28,7 @@ use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
+use crate::cards::{self, Outcome};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::input::Input;
@@ -38,6 +45,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Rows one wheel notch scrolls.
 const WHEEL_ROWS: usize = 3;
 
+/// Span between two progress-line ticks during a turn: the spinner's
+/// frame rate.
+const TICK: Duration = Duration::from_millis(100);
+
 /// What a handled key asks the loop to do.
 enum Action {
     None,
@@ -53,11 +64,43 @@ enum Phase {
     Turn,
 }
 
+/// What the running turn is doing, for the progress line.
+enum Stage {
+    Thinking,
+    Writing,
+    /// A tool runs, by name.
+    Tool(String),
+}
+
+/// The progress line's state: the turn's start and its stage.
+struct Progress {
+    started: Instant,
+    stage: Stage,
+}
+
+impl Progress {
+    fn write(&self, out: &mut String) {
+        let stage = match &self.stage {
+            Stage::Thinking => "thinking",
+            Stage::Writing => "writing",
+            Stage::Tool(name) => name.as_str(),
+        };
+        cards::write_progress(out, self.started.elapsed(), stage);
+    }
+}
+
 /// The input row is either the editor or an approval question.
 enum Mode {
     Edit,
     Approval {
         tool: String,
+        /// The question row, built once: the tool name is
+        /// model-controlled and the row draws every frame.
+        question: String,
+        /// The question landed on the running call's card, so the
+        /// answer settles that card. Without one — a question asked
+        /// outside a dispatch — the answer touches no card.
+        card: bool,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
 }
@@ -100,6 +143,10 @@ struct App {
     history: History,
     status: Status,
     mode: Mode,
+    /// Set while a turn runs.
+    progress: Option<Progress>,
+    /// The progress line's text, rebuilt each frame in place.
+    progress_line: String,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
     display_tx: mpsc::UnboundedSender<DisplayEvent>,
@@ -140,6 +187,8 @@ impl App {
                 cached_tokens: 0,
             },
             mode: Mode::Edit,
+            progress: None,
+            progress_line: String::new(),
             keys,
             displays,
             display_tx,
@@ -208,6 +257,12 @@ impl App {
         // turns may still be queued; drop it instead of aborting this
         // turn with it.
         drain_signal(&mut self.sigint).await;
+        self.progress = Some(Progress {
+            started: Instant::now(),
+            stage: Stage::Thinking,
+        });
+        self.dirty = true;
+        let mut tick = Instant::now() + TICK;
         let mut aborted = false;
         loop {
             enum Wake {
@@ -217,6 +272,7 @@ impl App {
                 Display(Option<DisplayEvent>),
                 Approval(Option<ApprovalRequest>),
                 Frame,
+                Tick,
             }
             let wake = tokio::select! {
                 _ = &mut turn => Wake::Done,
@@ -225,10 +281,20 @@ impl App {
                 event = self.displays.recv() => Wake::Display(event),
                 request = self.approvals.recv() => Wake::Approval(request),
                 _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => Wake::Frame,
+                // The spinner rests while a question waits: nothing
+                // runs, and the frame would only redraw the question.
+                _ = tokio::time::sleep_until(tick), if matches!(self.mode, Mode::Edit) => Wake::Tick,
             };
             let action = match wake {
                 Wake::Done => break,
                 Wake::Frame => Action::None,
+                Wake::Tick => {
+                    // From now, not from the last tick: a loop that
+                    // fell behind must not fire a burst to catch up.
+                    tick = Instant::now() + TICK;
+                    self.dirty = true;
+                    Action::None
+                }
                 Wake::Key(Some(event)) => self.terminal_event(event, Phase::Turn),
                 Wake::Key(None) | Wake::Signal => self.ctrl_c(Phase::Turn),
                 // The loop holds senders for both channels, so `None`
@@ -259,6 +325,7 @@ impl App {
         // turn as a dead prompt.
         while self.approvals.try_recv().is_ok() {}
         self.mode = Mode::Edit;
+        self.progress = None;
         // Apply what the turn streamed before the notice, so an
         // aborted line does not split around it.
         self.drain_displays();
@@ -281,19 +348,49 @@ impl App {
 
     fn display(&mut self, event: DisplayEvent) {
         match event {
-            DisplayEvent::TextDelta(delta) => self.transcript.push_delta(Kind::Text, &delta),
-            DisplayEvent::ReasoningDelta(delta) => {
-                self.transcript.push_delta(Kind::Reasoning, &delta)
+            DisplayEvent::TextDelta(delta) => {
+                self.transcript.push_delta(Kind::Text, &delta);
+                self.stage(Stage::Writing);
             }
-            DisplayEvent::ToolStart { id, name } => self.transcript.tool_start(&id, &name),
+            DisplayEvent::ReasoningDelta(delta) => {
+                self.transcript.push_delta(Kind::Reasoning, &delta);
+                self.stage(Stage::Thinking);
+            }
+            DisplayEvent::ToolStart { id, name } => {
+                self.transcript.tool_start(&id, &name);
+                self.stage(Stage::Writing);
+            }
+            DisplayEvent::ToolRun { id, name, at } => {
+                self.transcript.tool_run(&id, at);
+                // The name is model-controlled: one clean line for
+                // the progress row.
+                self.stage(Stage::Tool(cards::one_line(
+                    &name,
+                    cards::PROGRESS_NAME_BYTES,
+                )));
+            }
+            DisplayEvent::ToolPreview { id, text } => self.transcript.tool_preview(&id, &text),
             DisplayEvent::ToolEnd {
                 id,
                 name,
                 summary,
                 is_error,
+                output,
+                output_cut,
+                at,
             } => {
-                let summary = summary.unwrap_or(name);
-                self.transcript.tool_end(&id, &summary, is_error);
+                self.transcript.tool_end(
+                    &id,
+                    &name,
+                    Outcome {
+                        summary: summary.as_deref(),
+                        is_error,
+                        output,
+                        output_cut,
+                        at,
+                    },
+                );
+                self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
                 self.status.input_tokens += usage.input_tokens;
@@ -321,10 +418,25 @@ impl App {
         }
     }
 
+    /// The progress line's stage, while a turn runs.
+    fn stage(&mut self, stage: Stage) {
+        if let Some(progress) = &mut self.progress {
+            progress.stage = stage;
+        }
+    }
+
     fn show_approval(&mut self, request: ApprovalRequest) {
-        // A call whose preview the transcript already carries — the
-        // driver passes `None` — gets only the question row.
-        if let Some(preview) = &request.preview {
+        // The question follows the call's dispatch event, which can
+        // still sit in the display queue: apply it first, so the
+        // running card is the one the question is about.
+        self.drain_displays();
+        // The running call's card shows that it waits, with the
+        // question's preview when the card has none. Without a card
+        // — a driver that asks outside a dispatch — the preview shows
+        // as a notice, so nothing is approved blind.
+        let preview = request.preview.as_deref();
+        let card = self.transcript.tool_pending(&request.tool, preview);
+        if !card && let Some(preview) = preview {
             self.transcript
                 .push_line(Kind::Notice, &format!("{} wants to run:", request.tool));
             self.transcript.push_line(Kind::Notice, preview);
@@ -332,8 +444,14 @@ impl App {
         // A question needs its call visible: jump to the bottom, where
         // the preview and the question row are.
         self.transcript.follow();
+        let question = format!(
+            "approve {}? [y]es / [a]lways / [N]o",
+            cards::one_line(&request.tool, cards::PROGRESS_NAME_BYTES)
+        );
         self.mode = Mode::Approval {
             tool: request.tool,
+            question,
+            card,
             reply: request.reply,
         };
     }
@@ -387,6 +505,11 @@ impl App {
             // bottom it is the cursor key, with Ctrl-E as the twin.
             KeyCode::End if self.transcript.browsing() => {
                 self.transcript.follow();
+                return Action::None;
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let expanded = !self.transcript.expanded();
+                self.transcript.set_expanded(expanded);
                 return Action::None;
             }
             _ => {}
@@ -457,9 +580,18 @@ impl App {
             KeyCode::Char('c' | 'd') if ctrl => ApprovalAnswer::Abort,
             _ => return Action::None,
         };
-        let Mode::Approval { tool, reply } = std::mem::replace(&mut self.mode, Mode::Edit) else {
+        let Mode::Approval {
+            tool, card, reply, ..
+        } = std::mem::replace(&mut self.mode, Mode::Edit)
+        else {
             unreachable!("approval_key runs only in approval mode");
         };
+        if card {
+            self.transcript.tool_answered(
+                matches!(answer, ApprovalAnswer::Deny | ApprovalAnswer::Abort),
+                std::time::Instant::now(),
+            );
+        }
         let word = match answer {
             ApprovalAnswer::Allow => "yes",
             ApprovalAnswer::AllowForSession => "always",
@@ -491,18 +623,25 @@ impl App {
         if !self.dirty || Instant::now() < self.last_draw + FRAME {
             return Ok(());
         }
-        let question = match &self.mode {
-            Mode::Edit => None,
-            Mode::Approval { tool, .. } => Some(format!("approve {tool}? [y]es / [a]lways / [N]o")),
-        };
         let Self {
             guard,
             transcript,
             input,
             status,
             page,
+            progress,
+            progress_line,
+            mode,
             ..
         } = self;
+        let question = match mode {
+            Mode::Edit => None,
+            Mode::Approval { question, .. } => Some(question.as_str()),
+        };
+        let progress = progress.as_ref().map(|progress| {
+            progress.write(progress_line);
+            progress_line.as_str()
+        });
         guard.terminal.draw(|frame| {
             *page = render::draw(
                 frame,
@@ -510,7 +649,8 @@ impl App {
                     transcript,
                     input,
                     status,
-                    approval: question.as_deref(),
+                    approval: question,
+                    progress,
                 },
             );
         })?;

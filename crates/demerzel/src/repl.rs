@@ -263,7 +263,7 @@ impl EventSink for Renderer {
                 };
                 self.line_open.store(open, Ordering::Relaxed);
             }
-            EngineEvent::ToolStart { id, name } => {
+            EngineEvent::ToolStart { id, name, .. } => {
                 self.pending_calls
                     .lock()
                     .unwrap()
@@ -286,6 +286,7 @@ impl EventSink for Renderer {
                 name,
                 summary,
                 is_error,
+                ..
             } => {
                 self.pending_calls
                     .lock()
