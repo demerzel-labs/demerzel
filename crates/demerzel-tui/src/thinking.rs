@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::cards::{one_line, write_duration};
+use crate::cards::{push_one_line, write_duration};
 
 /// Bytes of the summary's first line on a closed block.
 const LINE_BYTES: usize = 240;
@@ -14,7 +14,7 @@ const LINE_BYTES: usize = 240;
 /// the cut mark, so the render stays under the block cap.
 pub(crate) const SUMMARY_RESERVE: usize = 256;
 
-/// How a thinking block starts: the `thinking` config key.
+/// How a thinking block starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Thinking {
     /// One row: the state and the summary's first line.
@@ -29,8 +29,8 @@ pub enum Thinking {
 impl Thinking {
     const ALL: [Thinking; 3] = [Thinking::Closed, Thinking::Open, Thinking::Hidden];
 
-    /// The names the config key takes, for messages.
-    pub const NAMES: &str = "closed, open, hidden";
+    /// The names, for messages.
+    pub const NAMES: &'static str = "closed, open, hidden";
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -49,12 +49,6 @@ impl std::str::FromStr for Thinking {
             .into_iter()
             .find(|state| state.as_str() == value)
             .ok_or_else(|| format!("must be one of {}, not `{value}`", Thinking::NAMES))
-    }
-}
-
-impl std::fmt::Display for Thinking {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -123,7 +117,7 @@ impl Thought {
     pub fn end(&mut self, at: Instant) {
         if matches!(self.state, State::Live) {
             self.state = State::Done(at.saturating_duration_since(self.started));
-            self.stale = true;
+            self.settle();
         }
     }
 
@@ -131,12 +125,15 @@ impl Thought {
     pub fn interrupt(&mut self) {
         if matches!(self.state, State::Live) {
             self.state = State::Interrupted;
-            self.stale = true;
+            self.settle();
         }
     }
 
-    pub fn live(&self) -> bool {
-        matches!(self.state, State::Live)
+    /// No more text comes: the summary keeps its length, not the
+    /// doubling it grew by.
+    fn settle(&mut self) {
+        self.summary.shrink_to_fit();
+        self.stale = true;
     }
 
     pub fn open(&self) -> bool {
@@ -156,7 +153,10 @@ impl Thought {
 
     /// Render the block's text: the header row, then the summary
     /// whole when open, or its first line on the header row when
-    /// closed. Clears the stale mark.
+    /// closed. Clears the stale mark. The open form puts a blank line
+    /// under the header, so the header is a paragraph of its own
+    /// when the text renders as markdown: a summary that starts with
+    /// `---` must not turn the header into a heading.
     pub fn render(&mut self, out: &mut String) {
         self.stale = false;
         out.clear();
@@ -177,24 +177,38 @@ impl Thought {
             return;
         }
         if self.open {
-            out.push('\n');
+            out.push_str("\n\n");
             out.push_str(&self.summary);
             if self.cut {
                 out.push_str("\n…");
             }
             return;
         }
-        let (first, rest) = match self.summary.find('\n') {
-            Some(at) => (&self.summary[..at], &self.summary[at + 1..]),
-            None => (self.summary.as_str(), ""),
+        // The first line, from a bounded head of the summary: the
+        // closed render must not walk a summary that has no newline.
+        let head = &self.summary[..floor_boundary(&self.summary, LINE_BYTES + 4)];
+        let (first, more) = match head.find('\n') {
+            Some(at) => (
+                &head[..at],
+                self.cut || !self.summary[at + 1..].trim_start().is_empty(),
+            ),
+            None => (head, self.cut || head.len() < self.summary.len()),
         };
         out.push_str(" · ");
-        out.push_str(&one_line(first, LINE_BYTES));
-        let more = self.cut || !rest.trim().is_empty();
+        push_one_line(out, first, LINE_BYTES);
         if more && !out.ends_with('…') {
             out.push('…');
         }
     }
+}
+
+/// `at`, or the char boundary before it.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 #[cfg(test)]
@@ -229,9 +243,9 @@ mod tests {
     fn an_open_block_shows_the_summary_whole() {
         let mut thought = Thought::new(true, at(0));
         thought.push("one\ntwo", CAP);
-        assert_eq!(text(&mut thought), "· thinking\none\ntwo");
+        assert_eq!(text(&mut thought), "· thinking\n\none\ntwo");
         thought.end(at(1));
-        assert_eq!(text(&mut thought), "▾ thought for 1.0s\none\ntwo");
+        assert_eq!(text(&mut thought), "▾ thought for 1.0s\n\none\ntwo");
         thought.set_open(false);
         assert!(thought.stale());
         assert_eq!(text(&mut thought), "▸ thought for 1.0s · one…");
@@ -266,12 +280,12 @@ mod tests {
     fn the_summary_is_sanitized_and_cut_at_its_cap() {
         let mut thought = Thought::new(true, at(0));
         thought.push("a\x1b[31mb\tc\r\n", CAP);
-        assert_eq!(text(&mut thought), "· thinking\na[31mb    c\n");
+        assert_eq!(text(&mut thought), "· thinking\n\na[31mb    c\n");
         let mut thought = Thought::new(true, at(0));
         thought.push(&"x".repeat(2 * CAP), CAP);
         thought.push("more", CAP);
         let out = text(&mut thought);
-        assert_eq!(out.len(), "· thinking\n".len() + CAP + "\n…".len());
+        assert_eq!(out.len(), "· thinking\n\n".len() + CAP + "\n…".len());
         assert!(out.ends_with("\n…"));
         thought.set_open(false);
         assert!(
@@ -287,6 +301,15 @@ mod tests {
         let out = text(&mut thought);
         assert!(out.len() < LINE_BYTES + 32, "{}", out.len());
         assert!(out.ends_with('…'));
+        // A multi-byte char at the head's edge, and a newline past it.
+        let mut thought = Thought::new(false, at(0));
+        thought.push(&format!("{}\nnext", "é".repeat(LINE_BYTES)), 8 * LINE_BYTES);
+        let out = text(&mut thought);
+        assert!(out.ends_with("é…"), "{out}");
+        // A short first line with only whitespace after it is whole.
+        let mut thought = Thought::new(false, at(0));
+        thought.push("short\n  \n", CAP);
+        assert_eq!(text(&mut thought), "· thinking · short");
     }
 
     #[test]

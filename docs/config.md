@@ -80,9 +80,10 @@ from config, not from the file.
 ## Thinking blocks
 
 `tui.thinking` sets how a thinking block starts in the full-screen
-interface. `closed` shows one row: the state and the first line of
-the reasoning summary. `open` shows the whole summary. `hidden` shows
-no block. Ctrl-T opens the newest block and closes it again.
+interface. A thinking block shows one reasoning summary from the
+model. `closed` shows one line: the state and the first line of the
+summary. `open` shows the whole summary. `hidden` shows no block.
+Ctrl-T opens the newest block and closes it again.
 
 ## Trust rules
 

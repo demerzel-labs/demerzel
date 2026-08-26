@@ -552,7 +552,7 @@ pub fn resolve(
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
     let thinking = layer_key(project, Origin::Project, |l| l.tui.thinking)
         .or_else(|| layer_key(user, Origin::User, |l| l.tui.thinking))
-        .unwrap_or_else(|| Setting::new(Thinking::Closed, Origin::Default));
+        .unwrap_or_else(|| Setting::new(Thinking::default(), Origin::Default));
 
     (
         Settings {

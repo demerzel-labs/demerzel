@@ -110,7 +110,7 @@ impl Default for Options {
             mode: String::new(),
             mouse: true,
             markdown: true,
-            thinking: Thinking::Closed,
+            thinking: Thinking::default(),
         }
     }
 }

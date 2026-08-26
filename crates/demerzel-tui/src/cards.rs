@@ -396,18 +396,26 @@ fn line_cut(line: &str, cap: usize) -> usize {
 /// `raw` sanitized, on one line, and cut at `cap` bytes with a mark.
 pub fn one_line(raw: &str, cap: usize) -> String {
     let mut text = String::with_capacity(raw.len().min(cap));
+    push_one_line(&mut text, raw, cap);
+    text
+}
+
+/// Append `raw` as one line of at most `cap` bytes, the way
+/// [`one_line`] builds one: in place, for a render that runs every
+/// frame.
+pub fn push_one_line(out: &mut String, raw: &str, cap: usize) {
+    let start = out.len();
     for ch in raw.chars() {
-        if text.len() >= cap {
-            text.push('…');
+        if out.len() - start >= cap {
+            out.push('…');
             break;
         }
         match ch {
-            '\n' | '\t' => text.push(' '),
+            '\n' | '\t' => out.push(' '),
             ch if ch.is_control() => {}
-            ch => text.push(ch),
+            ch => out.push(ch),
         }
     }
-    text
 }
 
 /// `raw` sanitized and cut at `cap` bytes with a mark on its own

@@ -9,7 +9,8 @@
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel, PageUp, and PageDown browse; End and a submitted line return
 //! to the bottom. Ctrl-O expands every tool card to its kept output
-//! and collapses them again.
+//! and collapses them again. Ctrl-T opens the newest thinking block
+//! and closes it again.
 //!
 //! While a turn runs, a progress line above the input shows a
 //! spinner, the elapsed time, and the stage. The status bar is the
@@ -72,15 +73,10 @@ enum Stage {
     Tool(String),
 }
 
-/// The progress line's state: the turn's start, its stage, and when
-/// the stage began.
+/// The progress line's state: the turn's start and its stage.
 struct Progress {
     started: Instant,
     stage: Stage,
-    /// When the stage last changed. A thinking block's clock starts
-    /// here: the Codex endpoint streams a summary after the
-    /// reasoning, so the first delta comes at the end of the thought.
-    since: Instant,
 }
 
 impl Progress {
@@ -152,6 +148,12 @@ struct App {
     progress: Option<Progress>,
     /// The progress line's text, rebuilt each frame in place.
     progress_line: String,
+    /// When the last event other than reasoning text landed: the
+    /// turn's start, a text delta, a tool's end, a segment's end. A
+    /// thinking block's clock starts here, not at its first delta: a
+    /// provider can stream the summary after the reasoning, so the
+    /// first delta can come at the end of the thought.
+    reasoning_since: std::time::Instant,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
     display_tx: mpsc::UnboundedSender<DisplayEvent>,
@@ -195,6 +197,7 @@ impl App {
             mode: Mode::Edit,
             progress: None,
             progress_line: String::new(),
+            reasoning_since: std::time::Instant::now(),
             keys,
             displays,
             display_tx,
@@ -263,12 +266,11 @@ impl App {
         // turns may still be queued; drop it instead of aborting this
         // turn with it.
         drain_signal(&mut self.sigint).await;
-        let now = Instant::now();
         self.progress = Some(Progress {
-            started: now,
+            started: Instant::now(),
             stage: Stage::Thinking,
-            since: now,
         });
+        self.reasoning_since = std::time::Instant::now();
         self.dirty = true;
         let mut tick = Instant::now() + TICK;
         let mut aborted = false;
@@ -355,27 +357,24 @@ impl App {
     }
 
     fn display(&mut self, event: DisplayEvent) {
+        // Any event but reasoning text moves the thinking clock; an
+        // event that carries its own time sets it below.
+        if !matches!(event, DisplayEvent::ReasoningDelta(_)) {
+            self.reasoning_since = std::time::Instant::now();
+        }
         match event {
             DisplayEvent::TextDelta(delta) => {
                 self.transcript.push_delta(Kind::Text, &delta);
                 self.stage(Stage::Writing);
             }
-            DisplayEvent::ReasoningDelta { text, at } => {
-                // The thought began when the model began thinking —
-                // the turn's start or the last tool's end — not at
-                // its first summary delta.
-                let at = match &self.progress {
-                    Some(Progress {
-                        stage: Stage::Thinking,
-                        since,
-                        ..
-                    }) => since.into_std(),
-                    _ => at,
-                };
-                self.transcript.reasoning_delta(&text, at);
+            DisplayEvent::ReasoningDelta(text) => {
+                self.transcript.reasoning_delta(&text, self.reasoning_since);
                 self.stage(Stage::Thinking);
             }
-            DisplayEvent::ReasoningEnd { at } => self.transcript.reasoning_end(at),
+            DisplayEvent::ReasoningEnd { at } => {
+                self.transcript.reasoning_end(at);
+                self.reasoning_since = at;
+            }
             DisplayEvent::ToolStart { id, name } => {
                 self.transcript.tool_start(&id, &name);
                 self.stage(Stage::Writing);
@@ -410,6 +409,7 @@ impl App {
                         at,
                     },
                 );
+                self.reasoning_since = at;
                 self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
@@ -441,9 +441,6 @@ impl App {
     /// The progress line's stage, while a turn runs.
     fn stage(&mut self, stage: Stage) {
         if let Some(progress) = &mut self.progress {
-            if std::mem::discriminant(&progress.stage) != std::mem::discriminant(&stage) {
-                progress.since = Instant::now();
-            }
             progress.stage = stage;
         }
     }

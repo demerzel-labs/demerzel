@@ -73,7 +73,8 @@ pub enum EngineEvent<'a> {
     /// One reasoning segment ended: the deltas since the last end, or
     /// since the turn's start, form one block. A segment with no
     /// deltas — a redacted one — ends too.
-    ReasoningEnd,
+    #[non_exhaustive]
+    ReasoningEnd {},
     /// The model started streaming a tool call.
     #[non_exhaustive]
     ToolStart {
@@ -631,7 +632,7 @@ async fn collect_response(
                 sink.event(EngineEvent::ReasoningDelta(&delta));
             }
             StreamEvent::ReasoningDone { summary, sealed } => {
-                sink.event(EngineEvent::ReasoningEnd);
+                sink.event(EngineEvent::ReasoningEnd {});
                 blocks.push(ContentBlock::Reasoning { summary, sealed });
             }
             StreamEvent::ToolCallStart { id, name } => {
@@ -1139,7 +1140,7 @@ mod tests {
         let sink = |event: EngineEvent<'_>| {
             let name = match event {
                 EngineEvent::ReasoningDelta(_) => "delta",
-                EngineEvent::ReasoningEnd => "end",
+                EngineEvent::ReasoningEnd { .. } => "end",
                 EngineEvent::ToolStart { .. } => "tool",
                 _ => return,
             };
