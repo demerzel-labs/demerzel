@@ -1,5 +1,5 @@
-//! Frame rendering: the transcript pane above, the status bar, the
-//! progress line while a turn runs, and the input line below.
+//! Frame rendering: the transcript pane above, the progress line
+//! while a turn runs, the status bar, and the input line below.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
@@ -38,7 +38,8 @@ pub(crate) struct View<'a> {
     pub status: &'a Status,
     /// An approval question replaces the input prompt.
     pub approval: Option<&'a str>,
-    /// The progress line, shown above the input while a turn runs.
+    /// The progress line, shown under the transcript while a turn
+    /// runs.
     pub progress: Option<&'a str>,
 }
 
@@ -49,10 +50,11 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     if area.height == 0 || area.width == 0 {
         return 0;
     }
-    // The status bar takes one row when the screen has room for all
-    // three panes; a two-row screen keeps transcript and input. The
-    // progress line takes one more above the input when it shows and
-    // the screen has a fourth row.
+    // The status bar takes one row above the input when the screen
+    // has room for all three panes; a two-row screen keeps transcript
+    // and input. The progress line takes one more, between the
+    // transcript and the bar, when it shows and the screen has a
+    // fourth row.
     let bar_rows = u16::from(area.height >= 3);
     let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
     let input_row = Rect {
@@ -70,7 +72,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         && progress_rows > 0
     {
         let progress_row = Rect {
-            y: area.y + area.height - 2,
+            y: area.y + area.height - 2 - bar_rows,
             height: 1,
             ..area
         };
@@ -78,7 +80,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     }
     if bar_rows > 0 {
         let bar_row = Rect {
-            y: area.y + area.height - 2 - progress_rows,
+            y: area.y + area.height - 2,
             height: 1,
             ..area
         };
@@ -704,7 +706,7 @@ line 12",
     }
 
     #[test]
-    fn the_progress_line_sits_above_the_input_and_takes_a_transcript_row() {
+    fn the_progress_line_sits_under_the_transcript_and_takes_its_row() {
         let mut transcript = Transcript::new(false);
         for i in 0..5 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
@@ -724,8 +726,8 @@ line 12",
         );
         assert_eq!(rows, 2);
         assert_eq!(lines[1].trim_end(), "line 4");
-        assert!(lines[2].contains("test-model · ask"), "{:?}", lines[2]);
-        assert_eq!(lines[3].trim_end(), "⠋ 3s · bash[2J");
+        assert_eq!(lines[2].trim_end(), "⠋ 3s · bash[2J");
+        assert!(lines[3].contains("test-model · ask"), "{:?}", lines[3]);
         assert_eq!(lines[4].trim_end(), "dmz>");
         // A three-row screen keeps the bar and drops the line.
         let (lines, rows) = render(

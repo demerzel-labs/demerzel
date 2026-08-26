@@ -11,7 +11,7 @@
 //! to the bottom. Ctrl-O expands every tool card to its kept output
 //! and collapses them again.
 //!
-//! While a turn runs, a progress line above the input shows a
+//! While a turn runs, a progress line under the transcript shows a
 //! spinner, the elapsed time, and the stage. A tick timer wakes the
 //! loop for it during the turn only; at idle nothing wakes.
 
