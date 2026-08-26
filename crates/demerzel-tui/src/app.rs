@@ -97,6 +97,10 @@ enum Mode {
         /// The question row, built once: the tool name is
         /// model-controlled and the row draws every frame.
         question: String,
+        /// The question landed on the running call's card, so the
+        /// answer settles that card. Without one — a question asked
+        /// outside a dispatch — the answer touches no card.
+        card: bool,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
 }
@@ -431,9 +435,8 @@ impl App {
         // — a driver that asks outside a dispatch — the preview shows
         // as a notice, so nothing is approved blind.
         let preview = request.preview.as_deref();
-        if !self.transcript.tool_pending(&request.tool, preview)
-            && let Some(preview) = preview
-        {
+        let card = self.transcript.tool_pending(&request.tool, preview);
+        if !card && let Some(preview) = preview {
             self.transcript
                 .push_line(Kind::Notice, &format!("{} wants to run:", request.tool));
             self.transcript.push_line(Kind::Notice, preview);
@@ -448,6 +451,7 @@ impl App {
         self.mode = Mode::Approval {
             tool: request.tool,
             question,
+            card,
             reply: request.reply,
         };
     }
@@ -576,14 +580,18 @@ impl App {
             KeyCode::Char('c' | 'd') if ctrl => ApprovalAnswer::Abort,
             _ => return Action::None,
         };
-        let Mode::Approval { tool, reply, .. } = std::mem::replace(&mut self.mode, Mode::Edit)
+        let Mode::Approval {
+            tool, card, reply, ..
+        } = std::mem::replace(&mut self.mode, Mode::Edit)
         else {
             unreachable!("approval_key runs only in approval mode");
         };
-        self.transcript.tool_answered(
-            matches!(answer, ApprovalAnswer::Deny | ApprovalAnswer::Abort),
-            std::time::Instant::now(),
-        );
+        if card {
+            self.transcript.tool_answered(
+                matches!(answer, ApprovalAnswer::Deny | ApprovalAnswer::Abort),
+                std::time::Instant::now(),
+            );
+        }
         let word = match answer {
             ApprovalAnswer::Allow => "yes",
             ApprovalAnswer::AllowForSession => "always",
