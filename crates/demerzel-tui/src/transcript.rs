@@ -183,7 +183,7 @@ impl Block {
         if let Some(card) = &mut self.card
             && card.stale()
         {
-            card.render(&mut self.text);
+            card.render(&mut self.text, MAX_BLOCK_BYTES);
             self.text.truncate(cap_boundary(&self.text));
             // A collapse after an expand must give the memory back:
             // the block cap bounds the text, not what it once held.
@@ -215,12 +215,16 @@ impl Block {
         row_delta(before, self.rows())
     }
 
-    /// The faces of a card over its plain rows. Any other plain
-    /// block has none.
+    /// The faces of a card over its plain rows, and its row index
+    /// trimmed after a collapse. Any other plain block has no faces
+    /// and only grows.
     fn card_faces(&mut self) {
         self.layout.faces.clear();
         if let Some(card) = &self.card {
             card.faces(self.text.len(), &mut self.layout.faces);
+            if self.layout.rows.capacity() > 2 * self.layout.rows.len().max(64) {
+                self.layout.rows.shrink_to_fit();
+            }
         }
     }
 
@@ -1171,10 +1175,11 @@ mod tests {
     }
 
     #[test]
-    fn a_card_past_the_block_cap_is_cut_at_a_char_boundary() {
+    fn a_card_past_the_block_cap_keeps_its_footer_inside_the_cap() {
         // An expanded output of short lines renders three bytes per
-        // line, past the block cap: the text is cut at the cap and
-        // the rows and faces still index inside it.
+        // line, past the block cap: the output rows stop under the
+        // cap, the footer lands, and the rows and faces index inside
+        // the text.
         let mut t = plain();
         t.set_expanded(true);
         t.tool_start("c1", "bash");
@@ -1183,12 +1188,13 @@ mod tests {
         let rows = rows(&mut t, 80);
         let block = t.blocks().next().unwrap();
         assert!(block.text().len() <= MAX_BLOCK_BYTES);
-        assert!(block.text().len() > MAX_BLOCK_BYTES - 4);
+        assert!(block.text().len() > MAX_BLOCK_BYTES - 1024);
+        assert!(block.text().ends_with("\n  ok"));
         assert_eq!(rows.len(), block.rows());
         assert!(!block.plain());
         let last = block.rows() - 1;
         block.spans(last, |_, _| {});
-        // The collapse gives the memory back.
+        // The collapse gives the memory back: the text and the rows.
         t.set_expanded(false);
         rows_of(&mut t);
         let block = t.blocks().next().unwrap();
@@ -1196,6 +1202,11 @@ mod tests {
             block.text.capacity() < MAX_BLOCK_BYTES / 4,
             "{}",
             block.text.capacity()
+        );
+        assert!(
+            block.layout.rows.capacity() <= 2 * block.rows().max(64),
+            "{}",
+            block.layout.rows.capacity()
         );
     }
 

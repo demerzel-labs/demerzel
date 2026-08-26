@@ -530,11 +530,14 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.wait_for("row 8 of the file");
     pty.wait_for("4 more lines · Ctrl-O");
     // The bash call's preview joins its header; the card waits on
-    // the question. A resize repaints the card whole, so the pending
-    // glyph reaches the stream with its row.
+    // the question. A resize makes the next draw repaint the card
+    // whole, so the pending glyph reaches the stream with its row;
+    // the spinner rests at a question, so a key that answers
+    // nothing triggers the draw.
     pty.wait_for("$ echo card-out");
     pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
     pty.resize(100, 29);
+    pty.send(b" ");
     pty.wait_for("? bash $ echo card-out");
     pty.send(b"y");
     pty.wait_for("card-out");

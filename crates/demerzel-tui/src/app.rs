@@ -12,7 +12,7 @@
 //! and collapses them again.
 //!
 //! While a turn runs, a progress line above the input shows a
-//! spinner, the elapsed time, and the phase. A tick timer wakes the
+//! spinner, the elapsed time, and the stage. A tick timer wakes the
 //! loop for it during the turn only; at idle nothing wakes.
 
 use std::future::poll_fn;
@@ -93,6 +93,9 @@ enum Mode {
     Edit,
     Approval {
         tool: String,
+        /// The question row, built once: the tool name is
+        /// model-controlled and the row draws every frame.
+        question: String,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
 }
@@ -273,7 +276,9 @@ impl App {
                 event = self.displays.recv() => Wake::Display(event),
                 request = self.approvals.recv() => Wake::Approval(request),
                 _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => Wake::Frame,
-                _ = tokio::time::sleep_until(tick) => Wake::Tick,
+                // The spinner rests while a question waits: nothing
+                // runs, and the frame would only redraw the question.
+                _ = tokio::time::sleep_until(tick), if matches!(self.mode, Mode::Edit) => Wake::Tick,
             };
             let action = match wake {
                 Wake::Done => break,
@@ -435,8 +440,13 @@ impl App {
         // A question needs its call visible: jump to the bottom, where
         // the preview and the question row are.
         self.transcript.follow();
+        let question = format!(
+            "approve {}? [y]es / [a]lways / [N]o",
+            cards::one_line(&request.tool, cards::PROGRESS_NAME_BYTES)
+        );
         self.mode = Mode::Approval {
             tool: request.tool,
+            question,
             reply: request.reply,
         };
     }
@@ -565,7 +575,8 @@ impl App {
             KeyCode::Char('c' | 'd') if ctrl => ApprovalAnswer::Abort,
             _ => return Action::None,
         };
-        let Mode::Approval { tool, reply } = std::mem::replace(&mut self.mode, Mode::Edit) else {
+        let Mode::Approval { tool, reply, .. } = std::mem::replace(&mut self.mode, Mode::Edit)
+        else {
             unreachable!("approval_key runs only in approval mode");
         };
         self.transcript.tool_answered(matches!(
@@ -603,10 +614,6 @@ impl App {
         if !self.dirty || Instant::now() < self.last_draw + FRAME {
             return Ok(());
         }
-        let question = match &self.mode {
-            Mode::Edit => None,
-            Mode::Approval { tool, .. } => Some(format!("approve {tool}? [y]es / [a]lways / [N]o")),
-        };
         let Self {
             guard,
             transcript,
@@ -615,8 +622,13 @@ impl App {
             page,
             progress,
             progress_line,
+            mode,
             ..
         } = self;
+        let question = match mode {
+            Mode::Edit => None,
+            Mode::Approval { question, .. } => Some(question.as_str()),
+        };
         let progress = progress.as_ref().map(|progress| {
             progress.write(progress_line);
             progress_line.as_str()
@@ -628,7 +640,7 @@ impl App {
                     transcript,
                     input,
                     status,
-                    approval: question.as_deref(),
+                    approval: question,
                     progress,
                 },
             );

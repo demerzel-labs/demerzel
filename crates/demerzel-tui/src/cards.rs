@@ -49,6 +49,10 @@ const LINE_BYTES: usize = 512;
 /// Bytes of the tool name on the progress line.
 pub const PROGRESS_NAME_BYTES: usize = 80;
 
+/// Bytes a render keeps free under its cap for the footer, so the
+/// summary and the hint stay when the output rows are cut.
+const FOOTER_RESERVE: usize = LINE_BYTES + 64;
+
 /// The key that expands and collapses the cards, named in the hint.
 const EXPAND_KEY: &str = "Ctrl-O";
 
@@ -123,6 +127,8 @@ pub struct Card {
     duration: Option<Duration>,
     summary: Option<String>,
     output: String,
+    /// Lines in the output, counted once when it lands.
+    output_lines: usize,
     output_cut: bool,
     expanded: bool,
     /// The text needs a render before the next layout.
@@ -144,6 +150,7 @@ impl Card {
             duration: None,
             summary: None,
             output: String::new(),
+            output_lines: 0,
             output_cut: false,
             expanded,
             stale: true,
@@ -168,8 +175,8 @@ impl Card {
     }
 
     /// The driver's preview of the call. Its first line joins the
-    /// header, without the tool name when the line starts with it;
-    /// the rest is the body.
+    /// header, without the tool name when the line starts with it as
+    /// a word; the rest is the body.
     pub fn set_preview(&mut self, preview: &str) {
         let (first, rest) = match preview.find('\n') {
             Some(cut) => (&preview[..cut], Some(&preview[cut + 1..])),
@@ -177,9 +184,15 @@ impl Card {
         };
         let first = first
             .strip_prefix(self.name.as_str())
-            .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
+            .and_then(|rest| {
+                if rest.is_empty() {
+                    Some(rest)
+                } else {
+                    rest.strip_prefix(' ')
+                }
+            })
             .unwrap_or(first);
-        self.input = Some(one_line(first, LINE_BYTES));
+        self.input = (!first.is_empty()).then(|| one_line(first, LINE_BYTES));
         self.body = rest
             .filter(|rest| !rest.is_empty())
             .map(|rest| capped_text(rest, MAX_PREVIEW_BYTES));
@@ -219,6 +232,7 @@ impl Card {
                 State::Done
             };
             self.output = outcome.output;
+            self.output_lines = self.output.lines().count();
             self.output_cut = outcome.output_cut;
         }
         self.duration = self
@@ -245,8 +259,9 @@ impl Card {
     }
 
     /// Render the card into `out`, replacing its content, and mark
-    /// it fresh.
-    pub fn render(&mut self, out: &mut String) {
+    /// it fresh. The output rows stop under `cap`, less the footer,
+    /// so the footer always lands.
+    pub fn render(&mut self, out: &mut String, cap: usize) {
         self.stale = false;
         out.clear();
         out.push(self.state.glyph());
@@ -271,13 +286,31 @@ impl Card {
                 if self.output_cut {
                     out.push_str("\n  … earlier output not kept");
                 }
+                let budget = cap.saturating_sub(FOOTER_RESERVE);
                 for line in self.output.lines() {
+                    if out.len() + line.len() + 3 > budget {
+                        out.push_str("\n  … rows cut at the block cap");
+                        break;
+                    }
                     out.push_str("\n  ");
                     out.push_str(line);
                 }
             } else {
-                hidden = line_count(&self.output).saturating_sub(TAIL_LINES);
-                for line in self.output.lines().skip(hidden) {
+                // The tail starts after the newline that ends the
+                // hidden lines, found from the end: a trailing
+                // newline ends the last line and separates none.
+                hidden = self.output_lines.saturating_sub(TAIL_LINES);
+                let separators = if self.output.ends_with('\n') {
+                    TAIL_LINES
+                } else {
+                    TAIL_LINES - 1
+                };
+                let tail = self
+                    .output
+                    .rmatch_indices('\n')
+                    .nth(separators)
+                    .map_or(self.output.as_str(), |(at, _)| &self.output[at + 1..]);
+                for line in tail.lines() {
                     out.push_str("\n  ");
                     let cut = line_cut(line, TAIL_LINE_BYTES);
                     out.push_str(&line[..cut]);
@@ -304,12 +337,17 @@ impl Card {
             _ => out.push_str(word),
         }
         // The hint names what the expanded view adds: the hidden
-        // lines, or the cut when the kept tail shows whole.
+        // lines, and the cut when the kept output is a tail.
+        let cut = self.output_cut && !self.expanded;
         if hidden > 0 {
             let plural = if hidden == 1 { "line" } else { "lines" };
-            let _ = write!(out, " · {hidden} more {plural} · {EXPAND_KEY}");
-        } else if self.output_cut && !self.expanded {
-            let _ = write!(out, " · output cut · {EXPAND_KEY}");
+            let _ = write!(out, " · {hidden} more {plural}");
+        }
+        if cut {
+            out.push_str(" · output cut");
+        }
+        if hidden > 0 || cut {
+            let _ = write!(out, " · {EXPAND_KEY}");
         }
     }
 
@@ -331,16 +369,6 @@ impl Card {
             out.push((start as u32, Face::MUTED));
             out.push((end as u32, Face::PLAIN));
         }
-    }
-}
-
-/// Lines in `text`, the way `str::lines` counts them.
-fn line_count(text: &str) -> usize {
-    let newlines = text.bytes().filter(|&byte| byte == b'\n').count();
-    if text.is_empty() || text.ends_with('\n') {
-        newlines
-    } else {
-        newlines + 1
     }
 }
 
@@ -377,11 +405,18 @@ pub fn one_line(raw: &str, cap: usize) -> String {
 /// `raw` sanitized and cut at `cap` bytes with a mark on its own
 /// line.
 fn capped_text(raw: &str, cap: usize) -> String {
-    let mut text = String::with_capacity(raw.len().min(cap));
-    push_sanitized(&mut text, raw);
-    if text.len() > cap {
-        text.truncate(line_cut(&text, cap));
-        text.push_str("\n…");
+    let mut text = String::with_capacity(raw.len().min(cap + 8));
+    for ch in raw.chars() {
+        if text.len() > cap {
+            text.truncate(line_cut(&text, cap));
+            text.push_str("\n…");
+            break;
+        }
+        match ch {
+            '\t' => text.push_str("    "),
+            ch if ch.is_control() && ch != '\n' => {}
+            ch => text.push(ch),
+        }
     }
     text
 }
@@ -398,22 +433,31 @@ pub fn push_sanitized(out: &mut String, text: &str) {
     }
 }
 
-/// The tail of `output` the interface keeps: sanitized, then cut to
-/// the byte cap at a char boundary. Returns the tail and whether it
-/// is a cut.
+/// The tail of `output` the interface keeps: the last chars whose
+/// sanitized form fits the byte cap. The walk back from the end
+/// measures each char as the sanitizer writes it, so the work is
+/// the kept tail's, not the output's. Returns the tail and whether
+/// it is a cut.
 pub fn kept_output(output: &str) -> (String, bool) {
-    let mut text = String::with_capacity(output.len().min(MAX_OUTPUT_BYTES + 4));
-    push_sanitized(&mut text, output);
-    if text.len() <= MAX_OUTPUT_BYTES {
-        return (text, false);
+    let mut width = 0usize;
+    let mut start = output.len();
+    for (at, ch) in output.char_indices().rev() {
+        let cols = match ch {
+            '\t' => 4,
+            '\n' => 1,
+            ch if ch.is_control() => 0,
+            ch => ch.len_utf8(),
+        };
+        if width + cols > MAX_OUTPUT_BYTES {
+            break;
+        }
+        width += cols;
+        start = at;
     }
-    let mut start = text.len() - MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text.drain(..start);
-    text.shrink_to_fit();
-    (text, true)
+    let mut text = String::with_capacity(width);
+    push_sanitized(&mut text, &output[start..]);
+    debug_assert_eq!(text.len(), width);
+    (text, start > 0)
 }
 
 /// Append a duration the way the card shows it.
@@ -447,9 +491,12 @@ pub fn write_progress(out: &mut String, elapsed: Duration, stage: &str) {
 mod tests {
     use super::*;
 
+    /// A cap wide enough for every test but the one that cuts.
+    const CAP: usize = 32 * 1024;
+
     fn text(card: &mut Card) -> String {
         let mut out = String::new();
-        card.render(&mut out);
+        card.render(&mut out, CAP);
         out
     }
 
@@ -518,10 +565,14 @@ mod tests {
         let mut card = Card::new("create", false);
         card.set_preview("create notes.txt");
         assert_eq!(text(&mut card), "· create notes.txt");
-        // A first line that is the name alone adds nothing.
+        // A first line that is the name alone adds nothing; a line
+        // that starts with the name as part of a word keeps it.
         let mut card = Card::new("edit", false);
         card.set_preview("edit\n@ delete line 1");
-        assert_eq!(text(&mut card), "· edit \n  @ delete line 1");
+        assert_eq!(text(&mut card), "· edit\n  @ delete line 1");
+        let mut card = Card::new("read", false);
+        card.set_preview("readme.md");
+        assert_eq!(text(&mut card), "· read readme.md");
     }
 
     #[test]
@@ -539,6 +590,30 @@ mod tests {
             shown.ends_with("bash: exit 0 · 3 more lines · Ctrl-O"),
             "{shown}"
         );
+        // The tail seek agrees with the line iterator for every
+        // shape: a trailing newline, none, empty lines, fewer lines
+        // than the tail.
+        for output in [
+            "a\nb\nc\nd\ne\nf\ng",
+            "a\nb\nc\nd\ne\nf\ng\n",
+            "\n\n\n\n\n\n\n",
+            "\n\n\n\n\n\n\n\n",
+            "a\n\nb\n",
+            "one",
+            "a\nb\nc\nd\ne",
+            "a\nb\nc\nd\ne\n",
+        ] {
+            let mut card = Card::new("t", false);
+            finish(&mut card, output, false);
+            let shown = text(&mut card);
+            let rows: Vec<&str> = shown.lines().skip(1).map(|row| &row[2..]).collect();
+            let total = output.lines().count();
+            let expected: Vec<&str> = output
+                .lines()
+                .skip(total.saturating_sub(TAIL_LINES))
+                .collect();
+            assert_eq!(&rows[..rows.len() - 1], &expected[..], "{output:?}");
+        }
         card.set_expanded(true);
         let shown = text(&mut card);
         assert!(shown.contains("\n  1: line\n"), "{shown}");
@@ -585,6 +660,35 @@ mod tests {
             text(&mut card),
             "✓ bash\n  … earlier output not kept\n  tail\n  0ms · done"
         );
+        // Hidden lines and the cut both show.
+        card.set_expanded(false);
+        card.end(Outcome {
+            summary: None,
+            is_error: false,
+            output: (1..=7).map(|i| format!("{i}\n")).collect(),
+            output_cut: true,
+            at: start,
+        });
+        assert!(
+            text(&mut card).ends_with("done · 2 more lines · output cut · Ctrl-O"),
+            "{}",
+            text(&mut card)
+        );
+    }
+
+    #[test]
+    fn the_output_rows_stop_under_the_cap_and_the_footer_lands() {
+        let mut card = Card::new("bash", true);
+        let output: String = (0..3_000).map(|i| format!("{i}\n")).collect();
+        finish(&mut card, &output, false);
+        let mut out = String::new();
+        card.render(&mut out, 4_096);
+        assert!(out.len() <= 4_096, "{}", out.len());
+        assert!(out.contains("\n  … rows cut at the block cap\n"), "{out}");
+        assert!(out.ends_with("\n  1.2s · bash: exit 0"), "{out}");
+        // Under a cap that fits, nothing is cut.
+        card.render(&mut out, CAP);
+        assert!(!out.contains("rows cut"));
     }
 
     #[test]
@@ -713,13 +817,19 @@ mod tests {
         assert!(tail.bytes().all(|byte| byte == b' '));
         let (tail, cut) = kept_output("a\x1b[31mb\r\n");
         assert_eq!((tail.as_str(), cut), ("a[31mb\n", false));
-    }
-
-    #[test]
-    fn line_count_matches_the_lines_iterator() {
-        for text in ["", "a", "a\n", "a\nb", "a\nb\n", "\n", "\n\n", "a\n\nb"] {
-            assert_eq!(line_count(text), text.lines().count(), "{text:?}");
-        }
+        // Control characters past the cap count for nothing: they
+        // are no cut.
+        let controls = format!("\x07\x07{}", "x".repeat(MAX_OUTPUT_BYTES));
+        let (tail, cut) = kept_output(&controls);
+        assert_eq!((tail.len(), cut), (MAX_OUTPUT_BYTES, false));
+        // The walk matches a whole sanitize followed by a tail cut.
+        let mixed = "é\tx\x1b\n".repeat(MAX_OUTPUT_BYTES / 4);
+        let mut whole = String::new();
+        push_sanitized(&mut whole, &mixed);
+        let (tail, cut) = kept_output(&mixed);
+        assert!(cut);
+        assert_eq!(tail.as_str(), &whole[whole.len() - tail.len()..]);
+        assert!(tail.len() <= MAX_OUTPUT_BYTES && tail.len() > MAX_OUTPUT_BYTES - 8);
     }
 
     #[test]
