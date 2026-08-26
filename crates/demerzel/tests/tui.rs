@@ -916,7 +916,7 @@ async fn a_reply_renders_as_markdown() {
 const SUMMARY: &str = "**Plan** the fix\nthen check the second line";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_thinking_block_closes_to_one_row_and_ctrl_t_opens_it() {
+async fn a_thinking_block_closes_to_one_line_and_ctrl_t_opens_it() {
     let mock = MockServer::start(vec![reasoning_turn(SUMMARY, "done")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
@@ -935,7 +935,7 @@ async fn a_thinking_block_closes_to_one_row_and_ctrl_t_opens_it() {
     pty.send(CTRL_T);
     pty.wait_for("▾");
     pty.wait_for("then check the second line");
-    // Closed again: after a repaint the screen holds one row of it.
+    // Closed again: after a repaint the screen holds one line of it.
     pty.send(CTRL_T);
     pty.resize(100, 28);
     pty.send(b"y");

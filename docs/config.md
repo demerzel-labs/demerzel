@@ -81,9 +81,16 @@ from config, not from the file.
 
 `tui.thinking` sets how a thinking block starts in the full-screen
 interface. A thinking block shows one reasoning summary from the
-model. `closed` shows one line: the state and the first line of the
-summary. `open` shows the whole summary. `hidden` shows no block.
-Ctrl-T opens the newest block and closes it again.
+model. `closed` shows the state and the summary's first line. `open`
+shows the whole summary. `hidden` shows no block.
+
+## Keys
+
+The full-screen interface has two keys beyond the editor's:
+
+- Ctrl-O expands every tool card to its kept output and collapses
+  them again.
+- Ctrl-T opens the newest thinking block and closes it again.
 
 ## Trust rules
 

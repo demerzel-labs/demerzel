@@ -1,7 +1,8 @@
 //! Thinking blocks: one reasoning summary segment each. A closed
-//! block is one row — the state and the summary's first line. An
-//! open block shows the whole summary. The block keeps the summary
-//! either way, so a key opens and closes it after the fact.
+//! block is one line — the state and the summary's first line — that
+//! wraps at the width like any other. An open block shows the whole
+//! summary. The block keeps the summary either way, so a key opens
+//! and closes it after the fact.
 
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,9 @@ use crate::cards::{push_one_line, write_duration};
 /// Bytes of the summary's first line on a closed block.
 const LINE_BYTES: usize = 240;
 
+/// Bytes past the first line the closed render probes for more text.
+const TAIL_PROBE_BYTES: usize = 256;
+
 /// Bytes a block keeps free above its summary for the header row and
 /// the cut mark, so the render stays under the block cap.
 pub(crate) const SUMMARY_RESERVE: usize = 256;
@@ -17,7 +21,7 @@ pub(crate) const SUMMARY_RESERVE: usize = 256;
 /// How a thinking block starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Thinking {
-    /// One row: the state and the summary's first line.
+    /// One line: the state and the summary's first line.
     #[default]
     Closed,
     /// The whole summary.
@@ -188,10 +192,7 @@ impl Thought {
         // closed render must not walk a summary that has no newline.
         let head = &self.summary[..floor_boundary(&self.summary, LINE_BYTES + 4)];
         let (first, more) = match head.find('\n') {
-            Some(at) => (
-                &head[..at],
-                self.cut || !self.summary[at + 1..].trim_start().is_empty(),
-            ),
+            Some(at) => (&head[..at], self.cut || more_after(&self.summary[at + 1..])),
             None => (head, self.cut || head.len() < self.summary.len()),
         };
         out.push_str(" · ");
@@ -200,6 +201,15 @@ impl Thought {
             out.push('…');
         }
     }
+}
+
+/// Whether text follows the first line: a probe over a bounded head
+/// of the rest, so a tail of whitespace costs the probe, not the
+/// tail. Whitespace past the probe counts as more; a mark for it is
+/// harmless, a walk over it is not.
+fn more_after(rest: &str) -> bool {
+    let probe = &rest[..floor_boundary(rest, TAIL_PROBE_BYTES)];
+    !probe.trim_start().is_empty() || probe.len() < rest.len()
 }
 
 /// `at`, or the char boundary before it.
@@ -310,6 +320,13 @@ mod tests {
         let mut thought = Thought::new(false, at(0));
         thought.push("short\n  \n", CAP);
         assert_eq!(text(&mut thought), "· thinking · short");
+        // Content past a long run of whitespace still gets the mark.
+        let mut thought = Thought::new(false, at(0));
+        thought.push(
+            &format!("short\n{}late", " ".repeat(2 * TAIL_PROBE_BYTES)),
+            CAP,
+        );
+        assert_eq!(text(&mut thought), "· thinking · short…");
     }
 
     #[test]

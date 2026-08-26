@@ -96,7 +96,7 @@ pub struct Options {
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.
     pub markdown: bool,
-    /// How a thinking block starts: closed to one row, open, or not
+    /// How a thinking block starts: closed to one line, open, or not
     /// shown. Closed by default; Ctrl-T opens and closes the newest.
     pub thinking: Thinking,
 }

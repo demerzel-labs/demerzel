@@ -400,9 +400,9 @@ pub fn one_line(raw: &str, cap: usize) -> String {
     text
 }
 
-/// Append `raw` as one line of at most `cap` bytes, the way
-/// [`one_line`] builds one: in place, for a render that runs every
-/// frame.
+/// Append `raw` as one line of at most `cap` bytes plus the cut
+/// mark, the way [`one_line`] builds one: in place, for a render
+/// that runs every frame.
 pub fn push_one_line(out: &mut String, raw: &str, cap: usize) {
     let start = out.len();
     for ch in raw.chars() {

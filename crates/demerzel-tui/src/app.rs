@@ -148,11 +148,11 @@ struct App {
     progress: Option<Progress>,
     /// The progress line's text, rebuilt each frame in place.
     progress_line: String,
-    /// When the last event other than reasoning text landed: the
-    /// turn's start, a text delta, a tool's end, a segment's end. A
-    /// thinking block's clock starts here, not at its first delta: a
-    /// provider can stream the summary after the reasoning, so the
-    /// first delta can come at the end of the thought.
+    /// When the last event other than reasoning text landed; see
+    /// [`thinking_clock`]. A thinking block's clock starts here, not
+    /// at its first delta: a provider can stream the summary after
+    /// the reasoning, so the first delta can come at the end of the
+    /// thought.
     reasoning_since: std::time::Instant,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
@@ -357,10 +357,8 @@ impl App {
     }
 
     fn display(&mut self, event: DisplayEvent) {
-        // Any event but reasoning text moves the thinking clock; an
-        // event that carries its own time sets it below.
-        if !matches!(event, DisplayEvent::ReasoningDelta(_)) {
-            self.reasoning_since = std::time::Instant::now();
+        if let Some(since) = thinking_clock(&event, std::time::Instant::now()) {
+            self.reasoning_since = since;
         }
         match event {
             DisplayEvent::TextDelta(delta) => {
@@ -371,10 +369,7 @@ impl App {
                 self.transcript.reasoning_delta(&text, self.reasoning_since);
                 self.stage(Stage::Thinking);
             }
-            DisplayEvent::ReasoningEnd { at } => {
-                self.transcript.reasoning_end(at);
-                self.reasoning_since = at;
-            }
+            DisplayEvent::ReasoningEnd { at } => self.transcript.reasoning_end(at),
             DisplayEvent::ToolStart { id, name } => {
                 self.transcript.tool_start(&id, &name);
                 self.stage(Stage::Writing);
@@ -409,7 +404,6 @@ impl App {
                         at,
                     },
                 );
-                self.reasoning_since = at;
                 self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
@@ -684,6 +678,19 @@ impl App {
     }
 }
 
+/// Where the thinking clock moves to after `event`, or `None` when
+/// it stays. Every event but reasoning text moves it: the thought
+/// began when the last other thing ended. An event that ends
+/// something — a segment, a tool call — carries that time; the rest
+/// count from `now`.
+fn thinking_clock(event: &DisplayEvent, now: std::time::Instant) -> Option<std::time::Instant> {
+    match event {
+        DisplayEvent::ReasoningDelta(_) => None,
+        DisplayEvent::ReasoningEnd { at } | DisplayEvent::ToolEnd { at, .. } => Some(*at),
+        _ => Some(now),
+    }
+}
+
 /// Discard queued signal notifications.
 async fn drain_signal(sigint: &mut Signal) {
     poll_fn(|cx| {
@@ -737,5 +744,46 @@ mod tests {
     fn paste_normalizes_line_endings_and_drops_controls() {
         assert_eq!(normalize_paste("a\r\nb\rc\nd"), "a\nb\nc\nd");
         assert_eq!(normalize_paste("x\x1b[31my\tz"), "x[31my\tz");
+    }
+
+    #[test]
+    fn the_thinking_clock_moves_at_every_event_but_reasoning_text() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let then = now - Duration::from_secs(3);
+        assert_eq!(
+            thinking_clock(&DisplayEvent::ReasoningDelta("x".into()), now),
+            None
+        );
+        // Back-to-back segments: the second counts from the first's end.
+        assert_eq!(
+            thinking_clock(&DisplayEvent::ReasoningEnd { at: then }, now),
+            Some(then)
+        );
+        assert_eq!(
+            thinking_clock(
+                &DisplayEvent::ToolEnd {
+                    id: "c".into(),
+                    name: "bash".into(),
+                    summary: None,
+                    is_error: false,
+                    output: String::new(),
+                    output_cut: false,
+                    at: then,
+                },
+                now
+            ),
+            Some(then)
+        );
+        for event in [
+            DisplayEvent::TextDelta("t".into()),
+            DisplayEvent::ToolStart {
+                id: "c".into(),
+                name: "bash".into(),
+            },
+            DisplayEvent::Notice("n".into()),
+        ] {
+            assert_eq!(thinking_clock(&event, now), Some(now));
+        }
     }
 }
