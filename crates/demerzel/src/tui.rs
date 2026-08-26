@@ -61,17 +61,18 @@ struct TuiDriver<'r> {
 
 /// The engine's event sink: it forwards every display event and
 /// renders the dispatch preview — the edit diff, the bash command —
-/// into the transcript. The preview is built here, next to the tools.
+/// onto the call's card. The preview is built here, next to the
+/// tools.
 struct PreviewSink {
     events: EventSender,
 }
 
 impl EventSink for PreviewSink {
     fn event(&self, event: EngineEvent<'_>) {
-        if let EngineEvent::ToolRun { name, input, .. } = &event
+        if let EngineEvent::ToolRun { id, name, input } = &event
             && let Some(preview) = run_preview(name, input)
         {
-            self.events.notice(preview);
+            self.events.tool_preview(id, preview);
         }
         self.events.event(event);
     }

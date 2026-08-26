@@ -22,6 +22,8 @@ const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 const CTRL_C: &[u8] = b"\x03";
 const CTRL_D: &[u8] = b"\x04";
 const END: &[u8] = b"\x1b[F";
+const CTRL_O: &[u8] = b"\x0f";
+const PAGE_UP: &[u8] = b"\x1b[5~";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
 /// Mouse reporting mode 1000, the first sequence capture turns on.
@@ -49,14 +51,18 @@ fn text_turn(text: &str) -> MockResponse {
 }
 
 fn tool_turn(name: &str, input: Value) -> MockResponse {
+    tool_call("call_1", name, input)
+}
+
+fn tool_call(id: &str, name: &str, input: Value) -> MockResponse {
     MockResponse::stream(vec![
         json!({
             "type": "response.output_item.added",
-            "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": name},
+            "item": {"type": "function_call", "id": "item_1", "call_id": id, "name": name},
         }),
         json!({
             "type": "response.output_item.done",
-            "item": {"type": "function_call", "call_id": "call_1", "arguments": input.to_string()},
+            "item": {"type": "function_call", "call_id": id, "arguments": input.to_string()},
         }),
         completed_for_tool(),
     ])
@@ -218,6 +224,11 @@ impl Pty {
         let fd = std::os::fd::AsRawFd::as_raw_fd(&self.master);
         let result = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) };
         assert_eq!(result, 0, "PTY resize failed");
+    }
+
+    /// The project directory the session runs in.
+    fn project(&self) -> std::path::PathBuf {
+        self._dirs.path().join("project")
     }
 
     /// The session-file stems this run created, across all projects.
@@ -474,13 +485,119 @@ async fn a_call_without_a_dispatch_preview_asks_with_its_input() {
 
     pty.wait_for(PROMPT);
     pty.send(b"go\r");
-    pty.wait_for("bash wants to run:");
+    // The card shows the question's preview as its body.
     pty.wait_for("mystery");
     pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
     pty.send(b"n");
     pty.wait_for("done");
     pty.send(CTRL_D);
     pty.wait_exit();
+}
+
+/// A file taller than a collapsed card's output tail.
+fn tall_file() -> String {
+    (1..=8).map(|i| format!("row {i} of the file\n")).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_cards_show_each_state_and_the_output_tail() {
+    let mock = MockServer::start(
+        vec![
+            // One turn: a read, then a bash call, then text.
+            tool_call("call_r", "read", json!({"path": "tall.txt"})),
+            tool_call("call_b", "bash", json!({"command": "echo card-out"})),
+            text_turn("first done"),
+            // A declined call.
+            tool_call("call_d", "bash", json!({"command": "echo never"})),
+            text_turn("second done"),
+            // A call the user interrupts.
+            tool_call("call_s", "bash", json!({"command": "sleep 20"})),
+            text_turn("recovered"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+    std::fs::write(pty.project().join("tall.txt"), tall_file()).unwrap();
+
+    pty.wait_for(PROMPT);
+    pty.send(b"look\r");
+    // A card changes in place, and the frame diff writes only the
+    // cells that change: a state glyph alone, a row that appears.
+    // The waits below name rows that appear. The read runs without
+    // a question; its card ends with the last five output lines and
+    // a footer with the summary and the hint for the rest.
+    pty.wait_for("8:row 8 of the file");
+    pty.wait_for("· read tall.txt lines 1-8 of 8 · 4 more lines · Ctrl-O");
+    // The bash call's preview joins its header; the card waits on
+    // the question.
+    pty.wait_for("$ echo card-out");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"y");
+    pty.wait_for("card-out");
+    pty.wait_for("· $ echo card-out (exit 0)");
+    pty.wait_for("approve bash? yes");
+    pty.wait_for("first done");
+
+    // The declined call keeps its card, with the state as its footer.
+    pty.send(b"again\r");
+    pty.wait_for("$ echo never");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"n");
+    pty.wait_for("declined");
+    pty.wait_for("approve bash? no");
+    pty.wait_for("second done");
+
+    // The interrupted call: approved, running, then Ctrl-C. A resize
+    // makes the next draw repaint the whole screen, so the progress
+    // line reaches the stream in full: the tool's name, then the
+    // prompt row under it.
+    pty.send(b"wait\r");
+    pty.wait_for("$ sleep 20");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"y");
+    pty.wait_for("approve bash? yes");
+    pty.resize(100, 29);
+    pty.wait_for("· bash $ sleep 20");
+    pty.wait_for("s · bash dmz>");
+    pty.send(CTRL_C);
+    pty.wait_for("interrupted");
+    pty.wait_for("[turn aborted]");
+    pty.send(b"after\r");
+    pty.wait_for("recovered");
+
+    // The expand key shows the read's hidden lines; the card sits
+    // above the viewport now, so a page up brings it back, and a
+    // resize repaints the rows whole.
+    pty.send(CTRL_O);
+    pty.send(PAGE_UP);
+    pty.resize(100, 30);
+    pty.wait_for("1:row 1 of the file");
+    pty.wait_for("3:row 3 of the file");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    // The spinner drew: some frame of it reached the stream. The
+    // state glyphs reached it too.
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.chars()
+            .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch)),
+        "no spinner frame in the output"
+    );
+    for glyph in ["✓", "?", "⊘", "✗"] {
+        assert!(
+            contains_marker(&raw, glyph),
+            "no {glyph} glyph in the output"
+        );
+    }
+    // The declined call went back to the model as an error result;
+    // the interrupted one went back as the repair for a call with
+    // no result.
+    let requests = mock.received();
+    assert_eq!(requests.len(), 7);
+    assert!(requests[4].body.to_string().contains("declined"));
+    assert!(requests[6].body.to_string().contains("interrupted"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,4 +1,5 @@
-//! Frame rendering: the transcript pane above, the input line below.
+//! Frame rendering: the transcript pane above, the status bar, the
+//! progress line while a turn runs, and the input line below.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
@@ -37,6 +38,8 @@ pub(crate) struct View<'a> {
     pub status: &'a Status,
     /// An approval question replaces the input prompt.
     pub approval: Option<&'a str>,
+    /// The progress line, shown above the input while a turn runs.
+    pub progress: Option<&'a str>,
 }
 
 /// Draw one frame. Returns the transcript viewport height, the page
@@ -47,22 +50,35 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         return 0;
     }
     // The status bar takes one row when the screen has room for all
-    // three panes; a two-row screen keeps transcript and input.
+    // three panes; a two-row screen keeps transcript and input. The
+    // progress line takes one more above the input when it shows and
+    // the screen has a fourth row.
     let bar_rows = u16::from(area.height >= 3);
+    let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
     let input_row = Rect {
         y: area.y + area.height - 1,
         height: 1,
         ..area
     };
     let transcript_area = Rect {
-        height: area.height - 1 - bar_rows,
+        height: area.height - 1 - bar_rows - progress_rows,
         ..area
     };
 
     draw_transcript(frame, transcript_area, view.transcript);
+    if let Some(progress) = view.progress
+        && progress_rows > 0
+    {
+        let progress_row = Rect {
+            y: area.y + area.height - 2,
+            height: 1,
+            ..area
+        };
+        draw_line(frame, progress_row, progress, Style::default());
+    }
     if bar_rows > 0 {
         let bar_row = Rect {
-            y: area.y + area.height - 2,
+            y: area.y + area.height - 2 - progress_rows,
             height: 1,
             ..area
         };
@@ -123,6 +139,25 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
     shown.extend(std::iter::repeat_n(' ', width - used));
     let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// One row of text cut to the width, control characters dropped.
+fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
+    let width = usize::from(area.width);
+    let mut shown = String::with_capacity(text.len().min(width * 4));
+    let mut used = 0usize;
+    for ch in text.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        let cols = ch.width().unwrap_or(0);
+        if used + cols > width {
+            break;
+        }
+        shown.push(ch);
+        used += cols;
+    }
+    frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
 
 fn style(kind: Kind) -> Style {
@@ -361,6 +396,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(rows, 2);
@@ -387,6 +423,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert!(
@@ -409,6 +446,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[1], " test-model ");
@@ -428,6 +466,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(rows, 1);
@@ -451,6 +490,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "line 8");
@@ -475,6 +515,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         transcript.scroll_up(3);
@@ -486,6 +527,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         // The indicator sits at the right of the bottom row.
@@ -500,6 +542,7 @@ mod tests {
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "line 0");
@@ -523,6 +566,7 @@ mod tests {
                     input: &input,
                     status: &status,
                     approval: None,
+                    progress: None,
                 },
             )
             .0
@@ -571,6 +615,7 @@ line 12",
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         assert_eq!(lines[0].trim_end(), "alpha");
@@ -592,6 +637,7 @@ line 12",
                 input: &input,
                 status: &status,
                 approval: None,
+                progress: None,
             },
         );
         // The tail is visible; the head scrolled off with the prompt.
@@ -615,6 +661,7 @@ line 12",
                         input: &input,
                         status: &status,
                         approval: None,
+                        progress: None,
                     },
                 );
             })
@@ -643,6 +690,7 @@ line 12",
                         input: &input,
                         status: &status,
                         approval: None,
+                        progress: None,
                     },
                 );
             })
@@ -661,6 +709,47 @@ line 12",
     }
 
     #[test]
+    fn the_progress_line_sits_above_the_input_and_takes_a_transcript_row() {
+        let mut transcript = Transcript::new(false);
+        for i in 0..5 {
+            transcript.push_line(Kind::Text, &format!("line {i}"));
+        }
+        let input = Input::new();
+        let status = status();
+        let (lines, rows) = render(
+            30,
+            5,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+                progress: Some("⠋ 3s · bash\x1b[2J"),
+            },
+        );
+        assert_eq!(rows, 2);
+        assert_eq!(lines[1].trim_end(), "line 4");
+        assert!(lines[2].contains("test-model · ask"), "{:?}", lines[2]);
+        assert_eq!(lines[3].trim_end(), "⠋ 3s · bash[2J");
+        assert_eq!(lines[4].trim_end(), "dmz>");
+        // A three-row screen keeps the bar and drops the line.
+        let (lines, rows) = render(
+            30,
+            3,
+            View {
+                transcript: &mut transcript,
+                input: &input,
+                status: &status,
+                approval: None,
+                progress: Some("⠋ 3s · bash"),
+            },
+        );
+        assert_eq!(rows, 1);
+        assert!(lines[1].contains("test-model"), "{:?}", lines[1]);
+        assert_eq!(lines[2].trim_end(), "dmz>");
+    }
+
+    #[test]
     fn an_approval_question_replaces_the_prompt() {
         let mut transcript = Transcript::new(false);
         let input = Input::new();
@@ -673,6 +762,7 @@ line 12",
                 input: &input,
                 status: &status,
                 approval: Some("approve bash? [y]es / [a]lways / [N]o"),
+                progress: None,
             },
         );
         assert_eq!(lines[1].trim_end(), "approve bash? [y]es / [a]lways / [N]o");

@@ -33,7 +33,9 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::Instant;
 
+use crate::cards::{Card, Outcome};
 use crate::markdown::{self, Face, Seam, Target};
 use crate::wrap::row_starts;
 
@@ -59,7 +61,7 @@ pub enum Kind {
     Text,
     /// One reasoning summary segment, streamed, dim.
     Reasoning,
-    /// One tool call: its status line, updated in place.
+    /// One tool call: its card, updated in place.
     Tool,
     /// Interface message, dim: usage, session notes, previews,
     /// approval echoes.
@@ -114,6 +116,9 @@ pub struct Block {
     /// The block was cut at the byte cap inside a fence that the next
     /// block continues.
     cut: bool,
+    /// A tool call: the text is the card's render, refreshed at the
+    /// next sync after the card changes.
+    card: Option<Box<Card>>,
     layout: Layout,
 }
 
@@ -125,8 +130,21 @@ impl Block {
             markdown,
             carry,
             cut: false,
+            card: None,
             layout: Layout::default(),
         }
+    }
+
+    /// A tool card. The text renders at the first sync.
+    fn card(card: Card) -> Self {
+        Self {
+            card: Some(Box::new(card)),
+            ..Self::new(Kind::Tool, String::new(), false, None)
+        }
+    }
+
+    fn card_mut(&mut self) -> Option<&mut Card> {
+        self.card.as_deref_mut()
     }
 
     /// Close a block the byte cap cut: when the cut landed inside a
@@ -162,6 +180,14 @@ impl Block {
     /// width, where a row count means nothing.
     pub(crate) fn sync(&mut self, width: u16) -> isize {
         debug_assert!(width > 0, "zero width is the never-laid-out mark");
+        if let Some(card) = &mut self.card
+            && card.stale
+        {
+            card.render(&mut self.text);
+            self.text.truncate(cap_boundary(&self.text));
+            card.stale = false;
+            self.relayout_whole();
+        }
         if self.layout.width != width {
             let first = !self.laid();
             self.layout.width = width;
@@ -179,9 +205,19 @@ impl Block {
             self.layout.rows.truncate(self.layout.stable);
             let tail = self.layout.tail;
             self.lay_out_from(tail);
+            self.card_faces();
             self.layout.dirty = false;
         }
         row_delta(before, self.rows())
+    }
+
+    /// The faces of a card over its plain rows. Any other plain
+    /// block has none.
+    fn card_faces(&mut self) {
+        self.layout.faces.clear();
+        if let Some(card) = &self.card {
+            card.faces(self.text.len(), &mut self.layout.faces);
+        }
     }
 
     /// Lay every row out again: as markdown for a block that renders
@@ -221,6 +257,7 @@ impl Block {
         }
         layout.rendered = None;
         self.lay_out_from(0);
+        self.card_faces();
         self.layout.dirty = false;
     }
 
@@ -334,12 +371,6 @@ impl Block {
         overflow
     }
 
-    /// Replace the text whole: a tool line changing state.
-    fn set_text(&mut self, text: String) {
-        self.text = text;
-        self.relayout_whole();
-    }
-
     /// Make the next sync lay every row out again, at the same width,
     /// so it still reports the rows the block gained or lost.
     fn relayout_whole(&mut self) {
@@ -364,9 +395,14 @@ pub struct Transcript {
     dropped: usize,
     /// The kind of the last block while it still streams.
     open: Option<Kind>,
-    /// Tool call id to the absolute index of its block and the tool
-    /// name, kept so an unanswered call can close as interrupted.
-    tools: HashMap<String, (usize, String)>,
+    /// Tool call id to the absolute index of its card, kept so an
+    /// unanswered call can close as interrupted.
+    tools: HashMap<String, usize>,
+    /// The call between its dispatch and its result: the one an
+    /// approval question is about.
+    running: Option<String>,
+    /// Cards show their kept output whole. New cards follow.
+    expanded: bool,
     /// Rows between the viewport bottom and the transcript end. The
     /// renderer clamps it against the rows that exist.
     scroll: usize,
@@ -385,6 +421,8 @@ impl Transcript {
             dropped: 0,
             open: None,
             tools: HashMap::new(),
+            running: None,
+            expanded: false,
             scroll: 0,
             width: 0,
             frame_end: 0,
@@ -433,47 +471,119 @@ impl Transcript {
         self.push_blocks(kind, &clean, None);
     }
 
-    /// One status block for a started tool call, updatable by id.
+    /// One card for a started tool call, updatable by id.
     pub fn tool_start(&mut self, id: &str, name: &str) {
-        // The name is model-controlled: one line, inside the cap, as
-        // every tool-line write.
-        self.push_line(Kind::Tool, &tool_text(&format!("· {name} …")));
+        self.open = None;
+        self.push_block(Block::card(Card::new(name, self.expanded)));
         let index = self.dropped + self.blocks.len() - 1;
-        self.tools.insert(id.to_string(), (index, name.to_string()));
+        self.tools.insert(id.to_string(), index);
     }
 
-    /// Rewrite the call's block in place. When the block already fell
-    /// off the cap, append instead.
-    pub fn tool_end(&mut self, id: &str, summary: &str, is_error: bool) {
-        let mark = if is_error { "✗" } else { "·" };
-        let text = tool_text(&format!("{mark} {summary}"));
-        match self
-            .tools
-            .remove(id)
-            .and_then(|(index, _)| index.checked_sub(self.dropped))
+    /// The call dispatches at `at`: the card's duration counts from
+    /// here, and an approval question that follows is about it.
+    pub fn tool_run(&mut self, id: &str, at: Instant) {
+        if let Some(card) = self.card_mut(id) {
+            card.run(at);
+        }
+        self.running = Some(id.to_string());
+    }
+
+    /// The driver's preview of a call goes onto its card. A call
+    /// without a card — one that fell off the cap — shows it as a
+    /// notice, so nothing runs unseen.
+    pub fn tool_preview(&mut self, id: &str, preview: &str) {
+        match self.card_mut(id) {
+            Some(card) => card.set_preview(preview),
+            None => self.push_line(Kind::Notice, preview),
+        }
+    }
+
+    /// The approval question is up for the running call. Returns
+    /// false when no card can show it.
+    pub fn tool_pending(&mut self, preview: Option<&str>) -> bool {
+        let Some(id) = self.running.clone() else {
+            return false;
+        };
+        match self.card_mut(&id) {
+            Some(card) => {
+                card.pending(preview);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The question about the running call is answered.
+    pub fn tool_answered(&mut self, declined: bool) {
+        if let Some(id) = self.running.clone()
+            && let Some(card) = self.card_mut(&id)
         {
-            Some(offset) if offset < self.blocks.len() => self.blocks[offset].set_text(text),
-            _ => self.push_line(Kind::Tool, &text),
+            card.answered(declined);
+        }
+    }
+
+    /// The call returned: its card ends in place. When the card
+    /// already fell off the cap, a fresh one appends.
+    pub fn tool_end(&mut self, id: &str, name: &str, outcome: Outcome<'_>) {
+        if self.running.as_deref() == Some(id) {
+            self.running = None;
+        }
+        let card = self.card_mut(id);
+        let found = card.is_some();
+        match card {
+            Some(card) => card.end(outcome),
+            None => {
+                let mut card = Card::new(name, self.expanded);
+                card.end(outcome);
+                self.open = None;
+                self.push_block(Block::card(card));
+            }
+        }
+        if found {
+            self.tools.remove(id);
         }
     }
 
     /// End-of-turn cleanup: close any block that still streams, and
     /// mark every unanswered call as interrupted — an aborted turn
-    /// must not leave a pending line that reads like an applied
-    /// change. The marker claims interruption, not absence: a
-    /// dropped turn can cut an approved call mid-run, so whether the
-    /// call changed anything is unknown here.
+    /// must not leave a running card that reads like an applied
+    /// change. The state claims interruption, not absence: a dropped
+    /// turn can cut an approved call mid-run, so whether the call
+    /// changed anything is unknown here.
     pub fn close(&mut self) {
         self.open = None;
-        for (index, name) in self.tools.values() {
+        self.running = None;
+        let tools = std::mem::take(&mut self.tools);
+        for index in tools.into_values() {
             if let Some(offset) = index.checked_sub(self.dropped)
-                && offset < self.blocks.len()
+                && let Some(card) = self.blocks.get_mut(offset).and_then(Block::card_mut)
             {
-                let text = tool_text(&format!("✗ {name}: interrupted"));
-                self.blocks[offset].set_text(text);
+                card.interrupt();
             }
         }
-        self.tools.clear();
+    }
+
+    /// Whether the cards show their kept output whole.
+    pub fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Show every card's kept output whole, or the tail again. Each
+    /// card renders again at its next sync, so the cost lands on the
+    /// cards a frame shows.
+    pub fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+        for block in &mut self.blocks {
+            if let Some(card) = block.card_mut() {
+                card.set_expanded(expanded);
+            }
+        }
+    }
+
+    /// The card of an open call, when its block is still held.
+    fn card_mut(&mut self, id: &str) -> Option<&mut Card> {
+        let offset = self.tools.get(id)?.checked_sub(self.dropped)?;
+        self.blocks.get_mut(offset)?.card_mut()
     }
 
     /// Rows between the viewport bottom and the end. Zero is follow
@@ -561,26 +671,22 @@ impl Transcript {
             } else {
                 block.cut_at_cap()
             };
-            self.blocks.push_back(block);
-            while self.blocks.len() > MAX_BLOCKS {
-                self.blocks.pop_front();
-                self.dropped += 1;
-            }
+            self.push_block(block);
             if tail.is_empty() {
                 break;
             }
             rest = tail;
         }
     }
-}
 
-/// A tool status line: sanitized, on one line, inside the cap.
-fn tool_text(raw: &str) -> String {
-    let mut text = String::new();
-    push_sanitized(&mut text, raw);
-    let mut text = text.replace('\n', " ");
-    text.truncate(cap_boundary(&text));
-    text
+    /// Append one block and drop the oldest past the block cap.
+    fn push_block(&mut self, block: Block) {
+        self.blocks.push_back(block);
+        while self.blocks.len() > MAX_BLOCKS {
+            self.blocks.pop_front();
+            self.dropped += 1;
+        }
+    }
 }
 
 /// The byte cap, or the last char boundary inside it.
@@ -604,7 +710,7 @@ fn split_at_cap(text: &mut String) -> Option<String> {
 
 /// Append `text` with control characters neutralized: tabs become
 /// spaces, the rest drop. An escape byte must never reach the frame.
-fn push_sanitized(out: &mut String, text: &str) {
+pub(crate) fn push_sanitized(out: &mut String, text: &str) {
     for ch in text.chars() {
         if ch == '\t' {
             out.push_str("    ");
@@ -619,8 +725,27 @@ mod tests {
     use super::*;
     use crate::wrap::wrap;
 
-    fn blocks(t: &Transcript) -> Vec<(Kind, &str)> {
+    /// Every block's kind and text, cards rendered.
+    fn blocks(t: &mut Transcript) -> Vec<(Kind, &str)> {
+        for block in t.blocks_mut() {
+            block.sync(80);
+        }
         t.blocks().map(|b| (b.kind, b.text())).collect()
+    }
+
+    /// End a call the way the loop reports it.
+    fn end(t: &mut Transcript, id: &str, name: &str, summary: &str, is_error: bool, output: &str) {
+        t.tool_end(
+            id,
+            name,
+            Outcome {
+                summary: Some(summary),
+                is_error,
+                output,
+                output_cut: false,
+                at: Instant::now(),
+            },
+        );
     }
 
     /// A transcript that shows every kind as plain text: the layout
@@ -666,7 +791,7 @@ mod tests {
         let mut t = plain();
         t.push_delta(Kind::Text, "hel");
         t.push_delta(Kind::Text, "lo\nworld");
-        assert_eq!(blocks(&t), vec![(Kind::Text, "hello\nworld")]);
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "hello\nworld")]);
         assert_eq!(rows(&mut t, 80), vec!["hello", "world"]);
     }
 
@@ -676,7 +801,7 @@ mod tests {
         t.push_delta(Kind::Reasoning, "thinking");
         t.push_delta(Kind::Text, "answer");
         assert_eq!(
-            blocks(&t),
+            blocks(&mut t),
             vec![(Kind::Reasoning, "thinking"), (Kind::Text, "answer")]
         );
     }
@@ -700,7 +825,7 @@ mod tests {
         t.push_line(Kind::Notice, "note");
         t.push_delta(Kind::Text, "med");
         assert_eq!(
-            blocks(&t),
+            blocks(&mut t),
             vec![
                 (Kind::Text, "strea"),
                 (Kind::Notice, "note"),
@@ -789,47 +914,102 @@ mod tests {
         assert!(!block.clean(8));
         assert_eq!(block.sync(8), 2);
         assert_eq!(block.sync(8), 0);
-        // A rewrite to fewer rows reports the loss.
-        block.set_text("ok".into());
-        assert_eq!(block.sync(8), -2);
+        // A card that collapses reports the rows it lost.
+        let mut t = plain();
+        t.set_expanded(true);
+        t.tool_start("c1", "bash");
+        end(&mut t, "c1", "bash", "ok", false, "1\n2\n3\n4\n5\n6\n7\n8");
+        let block = t.blocks_mut().next_back().unwrap();
+        assert_eq!(block.sync(80), 10);
+        t.set_expanded(false);
+        let block = t.blocks_mut().next_back().unwrap();
+        assert_eq!(block.sync(80), -3);
     }
 
     #[test]
-    fn tool_blocks_update_in_place() {
+    fn a_card_updates_in_place_and_reads_as_a_card() {
         let mut t = plain();
         t.tool_start("call_1", "bash");
         t.push_delta(Kind::Text, "meanwhile");
-        t.tool_end("call_1", "bash: ok", false);
         assert_eq!(
-            blocks(&t),
-            vec![(Kind::Tool, "· bash: ok"), (Kind::Text, "meanwhile")]
+            blocks(&mut t),
+            vec![(Kind::Tool, "· bash"), (Kind::Text, "meanwhile")]
+        );
+        let start = Instant::now();
+        t.tool_run("call_1", start);
+        t.tool_preview("call_1", "$ cargo test");
+        t.tool_end(
+            "call_1",
+            "bash",
+            Outcome {
+                summary: Some("$ cargo test (exit 0)"),
+                is_error: false,
+                output: "ok\n",
+                output_cut: false,
+                at: start + std::time::Duration::from_millis(250),
+            },
+        );
+        assert_eq!(
+            blocks(&mut t),
+            vec![
+                (
+                    Kind::Tool,
+                    "✓ bash $ cargo test\n  ok\n  250ms · $ cargo test (exit 0)"
+                ),
+                (Kind::Text, "meanwhile"),
+            ]
+        );
+        // The header is strong, the output dim, the footer plain.
+        let spans = spans(&mut t, 80);
+        assert_eq!(
+            spans[0],
+            vec![(Face::STRONG, "✓ bash $ cargo test".to_string())]
+        );
+        assert_eq!(spans[1], vec![(Face::MARKER, "  ok".to_string())]);
+        assert_eq!(spans[2][0].0, Face::PLAIN);
+    }
+
+    #[test]
+    fn a_failed_call_gets_the_error_mark_and_its_output() {
+        let mut t = plain();
+        t.tool_start("call_1", "edit");
+        end(
+            &mut t,
+            "call_1",
+            "edit",
+            "stale tag",
+            true,
+            "the tag is stale",
+        );
+        assert_eq!(
+            blocks(&mut t),
+            vec![(Kind::Tool, "✗ edit\n  the tag is stale\n  stale tag")]
         );
     }
 
     #[test]
-    fn a_failed_tool_block_gets_the_error_mark() {
+    fn an_unknown_call_id_appends_a_card_instead() {
         let mut t = plain();
-        t.tool_start("call_1", "edit");
-        t.tool_end("call_1", "stale tag", true);
-        assert_eq!(blocks(&t), vec![(Kind::Tool, "✗ stale tag")]);
+        end(&mut t, "ghost", "bash", "late result", false, "");
+        assert_eq!(blocks(&mut t), vec![(Kind::Tool, "✓ bash\n  late result")]);
     }
 
     #[test]
-    fn an_unknown_call_id_appends_instead() {
-        let mut t = plain();
-        t.tool_end("ghost", "late result", false);
-        assert_eq!(blocks(&t), vec![(Kind::Tool, "· late result")]);
-    }
-
-    #[test]
-    fn a_tool_update_lays_its_rows_out_again() {
+    fn a_card_update_lays_its_rows_out_again() {
         let mut t = plain();
         t.tool_start("call_1", "bash");
-        assert_eq!(rows(&mut t, 80), vec!["· bash …"]);
-        t.tool_end("call_1", "bash: exit 0 after a long summary", false);
+        assert_eq!(rows(&mut t, 80), vec!["· bash"]);
+        end(
+            &mut t,
+            "call_1",
+            "bash",
+            "exit 0 after a long summary",
+            false,
+            "",
+        );
         assert_eq!(
             rows(&mut t, 12),
-            vec!["· bash: ", "exit 0 ", "after a ", "long summary"]
+            vec!["✓ bash", "  exit 0 ", "after a ", "long summary"]
         );
     }
 
@@ -840,11 +1020,14 @@ mod tests {
         for i in 0..MAX_BLOCKS {
             t.push_line(Kind::Text, &format!("line {i}"));
         }
-        // The status block fell off the front; the update appends.
-        t.tool_end("call_1", "bash: ok", false);
+        // The card fell off the front: the preview shows as a notice
+        // and the result appends a fresh card.
+        t.tool_preview("call_1", "$ ls");
+        end(&mut t, "call_1", "bash", "bash: ok", false, "");
         assert_eq!(t.blocks().len(), MAX_BLOCKS);
-        let last = t.blocks().last().unwrap();
-        assert_eq!(last.text(), "· bash: ok");
+        let all = blocks(&mut t);
+        assert_eq!(all[all.len() - 2], (Kind::Notice, "$ ls"));
+        assert_eq!(all[all.len() - 1], (Kind::Tool, "✓ bash\n  bash: ok"));
     }
 
     #[test]
@@ -908,47 +1091,134 @@ mod tests {
     fn close_marks_unanswered_calls_as_interrupted_and_forgets_them() {
         let mut t = plain();
         t.tool_start("call_1", "bash");
+        t.tool_run("call_1", Instant::now());
         t.close();
-        // The pending block claims interruption, never absence: the
-        // call may have run partway before the turn dropped.
-        assert_eq!(blocks(&t), vec![(Kind::Tool, "✗ bash: interrupted")]);
+        // The card claims interruption, never absence: the call may
+        // have run partway before the turn dropped.
+        assert_eq!(blocks(&mut t), vec![(Kind::Tool, "✗ bash\n  interrupted")]);
         // A late end for a forgotten id appends; it rewrites nothing.
-        t.tool_end("call_1", "late", false);
+        end(&mut t, "call_1", "bash", "late", false, "");
         assert_eq!(t.blocks().len(), 2);
+        // The question of a forgotten call finds no card.
+        assert!(!t.tool_pending(None));
     }
 
     #[test]
-    fn tool_lines_sanitize_a_hostile_tool_name_on_every_path() {
+    fn cards_sanitize_a_hostile_tool_name_on_every_path() {
         let mut t = plain();
         t.tool_start("call_1", "ba\x1b[2Jsh\nSECOND");
-        assert_eq!(rows(&mut t, 80), vec!["· ba[2Jsh SECOND …"]);
+        assert_eq!(rows(&mut t, 80), vec!["· ba[2Jsh SECOND"]);
         t.close();
-        let last = t.blocks().last().unwrap();
-        assert_eq!(last.text(), "✗ ba[2Jsh SECOND: interrupted");
+        assert_eq!(rows(&mut t, 80), vec!["✗ ba[2Jsh SECOND", "  interrupted"]);
         // A name past the cap stays one block, so the update finds it.
         let mut t = plain();
         t.tool_start("call_2", &"n".repeat(2 * MAX_BLOCK_BYTES));
-        t.tool_end("call_2", "ok", false);
-        assert_eq!(blocks(&t), vec![(Kind::Tool, "· ok")]);
+        end(&mut t, "call_2", "n", "ok", false, "");
+        let all = blocks(&mut t);
+        assert_eq!(all.len(), 1);
+        assert!(all[0].1.ends_with("\n  ok"));
+        assert!(all[0].1.len() < 1024);
     }
 
     #[test]
     fn close_leaves_answered_calls_alone() {
         let mut t = plain();
         t.tool_start("call_1", "bash");
-        t.tool_end("call_1", "bash: ok", false);
+        end(&mut t, "call_1", "bash", "bash: ok", false, "");
         t.close();
-        assert_eq!(blocks(&t), vec![(Kind::Tool, "· bash: ok")]);
+        assert_eq!(blocks(&mut t), vec![(Kind::Tool, "✓ bash\n  bash: ok")]);
+    }
+
+    #[test]
+    fn the_question_lands_on_the_running_card_and_the_answer_settles_it() {
+        let mut t = plain();
+        t.tool_start("c1", "bash");
+        t.tool_start("c2", "read");
+        t.tool_run("c1", Instant::now());
+        t.tool_preview("c1", "$ rm -r x");
+        assert!(t.tool_pending(None));
+        assert_eq!(rows(&mut t, 80), vec!["? bash $ rm -r x", "· read"]);
+        t.tool_answered(true);
+        end(
+            &mut t,
+            "c1",
+            "bash",
+            "",
+            true,
+            "the user declined the bash call",
+        );
+        assert_eq!(
+            rows(&mut t, 80),
+            vec!["⊘ bash $ rm -r x", "  declined", "· read"]
+        );
+        // A call without a dispatch preview shows the question's.
+        t.tool_run("c2", Instant::now());
+        assert!(t.tool_pending(Some("{\n  \"path\": \"f\"\n}")));
+        t.tool_answered(false);
+        end(&mut t, "c2", "read", "read f", false, "1:x");
+        assert_eq!(
+            rows(&mut t, 80)[2..],
+            [
+                "✓ read",
+                "  {",
+                "    \"path\": \"f\"",
+                "  }",
+                "  1:x",
+                "  0ms · read f"
+            ]
+        );
+        // No running call: the question has no card.
+        assert!(!t.tool_pending(Some("x")));
+    }
+
+    #[test]
+    fn expanding_shows_the_kept_output_and_new_cards_follow() {
+        let mut t = plain();
+        let output: String = (1..=7).map(|i| format!("{i}\n")).collect();
+        t.tool_start("c1", "bash");
+        end(&mut t, "c1", "bash", "ok", false, &output);
+        let collapsed = rows(&mut t, 80);
+        assert_eq!(collapsed.len(), 7);
+        assert_eq!(collapsed[1], "  3");
+        assert!(collapsed[6].ends_with("2 more lines · Ctrl-O"));
+        assert!(!t.expanded());
+        t.set_expanded(true);
+        let expanded = rows(&mut t, 80);
+        assert_eq!(expanded.len(), 9);
+        assert_eq!(expanded[1], "  1");
+        assert_eq!(expanded[8], "  ok");
+        // A card that starts while expanded renders expanded.
+        t.tool_start("c2", "bash");
+        end(&mut t, "c2", "bash", "ok", false, &output);
+        assert_eq!(rows(&mut t, 80).len(), 18);
+        t.set_expanded(false);
+        assert_eq!(rows(&mut t, 80).len(), 14);
+    }
+
+    #[test]
+    fn a_card_renders_at_its_sync_not_at_its_change() {
+        // The toggle marks every card and renders none: the cost
+        // lands on the cards a frame shows.
+        let mut t = plain();
+        t.tool_start("c1", "bash");
+        end(&mut t, "c1", "bash", "ok", false, "out");
+        let block = t.blocks().next().unwrap();
+        assert!(block.text().is_empty());
+        assert_eq!(rows(&mut t, 80), vec!["✓ bash", "  out", "  ok"]);
+        t.set_expanded(true);
+        let block = t.blocks().next().unwrap();
+        assert!(block.card.as_ref().unwrap().stale);
+        assert_eq!(block.rows(), 3);
     }
 
     #[test]
     fn control_characters_never_reach_a_block() {
         let mut t = plain();
         t.push_delta(Kind::Text, "a\x1b[31mred\tdone\r");
-        assert_eq!(blocks(&t), vec![(Kind::Text, "a[31mred    done")]);
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "a[31mred    done")]);
         let mut t = plain();
         t.push_line(Kind::Notice, "a\x1b[31mred\tdone\r");
-        assert_eq!(blocks(&t), vec![(Kind::Notice, "a[31mred    done")]);
+        assert_eq!(blocks(&mut t), vec![(Kind::Notice, "a[31mred    done")]);
     }
 
     #[test]
@@ -986,30 +1256,32 @@ mod tests {
         t.push_line(Kind::Notice, "note");
         frame(&mut t, 40, 10);
         t.scroll_up(2);
-        t.tool_end(
+        end(
+            &mut t,
             "c1",
+            "bash",
             "a much longer summary that certainly wraps across three rows of a forty column pane",
             false,
+            "",
         );
         frame(&mut t, 40, 10);
-        assert_eq!(t.scroll(), 4);
+        assert_eq!(t.scroll(), 5);
 
         // A block that shrinks reports the loss.
         let mut t = plain();
         for i in 0..20 {
             t.push_line(Kind::Text, &format!("line {i:02}"));
         }
-        t.tool_start(
-            "c1",
-            "a tool name so long that its pending line wraps to three rows in a narrow pane",
-        );
+        t.set_expanded(true);
+        t.tool_start("c1", "bash");
+        end(&mut t, "c1", "bash", "ok", false, "1\n2\n3\n4\n5\n6\n7\n8");
         t.push_delta(Kind::Text, "streaming");
         frame(&mut t, 40, 10);
         t.scroll_up(3);
-        t.tool_end("c1", "ok", false);
+        t.set_expanded(false);
         t.push_delta(Kind::Text, " more");
         frame(&mut t, 40, 10);
-        assert_eq!(t.scroll(), 1);
+        assert_eq!(t.scroll(), 0);
     }
 
     #[test]
@@ -1032,10 +1304,13 @@ mod tests {
         assert_eq!(t.scroll(), 20);
         // A rewrite above the viewport changes nothing; an arrival
         // below it counts.
-        t.tool_end(
+        end(
+            &mut t,
             "c1",
+            "bash",
             "a long summary that wraps to more rows than the pending line had, well above",
             false,
+            "",
         );
         t.push_line(Kind::Text, "arrived");
         t.begin_frame(40, 4);

@@ -68,6 +68,7 @@ impl Screen {
                         input,
                         status,
                         approval: None,
+                        progress: None,
                     },
                 );
             })

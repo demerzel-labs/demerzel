@@ -8,7 +8,12 @@
 //!
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel, PageUp, and PageDown browse; End and a submitted line return
-//! to the bottom.
+//! to the bottom. Ctrl-O expands every tool card to its kept output
+//! and collapses them again.
+//!
+//! While a turn runs, a progress line above the input shows a
+//! spinner, the elapsed time, and the phase. A tick timer wakes the
+//! loop for it during the turn only; at idle nothing wakes.
 
 use std::future::poll_fn;
 use std::io;
@@ -22,6 +27,7 @@ use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
+use crate::cards::{self, Outcome};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::input::Input;
@@ -38,6 +44,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Rows one wheel notch scrolls.
 const WHEEL_ROWS: usize = 3;
 
+/// Span between two progress-line ticks during a turn: the spinner's
+/// frame rate.
+const TICK: Duration = Duration::from_millis(100);
+
 /// What a handled key asks the loop to do.
 enum Action {
     None,
@@ -51,6 +61,31 @@ enum Action {
 enum Phase {
     Idle,
     Turn,
+}
+
+/// What the running turn is doing, for the progress line.
+enum Stage {
+    Thinking,
+    Writing,
+    /// A tool runs, by name.
+    Tool(String),
+}
+
+/// The progress line's state: the turn's start and its stage.
+struct Progress {
+    started: Instant,
+    stage: Stage,
+}
+
+impl Progress {
+    fn text(&self) -> String {
+        let phase = match &self.stage {
+            Stage::Thinking => "thinking",
+            Stage::Writing => "writing",
+            Stage::Tool(name) => name.as_str(),
+        };
+        cards::progress_text(self.started.elapsed(), phase)
+    }
 }
 
 /// The input row is either the editor or an approval question.
@@ -100,6 +135,8 @@ struct App {
     history: History,
     status: Status,
     mode: Mode,
+    /// Set while a turn runs.
+    progress: Option<Progress>,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
     display_tx: mpsc::UnboundedSender<DisplayEvent>,
@@ -140,6 +177,7 @@ impl App {
                 cached_tokens: 0,
             },
             mode: Mode::Edit,
+            progress: None,
             keys,
             displays,
             display_tx,
@@ -208,6 +246,12 @@ impl App {
         // turns may still be queued; drop it instead of aborting this
         // turn with it.
         drain_signal(&mut self.sigint).await;
+        self.progress = Some(Progress {
+            started: Instant::now(),
+            stage: Stage::Thinking,
+        });
+        self.dirty = true;
+        let mut tick = Instant::now() + TICK;
         let mut aborted = false;
         loop {
             enum Wake {
@@ -217,6 +261,7 @@ impl App {
                 Display(Option<DisplayEvent>),
                 Approval(Option<ApprovalRequest>),
                 Frame,
+                Tick,
             }
             let wake = tokio::select! {
                 _ = &mut turn => Wake::Done,
@@ -225,10 +270,18 @@ impl App {
                 event = self.displays.recv() => Wake::Display(event),
                 request = self.approvals.recv() => Wake::Approval(request),
                 _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => Wake::Frame,
+                _ = tokio::time::sleep_until(tick) => Wake::Tick,
             };
             let action = match wake {
                 Wake::Done => break,
                 Wake::Frame => Action::None,
+                Wake::Tick => {
+                    // From now, not from the last tick: a loop that
+                    // fell behind must not fire a burst to catch up.
+                    tick = Instant::now() + TICK;
+                    self.dirty = true;
+                    Action::None
+                }
                 Wake::Key(Some(event)) => self.terminal_event(event, Phase::Turn),
                 Wake::Key(None) | Wake::Signal => self.ctrl_c(Phase::Turn),
                 // The loop holds senders for both channels, so `None`
@@ -259,6 +312,7 @@ impl App {
         // turn as a dead prompt.
         while self.approvals.try_recv().is_ok() {}
         self.mode = Mode::Edit;
+        self.progress = None;
         // Apply what the turn streamed before the notice, so an
         // aborted line does not split around it.
         self.drain_displays();
@@ -281,19 +335,46 @@ impl App {
 
     fn display(&mut self, event: DisplayEvent) {
         match event {
-            DisplayEvent::TextDelta(delta) => self.transcript.push_delta(Kind::Text, &delta),
-            DisplayEvent::ReasoningDelta(delta) => {
-                self.transcript.push_delta(Kind::Reasoning, &delta)
+            DisplayEvent::TextDelta(delta) => {
+                self.transcript.push_delta(Kind::Text, &delta);
+                self.stage(Stage::Writing);
             }
-            DisplayEvent::ToolStart { id, name } => self.transcript.tool_start(&id, &name),
+            DisplayEvent::ReasoningDelta(delta) => {
+                self.transcript.push_delta(Kind::Reasoning, &delta);
+                self.stage(Stage::Thinking);
+            }
+            DisplayEvent::ToolStart { id, name } => {
+                self.transcript.tool_start(&id, &name);
+                self.stage(Stage::Writing);
+            }
+            DisplayEvent::ToolRun { id, name, at } => {
+                self.transcript.tool_run(&id, at);
+                // The name is model-controlled: one clean line for
+                // the progress row.
+                self.stage(Stage::Tool(cards::one_line(&name, 80)));
+            }
+            DisplayEvent::ToolPreview { id, text } => self.transcript.tool_preview(&id, &text),
             DisplayEvent::ToolEnd {
                 id,
                 name,
                 summary,
                 is_error,
+                output,
+                output_cut,
+                at,
             } => {
-                let summary = summary.unwrap_or(name);
-                self.transcript.tool_end(&id, &summary, is_error);
+                self.transcript.tool_end(
+                    &id,
+                    &name,
+                    Outcome {
+                        summary: summary.as_deref(),
+                        is_error,
+                        output: &output,
+                        output_cut,
+                        at,
+                    },
+                );
+                self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
                 self.status.input_tokens += usage.input_tokens;
@@ -321,10 +402,22 @@ impl App {
         }
     }
 
+    /// The progress line's stage, while a turn runs.
+    fn stage(&mut self, stage: Stage) {
+        if let Some(progress) = &mut self.progress {
+            progress.stage = stage;
+        }
+    }
+
     fn show_approval(&mut self, request: ApprovalRequest) {
-        // A call whose preview the transcript already carries — the
-        // driver passes `None` — gets only the question row.
-        if let Some(preview) = &request.preview {
+        // The running call's card shows that it waits, with the
+        // question's preview when the card has none. Without a card
+        // — a driver that asks outside a dispatch — the preview shows
+        // as a notice, so nothing is approved blind.
+        let preview = request.preview.as_deref();
+        if !self.transcript.tool_pending(preview)
+            && let Some(preview) = preview
+        {
             self.transcript
                 .push_line(Kind::Notice, &format!("{} wants to run:", request.tool));
             self.transcript.push_line(Kind::Notice, preview);
@@ -387,6 +480,11 @@ impl App {
             // bottom it is the cursor key, with Ctrl-E as the twin.
             KeyCode::End if self.transcript.browsing() => {
                 self.transcript.follow();
+                return Action::None;
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let expanded = !self.transcript.expanded();
+                self.transcript.set_expanded(expanded);
                 return Action::None;
             }
             _ => {}
@@ -460,6 +558,10 @@ impl App {
         let Mode::Approval { tool, reply } = std::mem::replace(&mut self.mode, Mode::Edit) else {
             unreachable!("approval_key runs only in approval mode");
         };
+        self.transcript.tool_answered(matches!(
+            answer,
+            ApprovalAnswer::Deny | ApprovalAnswer::Abort
+        ));
         let word = match answer {
             ApprovalAnswer::Allow => "yes",
             ApprovalAnswer::AllowForSession => "always",
@@ -495,6 +597,7 @@ impl App {
             Mode::Edit => None,
             Mode::Approval { tool, .. } => Some(format!("approve {tool}? [y]es / [a]lways / [N]o")),
         };
+        let progress = self.progress.as_ref().map(Progress::text);
         let Self {
             guard,
             transcript,
@@ -511,6 +614,7 @@ impl App {
                     input,
                     status,
                     approval: question.as_deref(),
+                    progress: progress.as_deref(),
                 },
             );
         })?;

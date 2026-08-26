@@ -8,6 +8,9 @@
 //!
 //! - The driver receives an [`EventSender`] to use as the engine's
 //!   event sink, and an [`ApprovalChannel`] to ask questions through.
+//!   The driver renders each dispatching call's preview and sends it
+//!   with [`EventSender::tool_preview`]; the interface shows it on
+//!   the call's card.
 //! - The interface loop draws what arrives and answers approval
 //!   questions at the keyboard.
 //! - Dropping the returned turn future aborts the turn; the loop does
@@ -16,6 +19,7 @@
 mod app;
 #[doc(hidden)]
 pub mod bench;
+mod cards;
 mod events;
 mod highlight;
 mod history;

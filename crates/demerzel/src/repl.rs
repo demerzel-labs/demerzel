@@ -286,6 +286,7 @@ impl EventSink for Renderer {
                 name,
                 summary,
                 is_error,
+                ..
             } => {
                 self.pending_calls
                     .lock()
