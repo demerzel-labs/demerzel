@@ -212,11 +212,14 @@ impl Card {
         self.stale = true;
     }
 
-    /// The question is answered.
-    pub fn answered(&mut self, declined: bool) {
+    /// The question is answered at `at`. An approved call runs from
+    /// here, so its duration counts from the answer, not from the
+    /// question.
+    pub fn answered(&mut self, declined: bool, at: Instant) {
         self.state = if declined {
             State::Declined
         } else {
+            self.started = Some(at);
             State::Running
         };
         self.stale = true;
@@ -698,7 +701,7 @@ mod tests {
         card.run(Instant::now());
         card.pending(None);
         assert_eq!(text(&mut card), "? bash $ rm -r x");
-        card.answered(true);
+        card.answered(true, Instant::now());
         assert_eq!(text(&mut card), "⊘ bash $ rm -r x\n  declined");
         // The result of a declined call changes nothing: the refusal
         // is the result.
@@ -713,7 +716,7 @@ mod tests {
         let mut card = Card::new("bash", false);
         card.pending(Some("{\n  \"cmd\": \"x\"\n}"));
         assert_eq!(text(&mut card), "? bash\n  {\n    \"cmd\": \"x\"\n  }");
-        card.answered(false);
+        card.answered(false, Instant::now());
         assert_eq!(text(&mut card), "· bash\n  {\n    \"cmd\": \"x\"\n  }");
         finish(&mut card, "boom", true);
         assert_eq!(
@@ -724,6 +727,18 @@ mod tests {
         let mut card = Card::new("bash", false);
         card.interrupt();
         assert_eq!(text(&mut card), "✗ bash\n  interrupted");
+    }
+
+    #[test]
+    fn an_approved_call_counts_its_duration_from_the_answer() {
+        let start = Instant::now();
+        let mut card = Card::new("bash", false);
+        card.run(start);
+        card.pending(None);
+        // The user takes ten seconds; the tool takes one.
+        card.answered(false, start + Duration::from_secs(10));
+        card.end(outcome(None, false, "", start + Duration::from_secs(11)));
+        assert_eq!(text(&mut card), "✓ bash\n  1.0s · done");
     }
 
     #[test]

@@ -580,10 +580,10 @@ impl App {
         else {
             unreachable!("approval_key runs only in approval mode");
         };
-        self.transcript.tool_answered(matches!(
-            answer,
-            ApprovalAnswer::Deny | ApprovalAnswer::Abort
-        ));
+        self.transcript.tool_answered(
+            matches!(answer, ApprovalAnswer::Deny | ApprovalAnswer::Abort),
+            std::time::Instant::now(),
+        );
         let word = match answer {
             ApprovalAnswer::Allow => "yes",
             ApprovalAnswer::AllowForSession => "always",

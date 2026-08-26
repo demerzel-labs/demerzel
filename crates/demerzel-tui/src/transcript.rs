@@ -519,10 +519,10 @@ impl Transcript {
         }
     }
 
-    /// The question about the running call is answered.
-    pub fn tool_answered(&mut self, declined: bool) {
+    /// The question about the running call is answered at `at`.
+    pub fn tool_answered(&mut self, declined: bool, at: Instant) {
         if let Some(card) = self.running.and_then(|index| self.card_at(index)) {
-            card.answered(declined);
+            card.answered(declined, at);
         }
     }
 
@@ -1141,7 +1141,7 @@ mod tests {
         assert!(!t.tool_pending("read", None));
         assert!(t.tool_pending("bash", None));
         assert_eq!(rows(&mut t, 80), vec!["? bash $ rm -r x", "· read"]);
-        t.tool_answered(true);
+        t.tool_answered(true, Instant::now());
         end(
             &mut t,
             "c1",
@@ -1157,7 +1157,7 @@ mod tests {
         // A call without a dispatch preview shows the question's.
         t.tool_run("c2", Instant::now());
         assert!(t.tool_pending("read", Some("{\n  \"path\": \"f\"\n}")));
-        t.tool_answered(false);
+        t.tool_answered(false, Instant::now());
         end(&mut t, "c2", "read", "read f", false, "1:x");
         assert_eq!(
             rows(&mut t, 80)[2..],
