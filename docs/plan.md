@@ -127,17 +127,40 @@ translate. No adapter is privileged.
   the first API-key credential path (Anthropic supports no subscription
   OAuth for third-party tools). The provider trait is written in M1 with
   this adapter in mind so wiring it is mechanical, not architectural.
-- **Post-M5: the local-model track** — `openai-compat` returns as phase 1
-  (Chat Completions against a configurable base URL — Ollama, vLLM,
-  LM Studio, llama.cpp, and most gateways; the widest door for an
-  open-source audience), then a managed local engine. See the post-M5
-  milestone.
-- Later, by demand: Gemini, Bedrock.
+- **M3: `openai-compat`** — Chat Completions against a configurable base
+  URL. This is the door for every vendor and gateway that speaks the
+  format: xAI, Gemini's compatible endpoint, DeepSeek, OpenRouter,
+  Ollama, vLLM, LM Studio, llama.cpp. A new vendor is a `base_url`
+  and a key in config, not an adapter. Moved here from the post-M5
+  local track on 2026-08-26 (see the decisions below).
+- **Post-M5: the local-model track** — a managed local engine behind
+  the M3 adapter. See the post-M5 milestone.
+- Later, by demand, and only for what a compatible endpoint cannot
+  carry: Gemini, Bedrock.
 
 Adapters declare capabilities (tool calling, streaming, caching, usage fields);
 the harness degrades features per capability instead of assuming them. Model
 roles (`default`, `fast`, `plan`, …) map to provider+model pairs in config, with
 fallback chains — per-role routing is config, not code.
+
+Decisions from the obsolescence review of 2026-08-26. The harness must
+not go stale when a model or a vendor ships:
+
+- No model catalog in code. A model id is a string the config names
+  and the adapter sends; the server refuses an id it does not know.
+  Capability lives on the adapter, never on a model id. The only model
+  id an adapter carries is its default.
+- `openai-compat` lands in M3, first step, not post-M5. Until it
+  lands, the harness is neutral in shape but has two doors; after it,
+  a vendor with a compatible endpoint needs no code.
+- `[providers.<name>]` gains `kind`, the adapter id, so one adapter
+  serves many named instances (`[providers.xai] kind =
+  "openai-compat"`). A table without `kind` keeps today's meaning: the
+  name is the adapter id. This is config-key growth; the adapter PR
+  carries it, this plan decides it.
+- A vendor adapter exists only for what a compatible endpoint cannot
+  carry: prompt-cache control, subscription OAuth, a native tool.
+  xAI, Gemini, and Bedrock arrive through `openai-compat` first.
 
 Decisions from the alignment review of 2026-08-23 (the M2 close-out):
 
@@ -414,14 +437,16 @@ bench inside its gates.
 
 ### M3 — Ecosystem
 
-Skills, hooks, MCP client with deferred discovery, subagents with typed
+The `openai-compat` adapter with named provider instances first, then
+skills, hooks, MCP client with deferred discovery, subagents with typed
 results, competitor-config auto-discovery, project memory (store,
 tools, auto-recall), and the personality profile. At the M3 exit, the
 evaluation runner foundation: the Harbor agent adapter, versioned candidate
 and scenario manifests, the evidence-bundle serializer, artifact and
 state-oracle interfaces, and a 10–20 task private bank built from reproduced
 dogfood failures, with a 3–5 task hermetic smoke subset cheap enough for CI.
-**Verify:** a skill, a hook,
+**Verify:** a session against a
+compatible endpoint the mock server stands in for; a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
 existing `.claude`/`.cursor` config with zero edits; a fact saved in one
 session comes back in a fresh session inside the token budget; the smoke
@@ -458,12 +483,11 @@ Demerzel executable, so the <25 MB binary gate holds. "Offline" means no
 network egress by default. Telemetry stays out; any future telemetry must
 be opt-in.
 
-1. **Local provider contract.** Restore `openai-compat` for Ollama, vLLM,
-   LM Studio, and user-owned `llama-server`. `local` is an ordinary
-   provider: explicit capabilities, model identity recorded in session
-   files, the same tool schemas, approval policy, loop, and error
-   taxonomy. Add a no-egress integration test and local-provider fixtures
-   to the mock server.
+1. **Local provider contract.** A local server is an ordinary
+   `openai-compat` instance (the M3 adapter): explicit capabilities,
+   model identity recorded in session files, the same tool schemas,
+   approval policy, loop, and error taxonomy. Add a no-egress
+   integration test and local-provider fixtures to the mock server.
 2. **Managed sidecar.** `dmz --offline-model <model.gguf>`. Download a
    pinned, checksum-verified `llama.cpp` build only after explicit
    approval. Discover existing GGUF files and running servers before any
