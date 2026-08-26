@@ -23,6 +23,7 @@ use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
+pub use demerzel_tui::Thinking;
 
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
@@ -50,6 +51,7 @@ pub struct AuthPaths {
 /// Everything one run needs. `main` fills it from flags and the
 /// environment; tests fill it directly.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RunConfig {
     /// The project directory tools and sessions are scoped to.
     pub project_dir: PathBuf,
@@ -76,6 +78,8 @@ pub struct RunConfig {
     pub mouse: bool,
     /// Render model replies as markdown in the full-screen interface.
     pub markdown: bool,
+    /// How a thinking block starts in the full-screen interface.
+    pub thinking: Thinking,
 }
 
 impl RunConfig {
@@ -95,6 +99,7 @@ impl RunConfig {
             history_path: None,
             mouse: true,
             markdown: true,
+            thinking: Thinking::default(),
         }
     }
 }

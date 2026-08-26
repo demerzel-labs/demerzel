@@ -9,7 +9,8 @@
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel, PageUp, and PageDown browse; End and a submitted line return
 //! to the bottom. Ctrl-O expands every tool card to its kept output
-//! and collapses them again.
+//! and collapses them again. Ctrl-T opens the newest thinking block
+//! and closes it again.
 //!
 //! While a turn runs, a progress line above the input shows a
 //! spinner, the elapsed time, and the stage. The status bar is the
@@ -147,6 +148,12 @@ struct App {
     progress: Option<Progress>,
     /// The progress line's text, rebuilt each frame in place.
     progress_line: String,
+    /// When the last event other than reasoning text landed; see
+    /// [`thinking_clock`]. A thinking block's clock starts here, not
+    /// at its first delta: a provider can stream the summary after
+    /// the reasoning, so the first delta can come at the end of the
+    /// thought.
+    reasoning_since: std::time::Instant,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
     display_tx: mpsc::UnboundedSender<DisplayEvent>,
@@ -170,6 +177,7 @@ impl App {
         let (display_tx, displays) = mpsc::unbounded_channel();
         let (approval_tx, approvals) = mpsc::unbounded_channel();
         let mut transcript = Transcript::new(options.markdown);
+        transcript.set_thinking(options.thinking);
         if let Some(banner) = &options.banner {
             transcript.push_line(Kind::Notice, banner);
         }
@@ -189,6 +197,7 @@ impl App {
             mode: Mode::Edit,
             progress: None,
             progress_line: String::new(),
+            reasoning_since: std::time::Instant::now(),
             keys,
             displays,
             display_tx,
@@ -261,6 +270,7 @@ impl App {
             started: Instant::now(),
             stage: Stage::Thinking,
         });
+        self.reasoning_since = std::time::Instant::now();
         self.dirty = true;
         let mut tick = Instant::now() + TICK;
         let mut aborted = false;
@@ -347,15 +357,19 @@ impl App {
     }
 
     fn display(&mut self, event: DisplayEvent) {
+        if let Some(since) = thinking_clock(&event, std::time::Instant::now()) {
+            self.reasoning_since = since;
+        }
         match event {
             DisplayEvent::TextDelta(delta) => {
                 self.transcript.push_delta(Kind::Text, &delta);
                 self.stage(Stage::Writing);
             }
-            DisplayEvent::ReasoningDelta(delta) => {
-                self.transcript.push_delta(Kind::Reasoning, &delta);
+            DisplayEvent::ReasoningDelta(text) => {
+                self.transcript.reasoning_delta(&text, self.reasoning_since);
                 self.stage(Stage::Thinking);
             }
+            DisplayEvent::ReasoningEnd { at } => self.transcript.reasoning_end(at),
             DisplayEvent::ToolStart { id, name } => {
                 self.transcript.tool_start(&id, &name);
                 self.stage(Stage::Writing);
@@ -512,6 +526,10 @@ impl App {
                 self.transcript.set_expanded(expanded);
                 return Action::None;
             }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.transcript.toggle_thinking();
+                return Action::None;
+            }
             _ => {}
         }
         if matches!(self.mode, Mode::Approval { .. }) {
@@ -660,6 +678,19 @@ impl App {
     }
 }
 
+/// Where the thinking clock moves to after `event`, or `None` when
+/// it stays. Every event but reasoning text moves it: the thought
+/// began when the last other thing ended. An event that ends
+/// something — a segment, a tool call — carries that time; the rest
+/// count from `now`.
+fn thinking_clock(event: &DisplayEvent, now: std::time::Instant) -> Option<std::time::Instant> {
+    match event {
+        DisplayEvent::ReasoningDelta(_) => None,
+        DisplayEvent::ReasoningEnd { at } | DisplayEvent::ToolEnd { at, .. } => Some(*at),
+        _ => Some(now),
+    }
+}
+
 /// Discard queued signal notifications.
 async fn drain_signal(sigint: &mut Signal) {
     poll_fn(|cx| {
@@ -713,5 +744,46 @@ mod tests {
     fn paste_normalizes_line_endings_and_drops_controls() {
         assert_eq!(normalize_paste("a\r\nb\rc\nd"), "a\nb\nc\nd");
         assert_eq!(normalize_paste("x\x1b[31my\tz"), "x[31my\tz");
+    }
+
+    #[test]
+    fn the_thinking_clock_moves_at_every_event_but_reasoning_text() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let then = now - Duration::from_secs(3);
+        assert_eq!(
+            thinking_clock(&DisplayEvent::ReasoningDelta("x".into()), now),
+            None
+        );
+        // Back-to-back segments: the second counts from the first's end.
+        assert_eq!(
+            thinking_clock(&DisplayEvent::ReasoningEnd { at: then }, now),
+            Some(then)
+        );
+        assert_eq!(
+            thinking_clock(
+                &DisplayEvent::ToolEnd {
+                    id: "c".into(),
+                    name: "bash".into(),
+                    summary: None,
+                    is_error: false,
+                    output: String::new(),
+                    output_cut: false,
+                    at: then,
+                },
+                now
+            ),
+            Some(then)
+        );
+        for event in [
+            DisplayEvent::TextDelta("t".into()),
+            DisplayEvent::ToolStart {
+                id: "c".into(),
+                name: "bash".into(),
+            },
+            DisplayEvent::Notice("n".into()),
+        ] {
+            assert_eq!(thinking_clock(&event, now), Some(now));
+        }
     }
 }

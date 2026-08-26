@@ -70,6 +70,11 @@ impl EngineConfig {
 pub enum EngineEvent<'a> {
     TextDelta(&'a str),
     ReasoningDelta(&'a str),
+    /// One reasoning segment ended: the deltas since the last end, or
+    /// since the turn's start, form one block. A segment with no
+    /// deltas — a redacted one — ends too.
+    #[non_exhaustive]
+    ReasoningEnd {},
     /// The model started streaming a tool call.
     #[non_exhaustive]
     ToolStart {
@@ -627,6 +632,7 @@ async fn collect_response(
                 sink.event(EngineEvent::ReasoningDelta(&delta));
             }
             StreamEvent::ReasoningDone { summary, sealed } => {
+                sink.event(EngineEvent::ReasoningEnd {});
                 blocks.push(ContentBlock::Reasoning { summary, sealed });
             }
             StreamEvent::ToolCallStart { id, name } => {
@@ -1130,8 +1136,19 @@ mod tests {
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
-        let sink = noop_sink();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let sink = |event: EngineEvent<'_>| {
+            let name = match event {
+                EngineEvent::ReasoningDelta(_) => "delta",
+                EngineEvent::ReasoningEnd { .. } => "end",
+                EngineEvent::ToolStart { .. } => "tool",
+                _ => return,
+            };
+            seen.lock().unwrap().push(name);
+        };
         block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
+        // The end event closes the segment before the next block starts.
+        assert_eq!(seen.into_inner().unwrap(), vec!["delta", "end", "tool"]);
 
         let assistant = &engine.history()[1];
         assert_eq!(

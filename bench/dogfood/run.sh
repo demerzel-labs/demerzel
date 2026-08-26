@@ -56,6 +56,22 @@ wait_for 03-done 'dogfood-ok (exit' 120
 sleep 8
 snap 04-idle
 
+# A thinking block. The endpoint sends a summary only for harder
+# work; a one-line bash call draws none, so this asks for a design
+# comparison. The needle names the block row, not the progress line
+# (which ends after "thinking"). The live row, the closed row with
+# its duration, then Ctrl-T opens the newest block and closes it.
+send 'read docs/m2.5-plan.md, then compare the row-count browse anchor with a block anchor and recommend one in three sentences' Enter
+wait_for 04a-thinking '· thinking ·' 60
+wait_for 04b-thought 'thought for' 180
+sleep 8
+send C-t
+sleep 0.5
+snap 04c-thought-open
+send C-t
+sleep 0.5
+snap 04d-thought-closed
+
 # A tall output: the five-line tail, the expand key, browse mode.
 send 'run seq 1 40' Enter
 wait_for 05-question '[y]es'

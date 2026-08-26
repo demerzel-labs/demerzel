@@ -18,6 +18,10 @@ use crate::cards::kept_output;
 pub(crate) enum DisplayEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    /// The reasoning segment ended at `at`.
+    ReasoningEnd {
+        at: Instant,
+    },
     ToolStart {
         id: String,
         name: String,
@@ -105,6 +109,7 @@ impl EventSink for EventSender {
         let owned = match event {
             EngineEvent::TextDelta(delta) => DisplayEvent::TextDelta(delta.to_string()),
             EngineEvent::ReasoningDelta(delta) => DisplayEvent::ReasoningDelta(delta.to_string()),
+            EngineEvent::ReasoningEnd { .. } => DisplayEvent::ReasoningEnd { at: Instant::now() },
             EngineEvent::ToolStart { id, name, .. } => DisplayEvent::ToolStart {
                 id: id.to_string(),
                 name: name.to_string(),

@@ -77,6 +77,12 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         on_off(settings.tui.markdown.value),
         settings.tui.markdown.origin,
     )?;
+    print_setting(
+        out,
+        "tui.thinking",
+        settings.tui.thinking.value.as_str(),
+        settings.tui.thinking.origin,
+    )?;
     let base_url = settings
         .base_url
         .value

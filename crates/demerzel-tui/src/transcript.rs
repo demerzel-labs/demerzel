@@ -2,7 +2,9 @@
 //!
 //! A block is one unit of the session: a prompt echo, one streamed
 //! model reply segment, one reasoning segment, a tool call, a notice,
-//! or an error. Each block owns a layout cache: its styled rows at
+//! or an error. A reasoning segment and a tool call hold a thought or
+//! a card and write their text on demand, at the layout after a
+//! change. Each block owns a layout cache: its styled rows at
 //! the last width. A plain block keeps its rows as byte offsets into
 //! its text. A model reply renders as markdown into a buffer of its
 //! own, with the rows and the face changes over that buffer. The
@@ -37,6 +39,7 @@ use std::time::Instant;
 
 use crate::cards::{Card, Outcome, push_sanitized};
 use crate::markdown::{self, Face, Seam, Target};
+use crate::thinking::{SUMMARY_RESERVE, Thinking, Thought};
 use crate::wrap::row_starts;
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
@@ -50,6 +53,10 @@ pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
 /// frames, and table padding grow the rows past the source; a block
 /// whose render reaches the cap shows as plain text instead.
 const MAX_RENDER_BYTES: usize = 2 * MAX_BLOCK_BYTES;
+
+/// Bytes of summary a thinking block keeps: the block cap less the
+/// room its header and cut mark take.
+const SUMMARY_BYTES: usize = MAX_BLOCK_BYTES - SUMMARY_RESERVE;
 
 /// What a block is. Kinds map to terminal-native styles until the
 /// theme lands.
@@ -95,9 +102,13 @@ struct Layout {
     /// Text arrived since the rows were laid out.
     dirty: bool,
     /// The markdown render reached its cap at this width; the block
-    /// lays out as plain text until the width changes. The text only
-    /// grows, so a render that failed once fails again.
+    /// lays out as plain text until the width changes or the text
+    /// shrinks below `fallback_len`. A text that grew since the
+    /// failed render fails again, whether it streamed or a thought
+    /// wrote it.
     fallback: bool,
+    /// The text length the failed render ran on.
+    fallback_len: usize,
 }
 
 /// One unit of the transcript with its layout cache.
@@ -116,10 +127,24 @@ pub struct Block {
     /// The block was cut at the byte cap inside a fence that the next
     /// block continues.
     cut: bool,
-    /// A tool call: the text is the card's render, refreshed at the
-    /// next sync after the card changes.
-    card: Option<Box<Card>>,
+    body: Body,
     layout: Layout,
+}
+
+/// What a block's text comes from. A card or a thought renders into
+/// the text on demand: the block marks itself at a change and writes
+/// the text at its next sync. The body follows the kind: a `Tool`
+/// block holds a card, a `Reasoning` block a thought, every other
+/// kind its plain text.
+#[derive(Debug)]
+enum Body {
+    /// The text as it arrived.
+    Plain,
+    /// A tool call: the text is the card's render.
+    Card(Box<Card>),
+    /// A reasoning segment: the text is the thought's render, one
+    /// line closed or the summary open.
+    Thought(Box<Thought>),
 }
 
 impl Block {
@@ -130,7 +155,7 @@ impl Block {
             markdown,
             carry,
             cut: false,
-            card: None,
+            body: Body::Plain,
             layout: Layout::default(),
         }
     }
@@ -138,13 +163,33 @@ impl Block {
     /// A tool card. The text renders at the first sync.
     fn card(card: Card) -> Self {
         Self {
-            card: Some(Box::new(card)),
+            body: Body::Card(Box::new(card)),
             ..Self::new(Kind::Tool, String::new(), false, None)
         }
     }
 
     fn card_mut(&mut self) -> Option<&mut Card> {
-        self.card.as_deref_mut()
+        match &mut self.body {
+            Body::Card(card) => Some(card),
+            _ => None,
+        }
+    }
+
+    /// A thinking block. Its summary renders as markdown when the
+    /// transcript does: a reasoning summary carries the same marks
+    /// as a reply.
+    fn thought(thought: Thought, markdown: bool) -> Self {
+        Self {
+            body: Body::Thought(Box::new(thought)),
+            ..Self::new(Kind::Reasoning, String::new(), markdown, None)
+        }
+    }
+
+    fn thought_mut(&mut self) -> Option<&mut Thought> {
+        match &mut self.body {
+            Body::Thought(thought) => Some(thought),
+            _ => None,
+        }
     }
 
     /// Close a block the byte cap cut: when the cut landed inside a
@@ -161,6 +206,16 @@ impl Block {
     #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Bytes the text and the layout buffers hold, at their capacity.
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        let layout = &self.layout;
+        self.text.capacity()
+            + layout.rendered.as_ref().map_or(0, String::capacity)
+            + layout.rows.capacity() * std::mem::size_of::<u32>()
+            + layout.faces.capacity() * std::mem::size_of::<(u32, Face)>()
     }
 
     /// Whether the rows hold for `width` with no text pending.
@@ -180,18 +235,62 @@ impl Block {
     /// width, where a row count means nothing.
     pub(crate) fn sync(&mut self, width: u16) -> isize {
         debug_assert!(width > 0, "zero width is the never-laid-out mark");
-        if let Some(card) = &mut self.card
-            && card.stale()
-        {
-            card.render(&mut self.text, MAX_BLOCK_BYTES);
-            self.text.truncate(cap_boundary(&self.text));
-            // A collapse after an expand must give the memory back:
-            // the block cap bounds the text, not what it once held.
-            if self.text.capacity() > 2 * self.text.len().max(256) {
-                self.text.shrink_to_fit();
-            }
-            self.relayout_whole();
+        let rendered = self.render_body();
+        let new_width = self.layout.width != width;
+        let delta = self.sync_rows(width);
+        // A body wrote new text, or every row was laid out again at
+        // another width: the buffers may hold far more than they use.
+        if rendered || new_width {
+            self.trim_layout();
         }
+        delta
+    }
+
+    /// Write a stale card or thought into the text. Returns whether
+    /// it did: the text is new, so the rows and the render verdict
+    /// from before no longer hold.
+    fn render_body(&mut self) -> bool {
+        match &mut self.body {
+            Body::Card(card) if card.stale() => card.render(&mut self.text, MAX_BLOCK_BYTES),
+            Body::Thought(thought) if thought.stale() => thought.render(&mut self.text),
+            _ => return false,
+        }
+        self.text.truncate(cap_boundary(&self.text));
+        // A collapse after an expand must give the memory back: the
+        // block cap bounds the text, not what it once held.
+        if self.text.capacity() > 2 * self.text.len().max(256) {
+            self.text.shrink_to_fit();
+        }
+        // A text that shrank below the length the render failed on
+        // gets a fresh verdict; one that grew fails again, and must
+        // not run a render past the cap every frame.
+        if self.text.len() < self.layout.fallback_len {
+            self.layout.fallback = false;
+        }
+        self.relayout_whole();
+        true
+    }
+
+    /// The layout buffers at their length, not at the peak they
+    /// once held: a collapsed block keeps one line, not the rows,
+    /// faces, and rendered text of its open form.
+    fn trim_layout(&mut self) {
+        let layout = &mut self.layout;
+        if let Some(rendered) = &mut layout.rendered
+            && rendered.capacity() > 2 * rendered.len().max(256)
+        {
+            rendered.shrink_to_fit();
+        }
+        if layout.rows.capacity() > 2 * layout.rows.len().max(64) {
+            layout.rows.shrink_to_fit();
+        }
+        if layout.faces.capacity() > 2 * layout.faces.len().max(64) {
+            layout.faces.shrink_to_fit();
+        }
+    }
+
+    /// Bring the rows up to date at `width`; see [`Block::sync`].
+    fn sync_rows(&mut self, width: u16) -> isize {
         if self.layout.width != width {
             let first = !self.laid();
             self.layout.width = width;
@@ -215,16 +314,12 @@ impl Block {
         row_delta(before, self.rows())
     }
 
-    /// The faces of a card over its plain rows, and its row index
-    /// trimmed after a collapse. Any other plain block has no faces
-    /// and only grows.
+    /// The faces of a card over its plain rows. Any other plain
+    /// block has no faces.
     fn card_faces(&mut self) {
         self.layout.faces.clear();
-        if let Some(card) = &self.card {
+        if let Body::Card(card) = &self.body {
             card.faces(self.text.len(), &mut self.layout.faces);
-            if self.layout.rows.capacity() > 2 * self.layout.rows.len().max(64) {
-                self.layout.rows.shrink_to_fit();
-            }
         }
     }
 
@@ -260,6 +355,7 @@ impl Block {
                 return;
             }
             layout.fallback = true;
+            layout.fallback_len = self.text.len();
             layout.rows.clear();
             layout.faces.clear();
         }
@@ -411,6 +507,12 @@ pub struct Transcript {
     running: Option<usize>,
     /// Cards show their kept output whole. New cards follow.
     expanded: bool,
+    /// How a thinking block starts.
+    thinking: Thinking,
+    /// The absolute index of the thinking block whose segment still
+    /// streams: the one a delta extends and an end settles, whatever
+    /// lands behind it.
+    live: Option<usize>,
     /// Rows between the viewport bottom and the transcript end. The
     /// renderer clamps it against the rows that exist.
     scroll: usize,
@@ -431,6 +533,8 @@ impl Transcript {
             tools: HashMap::new(),
             running: None,
             expanded: false,
+            thinking: Thinking::default(),
+            live: None,
             scroll: 0,
             width: 0,
             frame_end: 0,
@@ -450,8 +554,14 @@ impl Transcript {
     /// Append streamed text of `kind`. Consecutive deltas of one kind
     /// extend the open block; a kind switch or a pushed block closes
     /// it. A block that reaches the byte cap closes too, and the
-    /// stream continues in a new one.
+    /// stream continues in a new one. Reasoning text has its own
+    /// path, [`Transcript::reasoning_delta`]: a reasoning block is
+    /// always a thought.
     pub fn push_delta(&mut self, kind: Kind, delta: &str) {
+        debug_assert!(
+            kind != Kind::Reasoning,
+            "reasoning streams through reasoning_delta"
+        );
         if delta.is_empty() {
             return;
         }
@@ -477,6 +587,58 @@ impl Transcript {
         let mut clean = String::with_capacity(text.len());
         push_sanitized(&mut clean, text);
         self.push_blocks(kind, &clean, None);
+    }
+
+    /// How a thinking block starts, from the config key.
+    pub fn set_thinking(&mut self, thinking: Thinking) {
+        self.thinking = thinking;
+    }
+
+    /// Append reasoning summary text. The deltas of one segment
+    /// extend its block, whatever lands behind it; the first delta
+    /// opens the block with its clock at `at`. Whitespace alone opens
+    /// nothing: an adapter's paragraph break between segments is not
+    /// content. A hidden setting drops the text.
+    pub fn reasoning_delta(&mut self, delta: &str, at: Instant) {
+        if self.thinking == Thinking::Hidden {
+            return;
+        }
+        if let Some(index) = self.live
+            && let Some(thought) = self.thought_at(index)
+        {
+            thought.push(delta, SUMMARY_BYTES);
+            return;
+        }
+        if delta.trim_start().is_empty() {
+            return;
+        }
+        let mut thought = Thought::new(self.thinking == Thinking::Open, at);
+        thought.push(delta, SUMMARY_BYTES);
+        self.push_block(Block::thought(thought, self.markdown_for(Kind::Reasoning)));
+        self.live = Some(self.dropped + self.blocks.len() - 1);
+        // The pushed block closes the open stream, as any pushed
+        // block does: a text delta must not join the thought's text.
+        self.open = None;
+    }
+
+    /// The reasoning segment ended at `at`: its block shows the
+    /// duration. A segment with no block — no summary, or a hidden
+    /// setting — changes nothing, and a text stream still open
+    /// stays open.
+    pub fn reasoning_end(&mut self, at: Instant) {
+        if let Some(index) = self.live.take()
+            && let Some(thought) = self.thought_at(index)
+        {
+            thought.end(at);
+        }
+    }
+
+    /// Open the newest thinking block, or close it again. Nothing
+    /// happens when the transcript holds none.
+    pub fn toggle_thinking(&mut self) {
+        if let Some(thought) = self.blocks.iter_mut().rev().find_map(Block::thought_mut) {
+            thought.set_open(!thought.open());
+        }
     }
 
     /// One card for a started tool call, updatable by id.
@@ -553,6 +715,13 @@ impl Transcript {
     pub fn close(&mut self) {
         self.open = None;
         self.running = None;
+        // A thought still live when the turn ends never got its end
+        // event: the block says so, instead of thinking forever.
+        if let Some(index) = self.live.take()
+            && let Some(thought) = self.thought_at(index)
+        {
+            thought.interrupt();
+        }
         let tools = std::mem::take(&mut self.tools);
         for index in tools.into_values() {
             if let Some(offset) = index.checked_sub(self.dropped)
@@ -591,6 +760,19 @@ impl Transcript {
     fn card_at(&mut self, index: usize) -> Option<&mut Card> {
         let offset = index.checked_sub(self.dropped)?;
         self.blocks.get_mut(offset)?.card_mut()
+    }
+
+    /// The thought at an absolute block index, when its block is
+    /// still held.
+    fn thought_at(&mut self, index: usize) -> Option<&mut Thought> {
+        let offset = index.checked_sub(self.dropped)?;
+        self.blocks.get_mut(offset)?.thought_mut()
+    }
+
+    /// Whether a block of `kind` renders as markdown: a model reply
+    /// or a reasoning summary, in a transcript that renders.
+    fn markdown_for(&self, kind: Kind) -> bool {
+        self.markdown && matches!(kind, Kind::Text | Kind::Reasoning)
     }
 
     /// Rows between the viewport bottom and the end. Zero is follow
@@ -671,7 +853,7 @@ impl Transcript {
         let mut rest = text;
         loop {
             let (head, tail) = rest.split_at(cap_boundary(rest));
-            let markdown = self.markdown && kind == Kind::Text;
+            let markdown = self.markdown_for(kind);
             let mut block = Block::new(kind, head.to_string(), markdown, carry);
             carry = if tail.is_empty() {
                 None
@@ -798,11 +980,11 @@ mod tests {
     #[test]
     fn a_kind_switch_opens_a_new_block() {
         let mut t = plain();
-        t.push_delta(Kind::Reasoning, "thinking");
+        t.push_delta(Kind::Notice, "note");
         t.push_delta(Kind::Text, "answer");
         assert_eq!(
             blocks(&mut t),
-            vec![(Kind::Reasoning, "thinking"), (Kind::Text, "answer")]
+            vec![(Kind::Notice, "note"), (Kind::Text, "answer")]
         );
     }
 
@@ -924,6 +1106,299 @@ mod tests {
         t.set_expanded(false);
         let block = t.blocks_mut().next_back().unwrap();
         assert_eq!(block.sync(80), -3);
+    }
+
+    /// A fixed origin, so the durations under test are exact.
+    fn at(secs: u64) -> Instant {
+        static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *ORIGIN.get_or_init(Instant::now) + std::time::Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn reasoning_streams_into_one_closed_block_that_ends_with_its_duration() {
+        let mut t = plain();
+        t.reasoning_delta("**Plan**", at(0));
+        t.reasoning_delta(" the fix\nthen more", at(0));
+        assert_eq!(
+            blocks(&mut t),
+            vec![(Kind::Reasoning, "· thinking · **Plan** the fix…")]
+        );
+        t.reasoning_end(at(2));
+        assert_eq!(
+            blocks(&mut t),
+            vec![(Kind::Reasoning, "▸ thought for 2.0s · **Plan** the fix…")]
+        );
+        // An end with no open segment changes nothing; the next
+        // segment is a block of its own with its own clock.
+        t.reasoning_end(at(3));
+        t.reasoning_delta("again", at(3));
+        t.reasoning_end(at(4));
+        let shown = blocks(&mut t);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[1], (Kind::Reasoning, "▸ thought for 1.0s · again"));
+    }
+
+    #[test]
+    fn a_paragraph_break_between_segments_opens_no_block() {
+        let mut t = plain();
+        t.reasoning_delta("\n\n", at(0));
+        t.reasoning_delta("   ", at(0));
+        assert!(blocks(&mut t).is_empty());
+        t.toggle_thinking();
+        assert!(
+            blocks(&mut t).is_empty(),
+            "a toggle with no block changes nothing"
+        );
+        t.reasoning_delta("\n\nreal", at(0));
+        assert_eq!(blocks(&mut t), vec![(Kind::Reasoning, "· thinking · real")]);
+    }
+
+    #[test]
+    fn the_toggle_opens_the_newest_block_and_closes_it_again() {
+        let mut t = plain();
+        t.reasoning_delta("first\nrest", at(0));
+        t.reasoning_end(at(1));
+        t.reasoning_delta(&"x".repeat(20_000), at(1));
+        t.reasoning_end(at(2));
+        t.toggle_thinking();
+        let shown = blocks(&mut t);
+        assert_eq!(
+            shown[0].1, "▸ thought for 1.0s · first…",
+            "the older block stays closed"
+        );
+        assert!(shown[1].1.starts_with("▾ thought for 1.0s\n\nxxx"));
+        assert_eq!(shown[1].1.len(), "▾ thought for 1.0s\n\n".len() + 20_000);
+        t.toggle_thinking();
+        let shown = blocks(&mut t);
+        assert!(shown[1].1.starts_with("▸ thought for 1.0s · xxx"));
+        assert!(shown[1].1.ends_with('…') && shown[1].1.len() < 300);
+    }
+
+    #[test]
+    fn the_thinking_setting_opens_blocks_or_hides_them() {
+        let mut t = plain();
+        t.set_thinking(Thinking::Open);
+        t.reasoning_delta("a\nb", at(0));
+        t.reasoning_end(at(1));
+        assert_eq!(
+            blocks(&mut t),
+            vec![(Kind::Reasoning, "▾ thought for 1.0s\n\na\nb")]
+        );
+
+        let mut t = plain();
+        t.set_thinking(Thinking::Hidden);
+        t.reasoning_delta("a", at(0));
+        t.reasoning_end(at(1));
+        t.push_delta(Kind::Text, "reply");
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "reply")]);
+        t.toggle_thinking();
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "reply")]);
+    }
+
+    #[test]
+    fn close_marks_a_live_thought_interrupted() {
+        let mut t = plain();
+        t.reasoning_delta("half", at(0));
+        t.close();
+        let interrupted = vec![(Kind::Reasoning, "▸ thinking interrupted · half")];
+        assert_eq!(blocks(&mut t), interrupted);
+        // A late end changes nothing: the segment is over.
+        t.reasoning_end(at(5));
+        assert_eq!(blocks(&mut t), interrupted);
+    }
+
+    #[test]
+    fn a_summary_past_the_cap_keeps_its_block_under_the_cap() {
+        let mut t = plain();
+        t.set_thinking(Thinking::Open);
+        t.reasoning_delta(&"y".repeat(MAX_BLOCK_BYTES + 100), at(0));
+        t.reasoning_delta("more", at(0));
+        t.reasoning_end(at(1));
+        let shown = blocks(&mut t);
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].1.len() <= MAX_BLOCK_BYTES, "{}", shown[0].1.len());
+        assert!(shown[0].1.ends_with("\n…"));
+    }
+
+    #[test]
+    fn a_thinking_block_renders_its_summary_as_markdown_when_the_transcript_does() {
+        let mut t = Transcript::new(true);
+        t.reasoning_delta("**Plan** the fix\n\n- step", at(0));
+        t.reasoning_end(at(1));
+        assert_eq!(rows(&mut t, 80), vec!["▸ thought for 1.0s · Plan the fix…"]);
+        t.toggle_thinking();
+        assert_eq!(
+            rows(&mut t, 80),
+            vec!["▾ thought for 1.0s", "", "Plan the fix", "", "• step"]
+        );
+        let strong: Vec<_> = spans(&mut t, 80)
+            .into_iter()
+            .flatten()
+            .filter(|(face, text)| face.has(Face::STRONG) && !text.is_empty())
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(strong, vec!["Plan"]);
+        // The plain transcript shows the marks as they came.
+        let mut t = plain();
+        t.reasoning_delta("**Plan** the fix", at(0));
+        assert_eq!(rows(&mut t, 80), vec!["· thinking · **Plan** the fix"]);
+    }
+
+    #[test]
+    fn a_segment_keeps_its_block_when_another_block_lands_behind_it() {
+        let mut t = plain();
+        t.reasoning_delta("a", at(0));
+        t.push_line(Kind::Notice, "note");
+        t.reasoning_delta("b", at(0));
+        t.reasoning_end(at(1));
+        assert_eq!(
+            blocks(&mut t),
+            vec![
+                (Kind::Reasoning, "▸ thought for 1.0s · ab"),
+                (Kind::Notice, "note")
+            ]
+        );
+        // The end left the text stream alone: a reply continues in
+        // its own block, not in the thought's.
+        t.push_delta(Kind::Text, "reply");
+        assert_eq!(blocks(&mut t).len(), 3);
+    }
+
+    #[test]
+    fn a_hidden_segment_leaves_the_reply_in_one_block() {
+        let mut t = plain();
+        t.set_thinking(Thinking::Hidden);
+        t.push_delta(Kind::Text, "one");
+        t.reasoning_delta("hidden", at(0));
+        t.reasoning_end(at(1));
+        t.push_delta(Kind::Text, " two");
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "one two")]);
+    }
+
+    #[test]
+    fn a_collapsed_thought_gives_its_layout_back() {
+        // Open, a long rendered summary holds its rendered text, its
+        // rows, and its faces; closed, one line holds one line's worth.
+        let mut t = Transcript::new(true);
+        t.set_thinking(Thinking::Open);
+        t.reasoning_delta("**Plan**\n", at(0));
+        t.reasoning_delta(&"**bold** and plain text ".repeat(1_200), at(0));
+        t.reasoning_end(at(1));
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(block.rendered());
+        let open = block.retained();
+        assert!(open > 32 * 1024, "{open}");
+        t.toggle_thinking();
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert_eq!(block.row(0), "▸ thought for 1.0s · Plan…");
+        assert!(block.retained() < 4 * 1024, "{}", block.retained());
+    }
+
+    #[test]
+    fn a_collapsed_thought_renders_again_after_a_fallback() {
+        // A summary the markdown render refuses: a wide table past
+        // the render cap. Open, the block falls back to plain rows;
+        // closed, its one line renders again.
+        let mut t = Transcript::new(true);
+        t.set_thinking(Thinking::Open);
+        let table = format!(
+            "|a|b|c|d|e|f|g|h|\n|-|-|-|-|-|-|-|-|\n{}",
+            "|a|b|c|d|e|f|g|h|\n".repeat(2_000)
+        );
+        t.reasoning_delta("**Plan**\n", at(0));
+        t.reasoning_delta(&table, at(0));
+        t.reasoning_end(at(1));
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(!block.rendered(), "the open form is past the render cap");
+        t.toggle_thinking();
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(block.rendered(), "the closed row renders as markdown");
+        assert_eq!(block.row(0), "▸ thought for 1.0s · Plan…");
+    }
+
+    #[test]
+    fn a_live_block_past_the_render_cap_keeps_its_verdict_while_it_grows() {
+        let mut t = Transcript::new(true);
+        t.set_thinking(Thinking::Open);
+        let row = "|a|b|c|d|e|f|g|h|\n";
+        t.reasoning_delta(
+            &format!("{row}|-|-|-|-|-|-|-|-|\n{}", row.repeat(1_800)),
+            at(0),
+        );
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(!block.rendered() && block.layout.fallback);
+        // More text: the verdict stands, no render runs past the cap.
+        t.reasoning_delta(row, at(0));
+        frame(&mut t, 120, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(block.layout.fallback, "the latch held while the text grew");
+        // A width change gives a fresh verdict, as for any block.
+        frame(&mut t, 60, 40);
+        assert!(!t.blocks().last().unwrap().rendered());
+    }
+
+    #[test]
+    fn a_card_laid_out_at_a_new_width_trims_its_rows() {
+        let mut t = plain();
+        t.set_expanded(true);
+        t.tool_start("c1", "bash");
+        end(
+            &mut t,
+            "c1",
+            "bash",
+            "ok",
+            false,
+            &"a long output line ".repeat(200),
+        );
+        frame(&mut t, 20, 40);
+        let block = t.blocks().last().unwrap();
+        let narrow = block.layout.rows.capacity();
+        assert!(narrow > 128, "{narrow}");
+        frame(&mut t, 200, 40);
+        let block = t.blocks().last().unwrap();
+        assert!(
+            block.layout.rows.capacity() <= 2 * block.rows().max(64),
+            "{} rows in {}",
+            block.rows(),
+            block.layout.rows.capacity()
+        );
+    }
+
+    #[test]
+    fn a_summary_that_starts_with_a_rule_leaves_the_header_a_header() {
+        let mut t = Transcript::new(true);
+        t.set_thinking(Thinking::Open);
+        t.reasoning_delta("---\nbody", at(0));
+        t.reasoning_end(at(1));
+        let rows = rows(&mut t, 80);
+        assert_eq!(rows[0], "▾ thought for 1.0s");
+        assert!(rows.iter().any(|row| row == "body"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_toggled_block_below_the_viewport_top_moves_the_anchor() {
+        let mut t = plain();
+        for i in 0..10 {
+            t.push_line(Kind::Text, &format!("line {i}"));
+        }
+        t.reasoning_delta("a\nb\nc", at(0));
+        t.reasoning_end(at(1));
+        frame(&mut t, 40, 4);
+        t.scroll_up(3);
+        frame(&mut t, 40, 4);
+        // The block sits below the viewport: opening it adds four
+        // rows under the view, and the view stays where it is.
+        t.toggle_thinking();
+        frame(&mut t, 40, 4);
+        assert_eq!(t.scroll(), 7);
+        t.toggle_thinking();
+        frame(&mut t, 40, 4);
+        assert_eq!(t.scroll(), 3);
     }
 
     #[test]
@@ -1259,7 +1734,7 @@ mod tests {
         assert_eq!(rows(&mut t, 80), vec!["✓ bash", "  out", "  ok"]);
         t.set_expanded(true);
         let block = t.blocks().next().unwrap();
-        assert!(block.card.as_ref().unwrap().stale());
+        assert!(matches!(&block.body, Body::Card(card) if card.stale()));
         assert_eq!(block.rows(), 3);
     }
 
@@ -1388,7 +1863,7 @@ mod tests {
         let mut t = Transcript::new(true);
         t.push_delta(Kind::Text, "# Title\n\n- one\n- two");
         t.push_line(Kind::Notice, "# not a heading");
-        t.push_delta(Kind::Reasoning, "- not a list");
+        t.push_line(Kind::Error, "- not a list");
         assert_eq!(
             rows(&mut t, 80),
             vec![

@@ -23,6 +23,7 @@ const CTRL_C: &[u8] = b"\x03";
 const CTRL_D: &[u8] = b"\x04";
 const END: &[u8] = b"\x1b[F";
 const CTRL_O: &[u8] = b"\x0f";
+const CTRL_T: &[u8] = b"\x14";
 const PAGE_UP: &[u8] = b"\x1b[5~";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
@@ -65,6 +66,29 @@ fn tool_call(id: &str, name: &str, input: Value) -> MockResponse {
             "item": {"type": "function_call", "call_id": id, "arguments": input.to_string()},
         }),
         completed_for_tool(),
+    ])
+}
+
+/// One reasoning segment with `summary`, then a text reply, the way
+/// the Codex endpoint streams them.
+fn reasoning_turn(summary: &str, reply: &str) -> MockResponse {
+    MockResponse::stream(vec![
+        json!({
+            "type": "response.output_item.added",
+            "item": {"type": "reasoning", "id": "rs_1"},
+        }),
+        json!({"type": "response.reasoning_summary_part.added", "summary_index": 0}),
+        json!({"type": "response.reasoning_summary_text.delta", "delta": summary}),
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": summary}],
+            },
+        }),
+        text_delta(reply),
+        completed(),
     ])
 }
 
@@ -185,6 +209,26 @@ impl Pty {
             );
             self.poll_read();
         }
+    }
+
+    /// Wait for `until`, then assert `marker` showed nowhere between
+    /// the last match and it. A repaint before this makes the span
+    /// the whole screen, so the check covers what is on it.
+    fn absent_until(&mut self, marker: &str, until: &str) {
+        let from = self.cursor;
+        self.wait_for(until);
+        let needle: String = marker.chars().filter(|ch| *ch != ' ').collect();
+        let stripped = strip_escapes(&self.seen);
+        let haystack: Vec<u8> = stripped
+            .iter()
+            .copied()
+            .filter(|byte| *byte != b' ')
+            .collect();
+        assert!(
+            find_after(&haystack[..self.cursor], from, needle.as_bytes()).is_none(),
+            "{marker:?} showed before {until:?}; stripped output: {:?}",
+            String::from_utf8_lossy(&stripped),
+        );
     }
 
     fn poll_read(&mut self) {
@@ -867,6 +911,70 @@ async fn a_reply_renders_as_markdown() {
         raw.windows(3).any(|bytes| bytes == b"fn\x1b"),
         "no style change after the keyword"
     );
+}
+
+const SUMMARY: &str = "**Plan** the fix\nthen check the second line";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thinking_block_closes_to_one_line_and_ctrl_t_opens_it() {
+    let mock = MockServer::start(vec![reasoning_turn(SUMMARY, "done")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"think\r");
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    // Closed: the state, then the first line with its marks rendered
+    // and the rest behind the mark.
+    pty.wait_for("▸ thought for");
+    pty.wait_for("· Plan the fix…");
+    pty.wait_for("done");
+    // Open: the rows the block gains appear; the header changes in
+    // place, so only its glyph reaches the stream.
+    pty.send(CTRL_T);
+    pty.wait_for("▾");
+    pty.wait_for("then check the second line");
+    // Closed again: after a repaint the screen holds one line of it.
+    pty.send(CTRL_T);
+    pty.resize(100, 28);
+    pty.send(b"y");
+    pty.absent_until("second line", "dmz> xy");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thinking_config_key_opens_the_blocks_or_hides_them() {
+    let mock = MockServer::start(vec![reasoning_turn(SUMMARY, "done")], Vec::new()).await;
+    let mut pty =
+        Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nthinking = \"open\"\n"));
+    pty.wait_for(PROMPT);
+    pty.send(b"think\r");
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("▾ thought for");
+    pty.wait_for("Plan the fix");
+    pty.wait_for("then check the second line");
+    pty.wait_for("done");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    let mock = MockServer::start(vec![reasoning_turn(SUMMARY, "done")], Vec::new()).await;
+    let mut pty =
+        Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nthinking = \"hidden\"\n"));
+    pty.wait_for(PROMPT);
+    pty.send(b"think\r");
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.absent_until("thought", "dmz> x");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
 }
 
 #[tokio::test(flavor = "multi_thread")]
