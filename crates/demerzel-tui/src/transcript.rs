@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crate::cards::{Card, Outcome};
+use crate::cards::{Card, Outcome, push_sanitized};
 use crate::markdown::{self, Face, Seam, Target};
 use crate::wrap::row_starts;
 
@@ -181,11 +181,15 @@ impl Block {
     pub(crate) fn sync(&mut self, width: u16) -> isize {
         debug_assert!(width > 0, "zero width is the never-laid-out mark");
         if let Some(card) = &mut self.card
-            && card.stale
+            && card.stale()
         {
             card.render(&mut self.text);
             self.text.truncate(cap_boundary(&self.text));
-            card.stale = false;
+            // A collapse after an expand must give the memory back:
+            // the block cap bounds the text, not what it once held.
+            if self.text.capacity() > 2 * self.text.len().max(256) {
+                self.text.shrink_to_fit();
+            }
             self.relayout_whole();
         }
         if self.layout.width != width {
@@ -398,9 +402,9 @@ pub struct Transcript {
     /// Tool call id to the absolute index of its card, kept so an
     /// unanswered call can close as interrupted.
     tools: HashMap<String, usize>,
-    /// The call between its dispatch and its result: the one an
-    /// approval question is about.
-    running: Option<String>,
+    /// The absolute index of the card between its dispatch and its
+    /// result: the one an approval question is about.
+    running: Option<usize>,
     /// Cards show their kept output whole. New cards follow.
     expanded: bool,
     /// Rows between the viewport bottom and the transcript end. The
@@ -482,10 +486,10 @@ impl Transcript {
     /// The call dispatches at `at`: the card's duration counts from
     /// here, and an approval question that follows is about it.
     pub fn tool_run(&mut self, id: &str, at: Instant) {
+        self.running = self.tools.get(id).copied();
         if let Some(card) = self.card_mut(id) {
             card.run(at);
         }
-        self.running = Some(id.to_string());
     }
 
     /// The driver's preview of a call goes onto its card. A call
@@ -498,26 +502,22 @@ impl Transcript {
         }
     }
 
-    /// The approval question is up for the running call. Returns
-    /// false when no card can show it.
-    pub fn tool_pending(&mut self, preview: Option<&str>) -> bool {
-        let Some(id) = self.running.clone() else {
-            return false;
-        };
-        match self.card_mut(&id) {
-            Some(card) => {
+    /// The approval question for `tool` is up: the running call's
+    /// card shows it. Returns false when no card can — no call runs,
+    /// its card is gone, or the names differ.
+    pub fn tool_pending(&mut self, tool: &str, preview: Option<&str>) -> bool {
+        match self.running.and_then(|index| self.card_at(index)) {
+            Some(card) if card.name() == tool => {
                 card.pending(preview);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
     /// The question about the running call is answered.
     pub fn tool_answered(&mut self, declined: bool) {
-        if let Some(id) = self.running.clone()
-            && let Some(card) = self.card_mut(&id)
-        {
+        if let Some(card) = self.running.and_then(|index| self.card_at(index)) {
             card.answered(declined);
         }
     }
@@ -525,12 +525,11 @@ impl Transcript {
     /// The call returned: its card ends in place. When the card
     /// already fell off the cap, a fresh one appends.
     pub fn tool_end(&mut self, id: &str, name: &str, outcome: Outcome<'_>) {
-        if self.running.as_deref() == Some(id) {
+        let index = self.tools.remove(id);
+        if index.is_some() && self.running == index {
             self.running = None;
         }
-        let card = self.card_mut(id);
-        let found = card.is_some();
-        match card {
+        match index.and_then(|index| self.card_at(index)) {
             Some(card) => card.end(outcome),
             None => {
                 let mut card = Card::new(name, self.expanded);
@@ -538,9 +537,6 @@ impl Transcript {
                 self.open = None;
                 self.push_block(Block::card(card));
             }
-        }
-        if found {
-            self.tools.remove(id);
         }
     }
 
@@ -582,7 +578,14 @@ impl Transcript {
 
     /// The card of an open call, when its block is still held.
     fn card_mut(&mut self, id: &str) -> Option<&mut Card> {
-        let offset = self.tools.get(id)?.checked_sub(self.dropped)?;
+        let index = *self.tools.get(id)?;
+        self.card_at(index)
+    }
+
+    /// The card at an absolute block index, when its block is still
+    /// held.
+    fn card_at(&mut self, index: usize) -> Option<&mut Card> {
+        let offset = index.checked_sub(self.dropped)?;
         self.blocks.get_mut(offset)?.card_mut()
     }
 
@@ -708,18 +711,6 @@ fn split_at_cap(text: &mut String) -> Option<String> {
     (cut < text.len()).then(|| text.split_off(cut))
 }
 
-/// Append `text` with control characters neutralized: tabs become
-/// spaces, the rest drop. An escape byte must never reach the frame.
-pub(crate) fn push_sanitized(out: &mut String, text: &str) {
-    for ch in text.chars() {
-        if ch == '\t' {
-            out.push_str("    ");
-        } else if ch == '\n' || !ch.is_control() {
-            out.push(ch);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,7 +732,7 @@ mod tests {
             Outcome {
                 summary: Some(summary),
                 is_error,
-                output,
+                output: output.to_string(),
                 output_cut: false,
                 at: Instant::now(),
             },
@@ -753,6 +744,11 @@ mod tests {
     /// the ones that read as their text.
     fn plain() -> Transcript {
         Transcript::new(false)
+    }
+
+    /// Lay every block out at 80 columns.
+    fn rows_of(t: &mut Transcript) {
+        rows(t, 80);
     }
 
     /// Every row of every block, laid out at `width`.
@@ -944,7 +940,7 @@ mod tests {
             Outcome {
                 summary: Some("$ cargo test (exit 0)"),
                 is_error: false,
-                output: "ok\n",
+                output: "ok\n".to_string(),
                 output_cut: false,
                 at: start + std::time::Duration::from_millis(250),
             },
@@ -965,7 +961,7 @@ mod tests {
             spans[0],
             vec![(Face::STRONG, "✓ bash $ cargo test".to_string())]
         );
-        assert_eq!(spans[1], vec![(Face::MARKER, "  ok".to_string())]);
+        assert_eq!(spans[1], vec![(Face::MUTED, "  ok".to_string())]);
         assert_eq!(spans[2][0].0, Face::PLAIN);
     }
 
@@ -1100,7 +1096,7 @@ mod tests {
         end(&mut t, "call_1", "bash", "late", false, "");
         assert_eq!(t.blocks().len(), 2);
         // The question of a forgotten call finds no card.
-        assert!(!t.tool_pending(None));
+        assert!(!t.tool_pending("bash", None));
     }
 
     #[test]
@@ -1136,7 +1132,10 @@ mod tests {
         t.tool_start("c2", "read");
         t.tool_run("c1", Instant::now());
         t.tool_preview("c1", "$ rm -r x");
-        assert!(t.tool_pending(None));
+        // The question names the running call's tool; another name
+        // finds no card.
+        assert!(!t.tool_pending("read", None));
+        assert!(t.tool_pending("bash", None));
         assert_eq!(rows(&mut t, 80), vec!["? bash $ rm -r x", "· read"]);
         t.tool_answered(true);
         end(
@@ -1153,7 +1152,7 @@ mod tests {
         );
         // A call without a dispatch preview shows the question's.
         t.tool_run("c2", Instant::now());
-        assert!(t.tool_pending(Some("{\n  \"path\": \"f\"\n}")));
+        assert!(t.tool_pending("read", Some("{\n  \"path\": \"f\"\n}")));
         t.tool_answered(false);
         end(&mut t, "c2", "read", "read f", false, "1:x");
         assert_eq!(
@@ -1168,7 +1167,49 @@ mod tests {
             ]
         );
         // No running call: the question has no card.
-        assert!(!t.tool_pending(Some("x")));
+        assert!(!t.tool_pending("bash", Some("x")));
+    }
+
+    #[test]
+    fn a_card_past_the_block_cap_is_cut_at_a_char_boundary() {
+        // An expanded output of short lines renders three bytes per
+        // line, past the block cap: the text is cut at the cap and
+        // the rows and faces still index inside it.
+        let mut t = plain();
+        t.set_expanded(true);
+        t.tool_start("c1", "bash");
+        let output = "é\n".repeat(MAX_BLOCK_BYTES / 3);
+        end(&mut t, "c1", "bash", "ok", false, &output);
+        let rows = rows(&mut t, 80);
+        let block = t.blocks().next().unwrap();
+        assert!(block.text().len() <= MAX_BLOCK_BYTES);
+        assert!(block.text().len() > MAX_BLOCK_BYTES - 4);
+        assert_eq!(rows.len(), block.rows());
+        assert!(!block.plain());
+        let last = block.rows() - 1;
+        block.spans(last, |_, _| {});
+        // The collapse gives the memory back.
+        t.set_expanded(false);
+        rows_of(&mut t);
+        let block = t.blocks().next().unwrap();
+        assert!(
+            block.text.capacity() < MAX_BLOCK_BYTES / 4,
+            "{}",
+            block.text.capacity()
+        );
+    }
+
+    #[test]
+    fn a_call_whose_card_fell_off_the_cap_leaves_no_entry_behind() {
+        let mut t = plain();
+        t.tool_start("c1", "bash");
+        t.tool_run("c1", Instant::now());
+        for i in 0..MAX_BLOCKS {
+            t.push_line(Kind::Text, &format!("line {i}"));
+        }
+        end(&mut t, "c1", "bash", "ok", false, "");
+        assert!(t.tools.is_empty());
+        assert_eq!(t.running, None);
     }
 
     #[test]
@@ -1207,7 +1248,7 @@ mod tests {
         assert_eq!(rows(&mut t, 80), vec!["✓ bash", "  out", "  ok"]);
         t.set_expanded(true);
         let block = t.blocks().next().unwrap();
-        assert!(block.card.as_ref().unwrap().stale);
+        assert!(block.card.as_ref().unwrap().stale());
         assert_eq!(block.rows(), 3);
     }
 

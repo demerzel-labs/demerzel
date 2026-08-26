@@ -527,15 +527,17 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     // The waits below name rows that appear. The read runs without
     // a question; its card ends with the last five output lines and
     // a footer with the summary and the hint for the rest.
-    pty.wait_for("8:row 8 of the file");
-    pty.wait_for("· read tall.txt lines 1-8 of 8 · 4 more lines · Ctrl-O");
+    pty.wait_for("row 8 of the file");
+    pty.wait_for("4 more lines · Ctrl-O");
     // The bash call's preview joins its header; the card waits on
-    // the question.
+    // the question. A resize repaints the card whole, so the pending
+    // glyph reaches the stream with its row.
     pty.wait_for("$ echo card-out");
     pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.resize(100, 29);
+    pty.wait_for("? bash $ echo card-out");
     pty.send(b"y");
     pty.wait_for("card-out");
-    pty.wait_for("· $ echo card-out (exit 0)");
     pty.wait_for("approve bash? yes");
     pty.wait_for("first done");
 
@@ -557,7 +559,7 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
     pty.send(b"y");
     pty.wait_for("approve bash? yes");
-    pty.resize(100, 29);
+    pty.resize(100, 30);
     pty.wait_for("· bash $ sleep 20");
     pty.wait_for("s · bash dmz>");
     pty.send(CTRL_C);
@@ -571,21 +573,22 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     // resize repaints the rows whole.
     pty.send(CTRL_O);
     pty.send(PAGE_UP);
-    pty.resize(100, 30);
-    pty.wait_for("1:row 1 of the file");
-    pty.wait_for("3:row 3 of the file");
+    pty.resize(100, 29);
+    pty.wait_for("row 1 of the file");
+    pty.wait_for("row 3 of the file");
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
 
     // The spinner drew: some frame of it reached the stream. The
-    // state glyphs reached it too.
+    // state glyphs of the ended calls reached it too; only cards
+    // write them.
     let text = String::from_utf8_lossy(&raw);
     assert!(
         text.chars()
             .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch)),
         "no spinner frame in the output"
     );
-    for glyph in ["✓", "?", "⊘", "✗"] {
+    for glyph in ["✓", "⊘", "✗"] {
         assert!(
             contains_marker(&raw, glyph),
             "no {glyph} glyph in the output"

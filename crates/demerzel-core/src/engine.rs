@@ -71,12 +71,14 @@ pub enum EngineEvent<'a> {
     TextDelta(&'a str),
     ReasoningDelta(&'a str),
     /// The model started streaming a tool call.
+    #[non_exhaustive]
     ToolStart {
         id: &'a str,
         name: &'a str,
     },
     /// A tool call is about to dispatch, with its complete input. The
     /// renderer uses this for previews and approval display.
+    #[non_exhaustive]
     ToolRun {
         id: &'a str,
         name: &'a str,
@@ -85,6 +87,7 @@ pub enum EngineEvent<'a> {
     /// A tool call finished, with the tool's own one-line summary and
     /// its output text. The output is borrowed for the call; a
     /// renderer that keeps any of it caps what it keeps.
+    #[non_exhaustive]
     ToolEnd {
         id: &'a str,
         name: &'a str,

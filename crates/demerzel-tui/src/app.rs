@@ -78,13 +78,13 @@ struct Progress {
 }
 
 impl Progress {
-    fn text(&self) -> String {
-        let phase = match &self.stage {
+    fn write(&self, out: &mut String) {
+        let stage = match &self.stage {
             Stage::Thinking => "thinking",
             Stage::Writing => "writing",
             Stage::Tool(name) => name.as_str(),
         };
-        cards::progress_text(self.started.elapsed(), phase)
+        cards::write_progress(out, self.started.elapsed(), stage);
     }
 }
 
@@ -137,6 +137,8 @@ struct App {
     mode: Mode,
     /// Set while a turn runs.
     progress: Option<Progress>,
+    /// The progress line's text, rebuilt each frame in place.
+    progress_line: String,
     keys: mpsc::UnboundedReceiver<Event>,
     displays: mpsc::UnboundedReceiver<DisplayEvent>,
     display_tx: mpsc::UnboundedSender<DisplayEvent>,
@@ -178,6 +180,7 @@ impl App {
             },
             mode: Mode::Edit,
             progress: None,
+            progress_line: String::new(),
             keys,
             displays,
             display_tx,
@@ -351,7 +354,10 @@ impl App {
                 self.transcript.tool_run(&id, at);
                 // The name is model-controlled: one clean line for
                 // the progress row.
-                self.stage(Stage::Tool(cards::one_line(&name, 80)));
+                self.stage(Stage::Tool(cards::one_line(
+                    &name,
+                    cards::PROGRESS_NAME_BYTES,
+                )));
             }
             DisplayEvent::ToolPreview { id, text } => self.transcript.tool_preview(&id, &text),
             DisplayEvent::ToolEnd {
@@ -369,7 +375,7 @@ impl App {
                     Outcome {
                         summary: summary.as_deref(),
                         is_error,
-                        output: &output,
+                        output,
                         output_cut,
                         at,
                     },
@@ -410,12 +416,16 @@ impl App {
     }
 
     fn show_approval(&mut self, request: ApprovalRequest) {
+        // The question follows the call's dispatch event, which can
+        // still sit in the display queue: apply it first, so the
+        // running card is the one the question is about.
+        self.drain_displays();
         // The running call's card shows that it waits, with the
         // question's preview when the card has none. Without a card
         // — a driver that asks outside a dispatch — the preview shows
         // as a notice, so nothing is approved blind.
         let preview = request.preview.as_deref();
-        if !self.transcript.tool_pending(preview)
+        if !self.transcript.tool_pending(&request.tool, preview)
             && let Some(preview) = preview
         {
             self.transcript
@@ -597,15 +607,20 @@ impl App {
             Mode::Edit => None,
             Mode::Approval { tool, .. } => Some(format!("approve {tool}? [y]es / [a]lways / [N]o")),
         };
-        let progress = self.progress.as_ref().map(Progress::text);
         let Self {
             guard,
             transcript,
             input,
             status,
             page,
+            progress,
+            progress_line,
             ..
         } = self;
+        let progress = progress.as_ref().map(|progress| {
+            progress.write(progress_line);
+            progress_line.as_str()
+        });
         guard.terminal.draw(|frame| {
             *page = render::draw(
                 frame,
@@ -614,7 +629,7 @@ impl App {
                     input,
                     status,
                     approval: question.as_deref(),
-                    progress: progress.as_deref(),
+                    progress,
                 },
             );
         })?;

@@ -8,21 +8,30 @@
 //! transcript lays the text out like any other block and refreshes it
 //! when the card changes.
 //!
-//! The interface keeps a capped tail of each output, so a card at the
-//! cap costs half a block of output next to its text. The expand
-//! toggle shows the kept output whole.
+//! The interface keeps a capped tail of each output, sanitized before
+//! the cap, so a card at the cap costs half a block of output next to
+//! its text. The expand toggle shows the kept output whole.
 //!
 //! The progress line names what the turn is doing: a spinner, the
-//! elapsed time, and the phase. Its text is a pure function of the
+//! elapsed time, and the stage. Its text is a pure function of the
 //! elapsed time, so the frame timer animates it with no state.
+//!
+//! This module also owns the text hygiene every outside string goes
+//! through before it reaches a block: control characters drop, tabs
+//! widen, and a line stays one line.
 
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use crate::markdown::Face;
-use crate::transcript::push_sanitized;
 
-/// Bytes of one tool output the interface keeps: the tail.
+/// Bytes of one tool output the interface keeps: the tail, after
+/// sanitizing.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+
+/// Bytes of one preview body the card keeps. The driver caps its
+/// previews lower; this bounds the public path.
+pub const MAX_PREVIEW_BYTES: usize = 8 * 1024;
 
 /// Output lines a collapsed card shows, from the end.
 const TAIL_LINES: usize = 5;
@@ -32,9 +41,13 @@ const TAIL_LINES: usize = 5;
 /// must not fill the screen when the card is collapsed.
 const TAIL_LINE_BYTES: usize = 240;
 
-/// Bytes of a tool name or a summary on a card. Both come from
-/// outside the interface; the cap keeps the card inside its block.
+/// Bytes of a tool name, an input line, or a summary on a card. All
+/// come from outside the interface; the cap keeps the card inside
+/// its block.
 const LINE_BYTES: usize = 512;
+
+/// Bytes of the tool name on the progress line.
+pub const PROGRESS_NAME_BYTES: usize = 80;
 
 /// The key that expands and collapses the cards, named in the hint.
 const EXPAND_KEY: &str = "Ctrl-O";
@@ -72,15 +85,15 @@ impl State {
         }
     }
 
-    /// The footer word when the tool gave no summary.
-    fn word(self) -> &'static str {
+    /// The footer word of an ended call, for a card whose tool gave
+    /// no summary. An open call has no footer.
+    fn word(self) -> Option<&'static str> {
         match self {
-            State::Running => "running",
-            State::Pending => "pending",
-            State::Done => "done",
-            State::Error => "error",
-            State::Declined => "declined",
-            State::Interrupted => "interrupted",
+            State::Running | State::Pending => None,
+            State::Done => Some("done"),
+            State::Error => Some("error"),
+            State::Declined => Some("declined"),
+            State::Interrupted => Some("interrupted"),
         }
     }
 }
@@ -89,8 +102,8 @@ impl State {
 pub struct Outcome<'a> {
     pub summary: Option<&'a str>,
     pub is_error: bool,
-    /// The kept output, sanitized by the card.
-    pub output: &'a str,
+    /// The kept output: sanitized, inside the cap. The card takes it.
+    pub output: String,
     /// The kept output is a tail: earlier bytes fell over the cap.
     pub output_cut: bool,
     pub at: Instant,
@@ -113,7 +126,7 @@ pub struct Card {
     output_cut: bool,
     expanded: bool,
     /// The text needs a render before the next layout.
-    pub(crate) stale: bool,
+    stale: bool,
     /// Byte offsets from the last render, for the faces: the header
     /// end and the output span.
     header_end: usize,
@@ -139,27 +152,37 @@ impl Card {
         }
     }
 
+    /// The name of the tool, as the header shows it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the card changed since its last render.
+    pub fn stale(&self) -> bool {
+        self.stale
+    }
+
     /// The call dispatches: the duration counts from here.
     pub fn run(&mut self, at: Instant) {
         self.started = Some(at);
     }
 
     /// The driver's preview of the call. Its first line joins the
-    /// header, less the tool name when the line starts with it; the
-    /// rest is the body.
+    /// header, without the tool name when the line starts with it;
+    /// the rest is the body.
     pub fn set_preview(&mut self, preview: &str) {
-        let mut clean = String::with_capacity(preview.len());
-        push_sanitized(&mut clean, preview);
-        let (first, rest) = match clean.find('\n') {
-            Some(cut) => (&clean[..cut], Some(&clean[cut + 1..])),
-            None => (clean.as_str(), None),
+        let (first, rest) = match preview.find('\n') {
+            Some(cut) => (&preview[..cut], Some(&preview[cut + 1..])),
+            None => (preview, None),
         };
         let first = first
             .strip_prefix(self.name.as_str())
-            .and_then(|rest| rest.strip_prefix(' '))
+            .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
             .unwrap_or(first);
-        self.input = Some(first.to_string());
-        self.body = rest.filter(|rest| !rest.is_empty()).map(str::to_string);
+        self.input = Some(one_line(first, LINE_BYTES));
+        self.body = rest
+            .filter(|rest| !rest.is_empty())
+            .map(|rest| capped_text(rest, MAX_PREVIEW_BYTES));
         self.stale = true;
     }
 
@@ -171,9 +194,7 @@ impl Card {
             && self.body.is_none()
             && let Some(preview) = preview
         {
-            let mut clean = String::with_capacity(preview.len());
-            push_sanitized(&mut clean, preview);
-            self.body = Some(clean);
+            self.body = Some(capped_text(preview, MAX_PREVIEW_BYTES));
         }
         self.stale = true;
     }
@@ -197,8 +218,7 @@ impl Card {
             } else {
                 State::Done
             };
-            self.output.clear();
-            push_sanitized(&mut self.output, outcome.output);
+            self.output = outcome.output;
             self.output_cut = outcome.output_cut;
         }
         self.duration = self
@@ -224,8 +244,10 @@ impl Card {
         }
     }
 
-    /// Render the card into `out`, replacing its content.
+    /// Render the card into `out`, replacing its content, and mark
+    /// it fresh.
     pub fn render(&mut self, out: &mut String) {
+        self.stale = false;
         out.clear();
         out.push(self.state.glyph());
         out.push(' ');
@@ -254,8 +276,7 @@ impl Card {
                     out.push_str(line);
                 }
             } else {
-                let total = self.output.lines().count();
-                hidden = total.saturating_sub(TAIL_LINES);
+                hidden = line_count(&self.output).saturating_sub(TAIL_LINES);
                 for line in self.output.lines().skip(hidden) {
                     out.push_str("\n  ");
                     let cut = line_cut(line, TAIL_LINE_BYTES);
@@ -268,27 +289,32 @@ impl Card {
         }
         self.output_span = (output_start, out.len());
 
-        if !matches!(self.state, State::Running | State::Pending) {
-            out.push_str("\n  ");
-            if let Some(duration) = self.duration
-                && self.state != State::Declined
-            {
-                out.push_str(&duration_text(duration));
-                out.push_str(" · ");
-            }
-            match &self.summary {
-                Some(summary) if self.state != State::Declined => out.push_str(summary),
-                _ => out.push_str(self.state.word()),
-            }
-            if hidden > 0 {
-                let word = if hidden == 1 { "line" } else { "lines" };
-                out.push_str(&format!(" · {hidden} more {word} · {EXPAND_KEY}"));
-            }
+        let Some(word) = self.state.word() else {
+            return;
+        };
+        out.push_str("\n  ");
+        if let Some(duration) = self.duration
+            && self.state != State::Declined
+        {
+            write_duration(out, duration);
+            out.push_str(" · ");
+        }
+        match &self.summary {
+            Some(summary) if self.state != State::Declined => out.push_str(summary),
+            _ => out.push_str(word),
+        }
+        // The hint names what the expanded view adds: the hidden
+        // lines, or the cut when the kept tail shows whole.
+        if hidden > 0 {
+            let plural = if hidden == 1 { "line" } else { "lines" };
+            let _ = write!(out, " · {hidden} more {plural} · {EXPAND_KEY}");
+        } else if self.output_cut && !self.expanded {
+            let _ = write!(out, " · output cut · {EXPAND_KEY}");
         }
     }
 
     /// The face changes over the last render, clamped to `len`: the
-    /// header strong, the output dim.
+    /// header strong, the output muted.
     pub fn faces(&self, len: usize, out: &mut Vec<(u32, Face)>) {
         let header_end = self.header_end.min(len);
         if header_end > 0 {
@@ -302,9 +328,19 @@ impl Card {
             if out.last().is_some_and(|&(at, _)| at as usize == start) {
                 out.pop();
             }
-            out.push((start as u32, Face::MARKER));
+            out.push((start as u32, Face::MUTED));
             out.push((end as u32, Face::PLAIN));
         }
+    }
+}
+
+/// Lines in `text`, the way `str::lines` counts them.
+fn line_count(text: &str) -> usize {
+    let newlines = text.bytes().filter(|&byte| byte == b'\n').count();
+    if text.is_empty() || text.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
     }
 }
 
@@ -338,41 +374,73 @@ pub fn one_line(raw: &str, cap: usize) -> String {
     text
 }
 
-/// The tail of `output` inside the byte cap, and whether it is a cut.
-pub fn output_tail(output: &str) -> (&str, bool) {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return (output, false);
+/// `raw` sanitized and cut at `cap` bytes with a mark on its own
+/// line.
+fn capped_text(raw: &str, cap: usize) -> String {
+    let mut text = String::with_capacity(raw.len().min(cap));
+    push_sanitized(&mut text, raw);
+    if text.len() > cap {
+        text.truncate(line_cut(&text, cap));
+        text.push_str("\n…");
     }
-    let mut start = output.len() - MAX_OUTPUT_BYTES;
-    while !output.is_char_boundary(start) {
+    text
+}
+
+/// Append `text` with control characters neutralized: tabs become
+/// spaces, the rest drop. An escape byte must never reach the frame.
+pub fn push_sanitized(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        if ch == '\t' {
+            out.push_str("    ");
+        } else if ch == '\n' || !ch.is_control() {
+            out.push(ch);
+        }
+    }
+}
+
+/// The tail of `output` the interface keeps: sanitized, then cut to
+/// the byte cap at a char boundary. Returns the tail and whether it
+/// is a cut.
+pub fn kept_output(output: &str) -> (String, bool) {
+    let mut text = String::with_capacity(output.len().min(MAX_OUTPUT_BYTES + 4));
+    push_sanitized(&mut text, output);
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return (text, false);
+    }
+    let mut start = text.len() - MAX_OUTPUT_BYTES;
+    while !text.is_char_boundary(start) {
         start += 1;
     }
-    (&output[start..], true)
+    text.drain(..start);
+    text.shrink_to_fit();
+    (text, true)
 }
 
-/// A duration the way the card shows it.
-pub fn duration_text(duration: Duration) -> String {
+/// Append a duration the way the card shows it.
+pub fn write_duration(out: &mut String, duration: Duration) {
     let millis = duration.as_millis();
-    if millis < 1_000 {
-        format!("{millis}ms")
+    let _ = if millis < 1_000 {
+        write!(out, "{millis}ms")
     } else if millis < 60_000 {
-        format!("{:.1}s", duration.as_secs_f64())
+        write!(out, "{:.1}s", duration.as_secs_f64())
     } else {
         let seconds = duration.as_secs();
-        format!("{}m {:02}s", seconds / 60, seconds % 60)
-    }
+        write!(out, "{}m {:02}s", seconds / 60, seconds % 60)
+    };
 }
 
-/// The progress line: the spinner, the elapsed time, and the phase.
-pub fn progress_text(elapsed: Duration, phase: &str) -> String {
+/// Write the progress line into `out`: the spinner, the elapsed
+/// time, and the stage.
+pub fn write_progress(out: &mut String, elapsed: Duration, stage: &str) {
+    out.clear();
     let frame = (elapsed.as_millis() / SPINNER_MS) as usize % SPINNER.len();
     let seconds = elapsed.as_secs();
-    let elapsed = if seconds < 60 {
-        format!("{seconds}s")
+    out.push(SPINNER[frame]);
+    let _ = if seconds < 60 {
+        write!(out, " {seconds}s · {stage}")
     } else {
-        format!("{}m {:02}s", seconds / 60, seconds % 60)
+        write!(out, " {}m {:02}s · {stage}", seconds / 60, seconds % 60)
     };
-    format!("{} {elapsed} · {phase}", SPINNER[frame])
 }
 
 #[cfg(test)]
@@ -385,23 +453,52 @@ mod tests {
         out
     }
 
+    fn outcome<'a>(
+        summary: Option<&'a str>,
+        is_error: bool,
+        output: &str,
+        at: Instant,
+    ) -> Outcome<'a> {
+        Outcome {
+            summary,
+            is_error,
+            output: output.to_string(),
+            output_cut: false,
+            at,
+        }
+    }
+
     fn finish(card: &mut Card, output: &str, is_error: bool) {
         let start = Instant::now();
         card.run(start);
-        card.end(Outcome {
-            summary: Some("bash: exit 0"),
+        card.end(outcome(
+            Some("bash: exit 0"),
             is_error,
             output,
-            output_cut: false,
-            at: start + Duration::from_millis(1_234),
-        });
+            start + Duration::from_millis(1_234),
+        ));
+    }
+
+    fn duration_text(duration: Duration) -> String {
+        let mut out = String::new();
+        write_duration(&mut out, duration);
+        out
+    }
+
+    fn progress_text(elapsed: Duration, stage: &str) -> String {
+        let mut out = String::from("stale");
+        write_progress(&mut out, elapsed, stage);
+        out
     }
 
     #[test]
     fn a_card_renders_its_header_body_tail_and_footer() {
         let mut card = Card::new("bash", false);
+        assert!(card.stale());
         assert_eq!(text(&mut card), "· bash");
+        assert!(!card.stale());
         card.set_preview("$ cargo fmt\n  cargo test");
+        assert!(card.stale());
         assert_eq!(text(&mut card), "· bash $ cargo fmt\n    cargo test");
         finish(&mut card, "one\ntwo\n", false);
         assert_eq!(
@@ -421,6 +518,10 @@ mod tests {
         let mut card = Card::new("create", false);
         card.set_preview("create notes.txt");
         assert_eq!(text(&mut card), "· create notes.txt");
+        // A first line that is the name alone adds nothing.
+        let mut card = Card::new("edit", false);
+        card.set_preview("edit\n@ delete line 1");
+        assert_eq!(text(&mut card), "· edit \n  @ delete line 1");
     }
 
     #[test]
@@ -463,17 +564,23 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_output_says_so_when_expanded() {
-        let mut card = Card::new("bash", true);
+    fn a_cut_output_says_so_collapsed_and_expanded() {
+        let mut card = Card::new("bash", false);
         let start = Instant::now();
         card.run(start);
         card.end(Outcome {
             summary: None,
             is_error: false,
-            output: "tail",
+            output: "tail".to_string(),
             output_cut: true,
             at: start,
         });
+        // The kept tail shows whole, so the hint names the cut.
+        assert_eq!(
+            text(&mut card),
+            "✓ bash\n  tail\n  0ms · done · output cut · Ctrl-O"
+        );
+        card.set_expanded(true);
         assert_eq!(
             text(&mut card),
             "✓ bash\n  … earlier output not kept\n  tail\n  0ms · done"
@@ -491,13 +598,12 @@ mod tests {
         assert_eq!(text(&mut card), "⊘ bash $ rm -r x\n  declined");
         // The result of a declined call changes nothing: the refusal
         // is the result.
-        card.end(Outcome {
-            summary: None,
-            is_error: true,
-            output: "the user declined the bash call",
-            output_cut: false,
-            at: Instant::now(),
-        });
+        card.end(outcome(
+            None,
+            true,
+            "the user declined the bash call",
+            Instant::now(),
+        ));
         assert_eq!(text(&mut card), "⊘ bash $ rm -r x\n  declined");
 
         let mut card = Card::new("bash", false);
@@ -529,7 +635,7 @@ mod tests {
             faces,
             vec![
                 (0, Face::STRONG),
-                (header, Face::MARKER),
+                (header, Face::MUTED),
                 (output_end, Face::PLAIN),
             ]
         );
@@ -541,7 +647,7 @@ mod tests {
         assert_eq!(faces[1], ("✓ bash $ true".len() as u32, Face::PLAIN));
         assert_eq!(
             faces[2],
-            ("✓ bash $ true\n    more".len() as u32, Face::MARKER)
+            ("✓ bash $ true\n    more".len() as u32, Face::MUTED)
         );
         // Offsets clamp to a text the transcript cut at its cap.
         let mut faces = Vec::new();
@@ -550,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn names_and_summaries_are_one_sanitized_line_inside_a_cap() {
+    fn outside_strings_are_sanitized_and_capped() {
         let mut card = Card::new("ba\x1b[2Jsh\nSECOND", false);
         assert_eq!(text(&mut card), "· ba[2Jsh SECOND");
         let long = "n".repeat(2 * LINE_BYTES);
@@ -559,27 +665,61 @@ mod tests {
         assert!(shown.len() < LINE_BYTES + 16, "{}", shown.len());
         assert!(shown.ends_with('…'));
         card.run(Instant::now());
-        card.end(Outcome {
-            summary: Some(&long),
-            is_error: false,
-            output: "a\x1bb\tc",
-            output_cut: false,
-            at: Instant::now(),
-        });
+        card.end(outcome(Some(&long), false, "ab    c", Instant::now()));
         let shown = text(&mut card);
         assert!(shown.contains("\n  ab    c\n"), "{shown}");
         assert!(shown.len() < 2 * LINE_BYTES + 64, "{}", shown.len());
+
+        // A preview past its cap keeps its head and marks the cut;
+        // its first line is one capped line.
+        let mut card = Card::new("bash", false);
+        let preview = format!("$ {}\n{}", "x".repeat(2 * LINE_BYTES), "y\n".repeat(8_000));
+        card.set_preview(&preview);
+        let shown = text(&mut card);
+        // Each kept line renders with its indent: at most twice the
+        // body cap, plus the header.
+        assert!(
+            shown.len() < LINE_BYTES + 2 * MAX_PREVIEW_BYTES + 64,
+            "{}",
+            shown.len()
+        );
+        assert!(shown.ends_with("\n  …"), "{}", &shown[shown.len() - 8..]);
+        let mut card = Card::new("bash", false);
+        card.pending(Some(&"z\t\n".repeat(4_000)));
+        let shown = text(&mut card);
+        assert!(shown.ends_with("\n  …"));
+        assert!(!shown.contains('\t'));
     }
 
     #[test]
-    fn the_output_tail_keeps_the_cap_at_a_char_boundary() {
+    fn the_kept_output_is_sanitized_before_the_cap() {
         let short = "x".repeat(MAX_OUTPUT_BYTES);
-        assert_eq!(output_tail(&short), (short.as_str(), false));
+        assert_eq!(kept_output(&short), (short.clone(), false));
         let long = format!("{}é{}", "a".repeat(100), "b".repeat(MAX_OUTPUT_BYTES - 1));
-        let (tail, cut) = output_tail(&long);
+        let (tail, cut) = kept_output(&long);
         assert!(cut);
         assert!(tail.len() <= MAX_OUTPUT_BYTES);
         assert!(tail.starts_with('b'));
+        // Tabs widen before the cap, so the kept bytes stay inside it.
+        let tabs = "\t".repeat(MAX_OUTPUT_BYTES);
+        let (tail, cut) = kept_output(&tabs);
+        assert!(cut);
+        assert_eq!(tail.len(), MAX_OUTPUT_BYTES);
+        assert!(
+            tail.capacity() <= MAX_OUTPUT_BYTES + 64,
+            "{}",
+            tail.capacity()
+        );
+        assert!(tail.bytes().all(|byte| byte == b' '));
+        let (tail, cut) = kept_output("a\x1b[31mb\r\n");
+        assert_eq!((tail.as_str(), cut), ("a[31mb\n", false));
+    }
+
+    #[test]
+    fn line_count_matches_the_lines_iterator() {
+        for text in ["", "a", "a\n", "a\nb", "a\nb\n", "\n", "\n\n", "a\n\nb"] {
+            assert_eq!(line_count(text), text.lines().count(), "{text:?}");
+        }
     }
 
     #[test]

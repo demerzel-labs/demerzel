@@ -10,7 +10,7 @@ use std::time::Instant;
 use demerzel_core::{ApprovalAnswer, EngineEvent, EventSink, Usage};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cards::output_tail;
+use crate::cards::kept_output;
 
 /// One owned display event, decoupled from the engine's borrowed
 /// [`EngineEvent`].
@@ -34,7 +34,8 @@ pub(crate) enum DisplayEvent {
         text: String,
     },
     /// The call returned. `output` is the kept tail of the tool's
-    /// output; `output_cut` says the head fell over the cap.
+    /// output, sanitized; `output_cut` says the head fell over the
+    /// cap.
     ToolEnd {
         id: String,
         name: String,
@@ -88,7 +89,9 @@ impl EventSender {
 
     /// The preview of a dispatching call — the diff, the command —
     /// for the card of call `id`. Send it at the call's `ToolRun`
-    /// event; the interface attaches it to the card by id.
+    /// event; the interface attaches it to the card by id. The first
+    /// line joins the card's header, without a leading tool name;
+    /// the rest is the body, kept up to 8 KiB.
     pub fn tool_preview(&self, id: &str, text: impl Into<String>) {
         let _ = self.tx.send(DisplayEvent::ToolPreview {
             id: id.to_string(),
@@ -102,7 +105,7 @@ impl EventSink for EventSender {
         let owned = match event {
             EngineEvent::TextDelta(delta) => DisplayEvent::TextDelta(delta.to_string()),
             EngineEvent::ReasoningDelta(delta) => DisplayEvent::ReasoningDelta(delta.to_string()),
-            EngineEvent::ToolStart { id, name } => DisplayEvent::ToolStart {
+            EngineEvent::ToolStart { id, name, .. } => DisplayEvent::ToolStart {
                 id: id.to_string(),
                 name: name.to_string(),
             },
@@ -120,16 +123,17 @@ impl EventSink for EventSender {
                 summary,
                 is_error,
                 output,
+                ..
             } => {
-                // The interface keeps a tail: the copy is bounded
-                // here, before the channel.
-                let (kept, output_cut) = output_tail(output);
+                // The interface keeps a sanitized tail: the copy is
+                // bounded here, before the channel.
+                let (output, output_cut) = kept_output(output);
                 DisplayEvent::ToolEnd {
                     id: id.to_string(),
                     name: name.to_string(),
                     summary: summary.map(str::to_string),
                     is_error,
-                    output: kept.to_string(),
+                    output,
                     output_cut,
                     at: Instant::now(),
                 }

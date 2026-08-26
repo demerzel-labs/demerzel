@@ -69,7 +69,9 @@ struct PreviewSink {
 
 impl EventSink for PreviewSink {
     fn event(&self, event: EngineEvent<'_>) {
-        if let EngineEvent::ToolRun { id, name, input } = &event
+        if let EngineEvent::ToolRun {
+            id, name, input, ..
+        } = &event
             && let Some(preview) = run_preview(name, input)
         {
             self.events.tool_preview(id, preview);

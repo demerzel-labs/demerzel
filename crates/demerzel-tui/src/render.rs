@@ -85,10 +85,12 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         draw_status(frame, bar_row, view.status);
     }
     match view.approval {
-        Some(question) => {
-            let line = Line::styled(question, Style::default().add_modifier(Modifier::BOLD));
-            frame.render_widget(Paragraph::new(line), input_row);
-        }
+        Some(question) => draw_line(
+            frame,
+            input_row,
+            question,
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         None => draw_input(frame, input_row, view.input),
     }
     transcript_area.height
@@ -113,51 +115,44 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
         totals.as_str(),
     ];
 
-    // The walk stops at the width, so this frame-rate path never
-    // copies a segment whole — an oversized model name costs its
-    // visible columns, nothing more.
     let width = usize::from(area.width);
-    let mut shown = String::with_capacity(width * 4);
-    let mut used = 0usize;
-    'segments: for segment in segments {
-        for ch in segment.chars() {
-            // The model name comes from config and `/model`; an
-            // escape byte must never reach the frame, the
-            // transcript's rule.
-            if ch.is_control() {
-                continue;
-            }
-            let cols = ch.width().unwrap_or(0);
-            if used + cols > width {
-                break 'segments;
-            }
-            shown.push(ch);
-            used += cols;
-        }
-    }
+    let (mut shown, used) = fit_row(segments, width);
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));
     let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// One row of text cut to the width, control characters dropped.
+/// One row of text cut to the width: the progress line, the
+/// approval question.
 fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
-    let width = usize::from(area.width);
-    let mut shown = String::with_capacity(text.len().min(width * 4));
-    let mut used = 0usize;
-    for ch in text.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        let cols = ch.width().unwrap_or(0);
-        if used + cols > width {
-            break;
-        }
-        shown.push(ch);
-        used += cols;
-    }
+    let (shown, _) = fit_row([text], usize::from(area.width));
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
+}
+
+/// The columns of `parts` that fit in `width`, joined, and the
+/// columns used. The walk stops at the width, so this frame-rate
+/// path never copies a part whole — an oversized model name or tool
+/// name costs its visible columns, nothing more. Control characters
+/// drop: a name from config, from `/model`, or from the model must
+/// never put an escape byte in the frame, the transcript's rule.
+fn fit_row<'a>(parts: impl IntoIterator<Item = &'a str>, width: usize) -> (String, usize) {
+    let mut shown = String::with_capacity(width.min(512) * 2);
+    let mut used = 0usize;
+    'parts: for part in parts {
+        for ch in part.chars() {
+            if ch.is_control() {
+                continue;
+            }
+            let cols = ch.width().unwrap_or(0);
+            if used + cols > width {
+                break 'parts;
+            }
+            shown.push(ch);
+            used += cols;
+        }
+    }
+    (shown, used)
 }
 
 fn style(kind: Kind) -> Style {
@@ -200,7 +195,7 @@ fn face_style(kind: Kind, face: Face) -> Style {
     if face.has(Face::LINK) {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
-    if face.has(Face::URL) || face.has(Face::MARKER) {
+    if face.has(Face::URL) || face.has(Face::MARKER) || face.has(Face::MUTED) {
         style = style.add_modifier(Modifier::DIM);
     }
     style
@@ -761,10 +756,12 @@ line 12",
                 transcript: &mut transcript,
                 input: &input,
                 status: &status,
-                approval: Some("approve bash? [y]es / [a]lways / [N]o"),
+                approval: Some("approve ba\x1bsh? [y]es / [a]lways / [N]o"),
                 progress: None,
             },
         );
+        // The tool name is model-controlled: no escape reaches the
+        // row.
         assert_eq!(lines[1].trim_end(), "approve bash? [y]es / [a]lways / [N]o");
     }
 }
