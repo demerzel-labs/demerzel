@@ -39,6 +39,7 @@ model = "claude-sonnet-5"
 [tui]
 mouse = true                     # wheel scroll in the full screen
 markdown = true                  # render model replies as markdown
+thinking = "closed"              # closed | open | hidden
 ```
 
 | Key | Flag | Variable | Default |
@@ -51,6 +52,7 @@ markdown = true                  # render model replies as markdown
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
+| `tui.thinking` | — | — | `closed` |
 
 In one layer, a `[providers.<id>]` value is more specific than the
 top-level key, so it wins. A top-level `model` in a layer that names
@@ -74,6 +76,13 @@ stop the run.
 Each `meta` record in the session file names the effort in force, so
 a reader can tell what a run used. A resumed session takes its level
 from config, not from the file.
+
+## Thinking blocks
+
+`tui.thinking` sets how a thinking block starts in the full-screen
+interface. `closed` shows one row: the state and the first line of
+the reasoning summary. `open` shows the whole summary. `hidden` shows
+no block. Ctrl-T opens the newest block and closes it again.
 
 ## Trust rules
 

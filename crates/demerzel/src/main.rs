@@ -300,6 +300,7 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.continue_last = cli.continue_last;
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;
+    config.thinking = settings.tui.thinking.value;
     if settings.history_file.value {
         config.history_path = demerzel_core::paths::data_dir()
             .ok()

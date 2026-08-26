@@ -33,6 +33,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.mode = mode.to_string();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
+    options.thinking = config.thinking;
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,

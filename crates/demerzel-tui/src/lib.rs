@@ -27,6 +27,7 @@ mod input;
 mod markdown;
 mod render;
 mod terminal;
+mod thinking;
 mod transcript;
 mod wrap;
 
@@ -35,6 +36,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 pub use events::{ApprovalChannel, EventSender};
+pub use thinking::Thinking;
 
 /// The input prompt, shared with the REPL. The bench probe waits for
 /// these bytes on the output stream, so the spelling is load-bearing.
@@ -94,6 +96,9 @@ pub struct Options {
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.
     pub markdown: bool,
+    /// How a thinking block starts: closed to one row, open, or not
+    /// shown. Closed by default; Ctrl-T opens and closes the newest.
+    pub thinking: Thinking,
 }
 
 impl Default for Options {
@@ -105,6 +110,7 @@ impl Default for Options {
             mode: String::new(),
             mouse: true,
             markdown: true,
+            thinking: Thinking::Closed,
         }
     }
 }

@@ -72,10 +72,15 @@ enum Stage {
     Tool(String),
 }
 
-/// The progress line's state: the turn's start and its stage.
+/// The progress line's state: the turn's start, its stage, and when
+/// the stage began.
 struct Progress {
     started: Instant,
     stage: Stage,
+    /// When the stage last changed. A thinking block's clock starts
+    /// here: the Codex endpoint streams a summary after the
+    /// reasoning, so the first delta comes at the end of the thought.
+    since: Instant,
 }
 
 impl Progress {
@@ -170,6 +175,7 @@ impl App {
         let (display_tx, displays) = mpsc::unbounded_channel();
         let (approval_tx, approvals) = mpsc::unbounded_channel();
         let mut transcript = Transcript::new(options.markdown);
+        transcript.set_thinking(options.thinking);
         if let Some(banner) = &options.banner {
             transcript.push_line(Kind::Notice, banner);
         }
@@ -257,9 +263,11 @@ impl App {
         // turns may still be queued; drop it instead of aborting this
         // turn with it.
         drain_signal(&mut self.sigint).await;
+        let now = Instant::now();
         self.progress = Some(Progress {
-            started: Instant::now(),
+            started: now,
             stage: Stage::Thinking,
+            since: now,
         });
         self.dirty = true;
         let mut tick = Instant::now() + TICK;
@@ -352,10 +360,22 @@ impl App {
                 self.transcript.push_delta(Kind::Text, &delta);
                 self.stage(Stage::Writing);
             }
-            DisplayEvent::ReasoningDelta(delta) => {
-                self.transcript.push_delta(Kind::Reasoning, &delta);
+            DisplayEvent::ReasoningDelta { text, at } => {
+                // The thought began when the model began thinking —
+                // the turn's start or the last tool's end — not at
+                // its first summary delta.
+                let at = match &self.progress {
+                    Some(Progress {
+                        stage: Stage::Thinking,
+                        since,
+                        ..
+                    }) => since.into_std(),
+                    _ => at,
+                };
+                self.transcript.reasoning_delta(&text, at);
                 self.stage(Stage::Thinking);
             }
+            DisplayEvent::ReasoningEnd { at } => self.transcript.reasoning_end(at),
             DisplayEvent::ToolStart { id, name } => {
                 self.transcript.tool_start(&id, &name);
                 self.stage(Stage::Writing);
@@ -421,6 +441,9 @@ impl App {
     /// The progress line's stage, while a turn runs.
     fn stage(&mut self, stage: Stage) {
         if let Some(progress) = &mut self.progress {
+            if std::mem::discriminant(&progress.stage) != std::mem::discriminant(&stage) {
+                progress.since = Instant::now();
+            }
             progress.stage = stage;
         }
     }
@@ -510,6 +533,10 @@ impl App {
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let expanded = !self.transcript.expanded();
                 self.transcript.set_expanded(expanded);
+                return Action::None;
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.transcript.toggle_thinking();
                 return Action::None;
             }
             _ => {}

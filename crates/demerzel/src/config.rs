@@ -20,6 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use demerzel_core::{ApprovalMode, Effort};
+use demerzel_tui::Thinking;
 
 /// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
@@ -92,6 +93,8 @@ pub struct TuiSettings {
     /// Markdown rendering of model replies in the full-screen
     /// interface; off shows the raw text.
     pub markdown: Setting<bool>,
+    /// How a thinking block starts in the full-screen interface.
+    pub thinking: Setting<Thinking>,
 }
 
 impl Settings {
@@ -130,6 +133,7 @@ struct ProviderKeys {
 struct TuiKeys {
     mouse: Option<bool>,
     markdown: Option<bool>,
+    thinking: Option<Thinking>,
 }
 
 /// One parsed config file.
@@ -239,6 +243,7 @@ fn parse_tui(
         match key.as_str() {
             "mouse" => into.mouse = Some(expect_bool(&path, value)?),
             "markdown" => into.markdown = Some(expect_bool(&path, value)?),
+            "thinking" => into.thinking = Some(expect_thinking(&path, value)?),
             _ => warnings.push(format!("unknown key `{path}`")),
         }
     }
@@ -246,6 +251,12 @@ fn parse_tui(
 }
 
 fn expect_effort(key: &str, value: toml::Value) -> Result<Effort, String> {
+    expect_string(key, value)?
+        .parse()
+        .map_err(|error| format!("`{key}` {error}"))
+}
+
+fn expect_thinking(key: &str, value: toml::Value) -> Result<Thinking, String> {
     expect_string(key, value)?
         .parse()
         .map_err(|error| format!("`{key}` {error}"))
@@ -539,6 +550,9 @@ pub fn resolve(
     let markdown = layer_key(project, Origin::Project, |l| l.tui.markdown)
         .or_else(|| layer_key(user, Origin::User, |l| l.tui.markdown))
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
+    let thinking = layer_key(project, Origin::Project, |l| l.tui.thinking)
+        .or_else(|| layer_key(user, Origin::User, |l| l.tui.thinking))
+        .unwrap_or_else(|| Setting::new(Thinking::Closed, Origin::Default));
 
     (
         Settings {
@@ -548,7 +562,11 @@ pub fn resolve(
             approval,
             effort,
             history_file,
-            tui: TuiSettings { mouse, markdown },
+            tui: TuiSettings {
+                mouse,
+                markdown,
+                thinking,
+            },
         },
         warnings,
     )
@@ -667,6 +685,29 @@ mod tests {
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
         assert!(settings.tui.markdown.value);
         assert_eq!(settings.tui.markdown.origin, Origin::Project);
+    }
+
+    #[test]
+    fn the_thinking_key_resolves_by_layer_and_rejects_other_words() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.tui.thinking.value, Thinking::Closed);
+        assert_eq!(settings.tui.thinking.origin, Origin::Default);
+
+        let user = layer("[tui]\nthinking = \"hidden\"");
+        let project = layer("[tui]\nthinking = \"open\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.tui.thinking.value, Thinking::Hidden);
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.tui.thinking.value, Thinking::Open);
+        assert_eq!(settings.tui.thinking.origin, Origin::Project);
+
+        let error = Layer::parse("[tui]\nthinking = \"shown\"").unwrap_err();
+        assert!(
+            error.contains("`tui.thinking`") && error.contains("closed, open, hidden"),
+            "{error}"
+        );
+        let error = Layer::parse("[tui]\nthinking = true").unwrap_err();
+        assert!(error.contains("`tui.thinking`"), "{error}");
     }
 
     #[test]
