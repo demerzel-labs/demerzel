@@ -1,5 +1,6 @@
 //! Frame rendering: the transcript pane above, the progress line
-//! while a turn runs, the status bar, and the input line below.
+//! while a turn runs, the input line, and the status bar at the
+//! bottom.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
@@ -50,15 +51,15 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     if area.height == 0 || area.width == 0 {
         return 0;
     }
-    // The status bar takes one row above the input when the screen
-    // has room for all three panes; a two-row screen keeps transcript
-    // and input. The progress line takes one more, between the
-    // transcript and the bar, when it shows and the screen has a
-    // fourth row.
+    // The status bar takes the bottom row when the screen has room
+    // for all three panes; a two-row screen keeps transcript and
+    // input. The input sits above the bar, and the progress line
+    // takes one more row above the input when it shows and the
+    // screen has a fourth row.
     let bar_rows = u16::from(area.height >= 3);
     let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
     let input_row = Rect {
-        y: area.y + area.height - 1,
+        y: area.y + area.height - 1 - bar_rows,
         height: 1,
         ..area
     };
@@ -80,7 +81,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     }
     if bar_rows > 0 {
         let bar_row = Rect {
-            y: area.y + area.height - 2,
+            y: area.y + area.height - 1,
             height: 1,
             ..area
         };
@@ -397,8 +398,8 @@ mod tests {
             },
         );
         assert_eq!(rows, 2);
-        assert!(lines[2].contains("test-model · ask"), "{:?}", lines[2]);
-        assert_eq!(lines[3].trim_end(), "dmz> ".trim_end());
+        assert_eq!(lines[2].trim_end(), "dmz> ".trim_end());
+        assert!(lines[3].contains("test-model · ask"), "{:?}", lines[3]);
     }
 
     #[test]
@@ -424,9 +425,9 @@ mod tests {
             },
         );
         assert!(
-            lines[1].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
+            lines[2].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
             "{:?}",
-            lines[1]
+            lines[2]
         );
     }
 
@@ -446,7 +447,7 @@ mod tests {
                 progress: None,
             },
         );
-        assert_eq!(lines[1], " test-model ");
+        assert_eq!(lines[2], " test-model ");
     }
 
     #[test]
@@ -706,7 +707,7 @@ line 12",
     }
 
     #[test]
-    fn the_progress_line_sits_under_the_transcript_and_takes_its_row() {
+    fn the_progress_line_sits_above_the_input_and_takes_a_transcript_row() {
         let mut transcript = Transcript::new(false);
         for i in 0..5 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
@@ -727,8 +728,8 @@ line 12",
         assert_eq!(rows, 2);
         assert_eq!(lines[1].trim_end(), "line 4");
         assert_eq!(lines[2].trim_end(), "⠋ 3s · bash[2J");
-        assert!(lines[3].contains("test-model · ask"), "{:?}", lines[3]);
-        assert_eq!(lines[4].trim_end(), "dmz>");
+        assert_eq!(lines[3].trim_end(), "dmz>");
+        assert!(lines[4].contains("test-model · ask"), "{:?}", lines[4]);
         // A three-row screen keeps the bar and drops the line.
         let (lines, rows) = render(
             30,
@@ -742,8 +743,8 @@ line 12",
             },
         );
         assert_eq!(rows, 1);
-        assert!(lines[1].contains("test-model"), "{:?}", lines[1]);
-        assert_eq!(lines[2].trim_end(), "dmz>");
+        assert_eq!(lines[1].trim_end(), "dmz>");
+        assert!(lines[2].contains("test-model"), "{:?}", lines[2]);
     }
 
     #[test]

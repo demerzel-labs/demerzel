@@ -556,7 +556,7 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     // The interrupted call: approved, running, then Ctrl-C. A resize
     // makes the next draw repaint the whole screen, so the progress
     // line reaches the stream in full: the elapsed time and the
-    // tool's name, with the bar and the prompt row under it.
+    // tool's name, with the prompt row and the bar under it.
     pty.send(b"wait\r");
     pty.wait_for("$ sleep 20");
     pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
@@ -565,8 +565,8 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.resize(100, 30);
     pty.wait_for("· bash $ sleep 20");
     pty.wait_for("s · bash");
-    pty.wait_for("· ask ·");
     pty.wait_for("dmz>");
+    pty.wait_for("· ask ·");
     pty.send(CTRL_C);
     pty.wait_for("interrupted");
     pty.wait_for("[turn aborted]");
