@@ -25,6 +25,14 @@ const END: &[u8] = b"\x1b[F";
 const CTRL_O: &[u8] = b"\x0f";
 const CTRL_T: &[u8] = b"\x14";
 const PAGE_UP: &[u8] = b"\x1b[5~";
+/// Alt-Enter as a legacy terminal reports it.
+const ALT_ENTER: &[u8] = b"\x1b\r";
+/// Shift-Enter as a terminal with the keyboard-enhancement flags
+/// reports it.
+const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
+/// The keyboard-enhancement push the interface sends on entry, with
+/// the disambiguate flag. A PTY can observe the request alone.
+const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
 /// Mouse reporting mode 1000, the first sequence capture turns on.
@@ -1022,4 +1030,55 @@ async fn the_effort_flag_and_command_reach_the_requests() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body["reasoning"]["effort"], "low");
     assert_eq!(requests[1].body["reasoning"]["effort"], "high");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_editor_takes_several_lines_and_completes_a_command() {
+    let mock = MockServer::start(vec![text_turn("four rows seen")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    // Alt-Enter and Shift-Enter each add a row; a paste keeps its
+    // newlines. Each row reaches the screen as it grows the box.
+    pty.send(b"first-row");
+    pty.send(ALT_ENTER);
+    pty.send(b"second-row");
+    pty.send(SHIFT_ENTER);
+    pty.send(b"\x1b[200~third-row\nfourth-row\x1b[201~");
+    pty.wait_for("first-row");
+    pty.wait_for("second-row");
+    pty.wait_for("third-row");
+    pty.wait_for("fourth-row");
+    pty.send(b"\r");
+    pty.wait_for("four rows seen");
+
+    // A command completes from the popup: the prefix lists it with
+    // its usage and help, Enter puts it on the line, Enter again
+    // submits it. The prefix alone would answer "unknown command".
+    pty.send(b"/ef");
+    pty.wait_for("/effort [level]");
+    pty.wait_for("show or set the reasoning effort");
+    pty.send(b"\r");
+    pty.send(b"\r");
+    pty.wait_for("effort: high");
+    // Tab moves the selection: `/e` lists /effort first, then /exit.
+    // The completed /exit ends the session; /effort would not.
+    pty.send(b"/e");
+    pty.wait_for("/exit");
+    pty.send(b"\t");
+    pty.send(b"\r");
+    pty.send(b"\r");
+    let raw = pty.wait_exit();
+
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains(KEYBOARD_PUSH),
+        "the keyboard-enhancement flags were not pushed"
+    );
+    // The prompt reached the model with its four rows as lines.
+    let body = mock.received()[0].body.to_string();
+    assert!(
+        body.contains("first-row\\nsecond-row\\nthird-row\\nfourth-row"),
+        "{body}"
+    );
 }

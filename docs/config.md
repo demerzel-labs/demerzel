@@ -86,8 +86,20 @@ shows the whole summary. `hidden` shows no block.
 
 ## Keys
 
-The full-screen interface has two keys beyond the editor's:
+The full-screen interface has these keys:
 
+- Enter submits the prompt. Alt-Enter inserts a newline. Shift-Enter
+  inserts a newline on a terminal that takes the keyboard-enhancement
+  flags. A paste keeps its newlines.
+- Up and Down move the cursor across the rows of the prompt. On the
+  first row, Up shows the previous history entry. On the last row,
+  Down shows the next one.
+- Home, End, Ctrl-A, and Ctrl-E move to the start and the end of the
+  line. Ctrl-U and Ctrl-K delete to the start and the end of the
+  line. Ctrl-W deletes the word before the cursor.
+- A prompt that starts with `/` opens the command list. Tab and the
+  arrow keys select a command. Enter puts the command on the line.
+  Enter again submits it. Esc closes the list.
 - Ctrl-O expands every tool card to its kept output and collapses
   them again.
 - Ctrl-T opens the newest thinking block and closes it again.

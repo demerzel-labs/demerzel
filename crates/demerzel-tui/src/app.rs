@@ -12,6 +12,13 @@
 //! and collapses them again. Ctrl-T opens the newest thinking block
 //! and closes it again.
 //!
+//! The editor holds several lines: Enter submits, Alt-Enter and
+//! Shift-Enter insert a newline, and a paste keeps its newlines. Up
+//! and Down move across rows, and at the first or last row they
+//! browse the history. A line that starts with `/` opens the
+//! completion popup: Tab and the arrows select, Enter completes, Esc
+//! closes it.
+//!
 //! While a turn runs, a progress line above the input shows a
 //! spinner, the elapsed time, and the stage. The status bar is the
 //! bottom row, under the input. A tick timer wakes the
@@ -30,9 +37,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::cards::{self, Outcome};
+use crate::editor::Editor;
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
-use crate::input::Input;
 use crate::render::{self, Status, View};
 use crate::terminal::Guard;
 use crate::transcript::{Kind, Transcript};
@@ -140,7 +147,7 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
 struct App {
     guard: Guard,
     transcript: Transcript,
-    input: Input,
+    editor: Editor,
     history: History,
     status: Status,
     mode: Mode,
@@ -184,7 +191,7 @@ impl App {
         Ok(Self {
             guard,
             transcript,
-            input: Input::new(),
+            editor: Editor::new(options.commands),
             history: History::load(options.history_path),
             status: Status {
                 model: options.model,
@@ -481,7 +488,7 @@ impl App {
             }
             Event::Paste(text) => {
                 if matches!(self.mode, Mode::Edit) {
-                    self.input.insert_str(&normalize_paste(&text));
+                    self.editor.insert_str(&normalize_paste(&text));
                     self.dirty = true;
                 }
                 Action::None
@@ -536,26 +543,56 @@ impl App {
             return self.approval_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
+        // The popup takes the selection keys while it is open. Enter
+        // completes the line, or submits it when it holds the command
+        // already.
+        if plain && self.editor.popup_open() {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down => {
+                    self.editor.select_next();
+                    return Action::None;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.editor.select_prev();
+                    return Action::None;
+                }
+                KeyCode::Esc => {
+                    self.editor.dismiss();
+                    return Action::None;
+                }
+                KeyCode::Enter if self.editor.complete() => return Action::None,
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => return self.ctrl_c(phase),
             KeyCode::Char('d') if ctrl => {
-                if !self.input.is_empty() {
-                    self.input.delete();
+                if !self.editor.is_empty() {
+                    self.editor.delete();
                 } else if phase == Phase::Idle {
                     return Action::Exit;
                 }
             }
-            KeyCode::Char('a') if ctrl => self.input.home(),
-            KeyCode::Char('e') if ctrl => self.input.end(),
-            KeyCode::Char('u') if ctrl => self.input.kill_to_start(),
-            KeyCode::Char('k') if ctrl => self.input.kill_to_end(),
-            KeyCode::Char('w') if ctrl => self.input.kill_word_back(),
-            KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.input.insert_char(ch)
+            KeyCode::Char('a') if ctrl => self.editor.home(),
+            KeyCode::Char('e') if ctrl => self.editor.end(),
+            KeyCode::Char('u') if ctrl => self.editor.kill_to_start(),
+            KeyCode::Char('k') if ctrl => self.editor.kill_to_end(),
+            KeyCode::Char('w') if ctrl => self.editor.kill_word_back(),
+            KeyCode::Char(ch) if plain => self.editor.insert_char(ch),
+            // Alt-Enter is the portable newline; Shift-Enter reaches
+            // the loop as its own key where the terminal takes the
+            // keyboard-enhancement flags.
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                self.editor.insert_char('\n')
             }
             KeyCode::Enter => {
                 if phase == Phase::Idle {
-                    let line = self.input.take();
+                    let line = self.editor.take();
                     let line = line.trim();
                     if !line.is_empty() {
                         // The reply lands at the bottom; show it.
@@ -564,22 +601,24 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => self.input.backspace(),
-            KeyCode::Delete => self.input.delete(),
-            KeyCode::Left => self.input.left(),
-            KeyCode::Right => self.input.right(),
-            KeyCode::Home => self.input.home(),
-            KeyCode::End => self.input.end(),
-            KeyCode::Up => {
-                if let Some(text) = self.history.up(self.input.text()) {
+            KeyCode::Backspace => self.editor.backspace(),
+            KeyCode::Delete => self.editor.delete(),
+            KeyCode::Left => self.editor.left(),
+            KeyCode::Right => self.editor.right(),
+            KeyCode::Home => self.editor.home(),
+            KeyCode::End => self.editor.end(),
+            // The arrows cross the editor's rows; past its first or
+            // last row they browse the history.
+            KeyCode::Up if !self.editor.up() => {
+                if let Some(text) = self.history.up(self.editor.text()) {
                     let text = text.to_string();
-                    self.input.set(&text);
+                    self.editor.set(&text);
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down if !self.editor.down() => {
                 if let Some(text) = self.history.down() {
                     let text = text.to_string();
-                    self.input.set(&text);
+                    self.editor.set(&text);
                 }
             }
             _ => {}
@@ -627,7 +666,7 @@ impl App {
     fn ctrl_c(&mut self, phase: Phase) -> Action {
         match phase {
             Phase::Idle => {
-                self.input.take();
+                self.editor.take();
                 self.history.reset();
                 Action::None
             }
@@ -644,7 +683,7 @@ impl App {
         let Self {
             guard,
             transcript,
-            input,
+            editor,
             status,
             page,
             progress,
@@ -665,7 +704,7 @@ impl App {
                 frame,
                 View {
                     transcript,
-                    input,
+                    editor,
                     status,
                     approval: question,
                     progress,
