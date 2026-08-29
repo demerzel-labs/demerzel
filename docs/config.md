@@ -129,7 +129,8 @@ A value is `#rrggbb`, one of the sixteen palette names (`black`,
 each with a `bright-` prefix), or `none`. `none` takes the color
 away; the terminal's own foreground shows, also inside a colored
 fence or colored text. A `comment` with no color also dims. A
-`status_bar` with no `text` color reverses onto its ground. A key
+`status_bar` with no `text` color reverses onto its ground; with
+no ground it reverses onto the `text` color. A key
 that names no role warns. A value that is no color stops the run. A
 name with no built-in theme and no table stops the run.
 
