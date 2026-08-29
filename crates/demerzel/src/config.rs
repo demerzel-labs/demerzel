@@ -145,7 +145,7 @@ struct TuiKeys {
     theme: Option<String>,
 }
 
-/// The roles one `[theme.<name>]` table sets, in file order. `None`
+/// The roles one `[theme.<name>]` table sets, in key order. `None`
 /// takes a role's color away.
 type ThemeKeys = Vec<(Role, Option<Color>)>;
 
@@ -647,7 +647,8 @@ pub fn theme(name: &str, project: Option<&Layer>, user: Option<&Layer>) -> Resul
         None if tables.clone().next().is_some() => Theme::terminal(),
         None => {
             return Err(format!(
-                "`tui.theme` names no theme: `{name}`; the built-in themes are {},                  and a `[theme.{name}]` table defines one",
+                "`tui.theme` names no theme: `{name}`. The built-in themes are {}. \
+                 A `[theme.{name}]` table defines a new theme.",
                 Theme::BUILT_IN.join(", ")
             ));
         }
@@ -894,6 +895,21 @@ mod tests {
         let (layer, warnings) = Layer::parse("[theme.ocean]\ncard_frame = \"red\"").unwrap();
         assert_eq!(warnings, vec!["unknown key `theme.ocean.card_frame`"]);
         assert!(layer.themes["ocean"].is_empty());
+    }
+
+    #[test]
+    fn the_config_docs_name_every_theme_role_and_theme() {
+        let docs = include_str!("../../../docs/config.md");
+        for &role in Role::ALL {
+            let cell = format!("`{}`", role.name());
+            assert!(docs.contains(&cell), "config.md lacks the role {cell}");
+        }
+        for &name in Theme::BUILT_IN {
+            assert!(
+                docs.contains(&format!("`{name}`")),
+                "config.md lacks {name}"
+            );
+        }
     }
 
     #[test]

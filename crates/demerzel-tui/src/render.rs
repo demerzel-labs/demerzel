@@ -172,9 +172,13 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
     let (mut shown, used) = fit_row(segments, width);
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));
-    let style = match palette.color(Role::StatusBar) {
-        Some(ground) => paint(Style::default().bg(ground), palette.color(Role::Text)),
-        None => Style::default().add_modifier(Modifier::REVERSED),
+    // With a ground and no text color the row reverses onto the
+    // ground: the terminal's own background reads on it, whatever
+    // it is.
+    let style = match (palette.color(Role::StatusBar), palette.color(Role::Text)) {
+        (Some(ground), Some(text)) => Style::default().bg(ground).fg(text),
+        (Some(ground), None) => Style::default().fg(ground).add_modifier(Modifier::REVERSED),
+        (None, _) => Style::default().add_modifier(Modifier::REVERSED),
     };
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
@@ -1101,8 +1105,14 @@ line 12",
         );
         // The bar takes the theme's ground instead of reversing.
         let bar = colored[(1u16, 5u16)].style();
-        assert_eq!(bar.bg, Some(TermColor::Rgb(0x3b, 0x42, 0x52)));
+        assert_eq!(bar.bg, Some(TermColor::Rgb(0x39, 0x41, 0x50)));
         assert!(!bar.add_modifier.contains(Modifier::REVERSED));
+        // A ground with no text color reverses onto the ground.
+        theme.set(Role::Text, None);
+        let bar = themed_buffer(&Palette::new(&theme, Depth::TrueColor))[(1u16, 5u16)].style();
+        assert_eq!(bar.fg, Some(TermColor::Rgb(0x39, 0x41, 0x50)));
+        assert!(bar.add_modifier.contains(Modifier::REVERSED));
+        theme.set(Role::Text, Theme::dark().get(Role::Text));
         // The prompt takes its role's color.
         assert_eq!(
             colored[(0u16, 4u16)].style().fg,

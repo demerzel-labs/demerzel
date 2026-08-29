@@ -8,14 +8,14 @@
 //! `COLORTERM` says so, else the nearest entry of the 256-color
 //! palette, else the nearest of the terminal's own sixteen. A
 //! non-empty `NO_COLOR` keeps no color at all; the attributes — bold,
-//! dim, italic, underline — stay, so every face still reads apart.
+//! dim, italic, underline — stay, so headings, emphasis, links,
+//! marks, and thinking still read apart.
 //!
 //! A role with no color leaves the terminal's own foreground in place.
 //! The `terminal` theme names palette entries only, never an RGB
 //! value, so it looks the same on every terminal: the terminal's
 //! palette is the theme.
 
-use std::fmt;
 use std::str::FromStr;
 
 use ratatui::style::Color as TermColor;
@@ -27,8 +27,9 @@ pub enum Color {
     /// A truecolor value. A terminal without truecolor gets the
     /// nearest palette entry.
     Rgb(u8, u8, u8),
-    /// One entry of the terminal's palette: 0–15 are its own sixteen
-    /// colors, 16–255 the fixed cube and grays.
+    /// One entry of the terminal's palette. Config names the
+    /// terminal's own sixteen, 0–15; the fit to a 256-color terminal
+    /// lands on the cube and the grays past them.
     Indexed(u8),
 }
 
@@ -53,45 +54,28 @@ const NAMES: [&str; 16] = [
 ];
 
 /// What a color value must look like, for error messages.
-pub const COLOR_FORMS: &str = "`#rrggbb`, a palette name such as `red` or `bright-blue`, or `none`";
+const COLOR_FORMS: &str = "`#rrggbb`, a palette name such as `red` or `bright-blue`, or `none`";
 
 impl FromStr for Color {
     type Err = String;
 
     /// `#rrggbb`, or one of the sixteen palette names.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = || format!("`{text}` is not a color; expected {COLOR_FORMS}");
         if let Some(hex) = text.strip_prefix('#') {
-            let channels = hex
-                .as_bytes()
-                .chunks(2)
-                .map(|pair| {
-                    std::str::from_utf8(pair)
-                        .ok()
-                        .and_then(|p| u8::from_str_radix(p, 16).ok())
-                })
-                .collect::<Option<Vec<u8>>>();
-            return match channels.as_deref() {
-                Some(&[r, g, b]) if hex.len() == 6 => Ok(Color::Rgb(r, g, b)),
-                _ => Err(format!("`{text}` is not a color; expected {COLOR_FORMS}")),
-            };
+            // Six hex digits and nothing else: the radix parse alone
+            // would take a sign.
+            if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(bad());
+            }
+            let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).map_err(|_| bad());
+            return Ok(Color::Rgb(channel(0)?, channel(2)?, channel(4)?));
         }
         NAMES
             .iter()
             .position(|name| *name == text)
             .map(|index| Color::Indexed(index as u8))
-            .ok_or_else(|| format!("`{text}` is not a color; expected {COLOR_FORMS}"))
-    }
-}
-
-impl fmt::Display for Color {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Color::Rgb(r, g, b) => write!(f, "#{r:02x}{g:02x}{b:02x}"),
-            Color::Indexed(index) => match NAMES.get(usize::from(index)) {
-                Some(name) => f.write_str(name),
-                None => write!(f, "{index}"),
-            },
-        }
+            .ok_or_else(bad)
     }
 }
 
@@ -103,97 +87,76 @@ pub fn parse_color(text: &str) -> Result<Option<Color>, String> {
     text.parse().map(Some)
 }
 
-/// What a theme colors. Each role is one key of a `[theme.<name>]`
-/// table, spelled with underscores: `inline_code`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Role {
-    /// Body text: replies, cards, the input box.
-    Text,
+/// Define [`Role`], its list, and its config names from one table,
+/// so a role cannot join the enum without joining the list that
+/// sizes a theme.
+macro_rules! roles {
+    ($( $(#[$doc:meta])* $variant:ident = $name:literal, )*) => {
+        /// What a theme colors. Each role is one key of a
+        /// `[theme.<name>]` table, spelled with underscores:
+        /// `inline_code`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[non_exhaustive]
+        pub enum Role {
+            $( $(#[$doc])* $variant, )*
+        }
+
+        impl Role {
+            /// Every role, in the order a theme stores them.
+            pub const ALL: &'static [Role] = &[ $( Role::$variant, )* ];
+
+            /// The config key of the role.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $( Role::$variant => $name, )*
+                }
+            }
+        }
+    };
+}
+
+roles! {
+    /// Body text: replies, cards, the input box, the status bar.
+    Text = "text",
     /// Secondary text: thinking blocks, notices, a card's output
-    /// tail, markdown marks, link destinations.
-    Dim,
+    /// tail, markdown marks, link destinations, the completions not
+    /// selected.
+    Dim = "dim",
     /// Emphasis the interface adds: the card header, the selected
     /// completion, the browse indicator.
-    Accent,
+    Accent = "accent",
     /// Failure messages and a failed call's mark.
-    Error,
+    Error = "error",
     /// A finished call's mark.
-    Success,
+    Success = "success",
     /// A waiting, declined, or interrupted call's mark, and the
     /// approval question.
-    Warning,
-    Heading,
+    Warning = "warning",
+    Heading = "heading",
     /// The text of a link.
-    Link,
-    InlineCode,
+    Link = "link",
+    InlineCode = "inline_code",
     /// The lines of a code fence, under the highlight classes.
-    CodeBlock,
+    CodeBlock = "code_block",
     /// The prompt, in the input box and on the echoed line.
-    Prompt,
-    /// The status bar's background.
-    StatusBar,
-    ProgressLine,
+    Prompt = "prompt",
+    /// The status bar's ground.
+    StatusBar = "status_bar",
+    ProgressLine = "progress_line",
     /// A `+` line of an edit preview.
-    DiffAdd,
+    DiffAdd = "diff_add",
     /// A `-` line of an edit preview.
-    DiffRemove,
+    DiffRemove = "diff_remove",
     /// The highlight classes of a code fence.
-    Keyword,
-    String,
-    Comment,
-    Number,
+    Keyword = "keyword",
+    String = "string",
+    Comment = "comment",
+    Number = "number",
 }
 
 impl Role {
-    /// Every role, in the order a theme stores them.
-    pub const ALL: [Role; 19] = [
-        Role::Text,
-        Role::Dim,
-        Role::Accent,
-        Role::Error,
-        Role::Success,
-        Role::Warning,
-        Role::Heading,
-        Role::Link,
-        Role::InlineCode,
-        Role::CodeBlock,
-        Role::Prompt,
-        Role::StatusBar,
-        Role::ProgressLine,
-        Role::DiffAdd,
-        Role::DiffRemove,
-        Role::Keyword,
-        Role::String,
-        Role::Comment,
-        Role::Number,
-    ];
-
-    /// The config key of the role.
-    pub fn name(self) -> &'static str {
-        match self {
-            Role::Text => "text",
-            Role::Dim => "dim",
-            Role::Accent => "accent",
-            Role::Error => "error",
-            Role::Success => "success",
-            Role::Warning => "warning",
-            Role::Heading => "heading",
-            Role::Link => "link",
-            Role::InlineCode => "inline_code",
-            Role::CodeBlock => "code_block",
-            Role::Prompt => "prompt",
-            Role::StatusBar => "status_bar",
-            Role::ProgressLine => "progress_line",
-            Role::DiffAdd => "diff_add",
-            Role::DiffRemove => "diff_remove",
-            Role::Keyword => "keyword",
-            Role::String => "string",
-            Role::Comment => "comment",
-            Role::Number => "number",
-        }
-    }
-
+    /// The slot of the role in a theme: its discriminant, which the
+    /// list above assigns in order.
     fn index(self) -> usize {
         self as usize
     }
@@ -204,7 +167,8 @@ impl FromStr for Role {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Role::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|role| role.name() == text)
             .ok_or_else(|| format!("`{text}` is not a theme role"))
     }
@@ -225,7 +189,7 @@ impl Default for Theme {
 impl Theme {
     /// The names of the built-in themes, in the order the docs list
     /// them.
-    pub const BUILT_IN: [&'static str; 3] = ["terminal", "dark", "light"];
+    pub const BUILT_IN: &'static [&'static str] = &["terminal", "dark", "light"];
 
     /// A theme with no color on any role.
     fn empty() -> Self {
@@ -268,23 +232,23 @@ impl Theme {
     /// Light text on a dark ground.
     pub fn dark() -> Self {
         Self::from_rgb([
-            (Role::Text, 0xd8dee9),
+            (Role::Text, 0xd5dbe5),
             (Role::Dim, 0x7b8494),
             (Role::Accent, 0x6fa8dc),
             (Role::Error, 0xe57373),
             (Role::Success, 0x8fbf6f),
             (Role::Warning, 0xd9a65a),
-            (Role::Heading, 0xeceff4),
+            (Role::Heading, 0xf0f2f5),
             (Role::Link, 0x62b7c9),
             (Role::InlineCode, 0xd9a65a),
             (Role::CodeBlock, 0xcdd3de),
             (Role::Prompt, 0x6fa8dc),
-            (Role::StatusBar, 0x3b4252),
+            (Role::StatusBar, 0x394150),
             (Role::ProgressLine, 0x6fa8dc),
             (Role::DiffAdd, 0x8fbf6f),
             (Role::DiffRemove, 0xe57373),
-            (Role::Keyword, 0xb48ead),
-            (Role::String, 0xa3be8c),
+            (Role::Keyword, 0xb78fb0),
+            (Role::String, 0xa6c08f),
             (Role::Comment, 0x6b7280),
             (Role::Number, 0xe0a458),
         ])
@@ -293,7 +257,7 @@ impl Theme {
     /// Dark text on a light ground.
     pub fn light() -> Self {
         Self::from_rgb([
-            (Role::Text, 0x2e3440),
+            (Role::Text, 0x2b3140),
             (Role::Dim, 0x6b7280),
             (Role::Accent, 0x1f6fb2),
             (Role::Error, 0xb3261e),
@@ -302,9 +266,9 @@ impl Theme {
             (Role::Heading, 0x1b1f24),
             (Role::Link, 0x1f6fb2),
             (Role::InlineCode, 0x8a3b00),
-            (Role::CodeBlock, 0x2e3440),
+            (Role::CodeBlock, 0x2b3140),
             (Role::Prompt, 0x1f6fb2),
-            (Role::StatusBar, 0xd8dee9),
+            (Role::StatusBar, 0xd5dbe5),
             (Role::ProgressLine, 0x1f6fb2),
             (Role::DiffAdd, 0x2e7d32),
             (Role::DiffRemove, 0xb3261e),
@@ -380,7 +344,7 @@ pub(crate) struct Palette {
 impl Palette {
     pub(crate) fn new(theme: &Theme, depth: Depth) -> Self {
         let mut colors = [None; Role::ALL.len()];
-        for role in Role::ALL {
+        for &role in Role::ALL {
             colors[role.index()] = theme
                 .get(role)
                 .and_then(|color| fit(color, depth))
@@ -513,37 +477,47 @@ mod tests {
         assert_eq!("bright-blue".parse(), Ok(Color::Indexed(12)));
         assert_eq!(parse_color("none"), Ok(None));
         assert_eq!(parse_color("cyan"), Ok(Some(Color::Indexed(6))));
-        for bad in ["#5faf", "#5fafd7ff", "#gggggg", "Red", "", "5fafd7"] {
+        for bad in [
+            "#5faf",
+            "#5fafd7ff",
+            "#gggggg",
+            "#+1+2+3",
+            "# 1 2 3",
+            "Red",
+            "",
+            "5fafd7",
+        ] {
             let error = bad.parse::<Color>().unwrap_err();
             assert!(error.contains("not a color"), "{bad}: {error}");
         }
-        assert_eq!(Color::Rgb(0x5f, 0xaf, 0xd7).to_string(), "#5fafd7");
-        assert_eq!(Color::Indexed(9).to_string(), "bright-red");
     }
 
     #[test]
     fn every_role_has_one_name_that_parses_back() {
-        for role in Role::ALL {
+        for &role in Role::ALL {
             assert_eq!(role.name().parse::<Role>(), Ok(role));
         }
         assert!("card_frame".parse::<Role>().is_err());
-        assert_eq!(Role::ALL.len(), Theme::empty().colors.len());
+        // The list assigns each role its slot.
+        for (slot, &role) in Role::ALL.iter().enumerate() {
+            assert_eq!(role.index(), slot);
+        }
     }
 
     #[test]
     fn the_built_in_themes_resolve_by_name() {
-        for name in Theme::BUILT_IN {
+        for &name in Theme::BUILT_IN {
             assert!(Theme::named(name).is_some(), "{name}");
         }
         assert!(Theme::named("ocean").is_none());
         assert_eq!(Theme::default(), Theme::terminal());
         // The terminal theme names palette entries only.
-        for role in Role::ALL {
+        for &role in Role::ALL {
             assert!(!matches!(Theme::terminal().get(role), Some(Color::Rgb(..))));
         }
         // The other two color every role.
         for theme in [Theme::dark(), Theme::light()] {
-            for role in Role::ALL {
+            for &role in Role::ALL {
                 assert!(matches!(theme.get(role), Some(Color::Rgb(..))), "{role:?}");
             }
         }
@@ -606,7 +580,7 @@ mod tests {
             Some(TermColor::Rgb(..) | TermColor::Indexed(_))
         ));
         let none = Palette::new(&theme, Depth::None);
-        for role in Role::ALL {
+        for &role in Role::ALL {
             assert_eq!(none.color(role), None);
         }
         // Palette entries pass through every depth but none.

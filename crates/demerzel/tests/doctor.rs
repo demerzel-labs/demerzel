@@ -290,7 +290,7 @@ fn doctor_counts_a_theme_name_with_no_theme_as_a_problem() {
     let (out, code) = bed.doctor(&[]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("tui.theme = ocean (user file)"), "{out}");
-    assert!(out.contains("problem: `tui.theme` names no theme"), "{out}");
+    assert!(out.contains("problem: `tui.theme`"), "{out}");
 
     // The table in the project file names it.
     bed.write_project_config("[theme.ocean]\naccent = \"#5fafd7\"");

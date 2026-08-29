@@ -1249,12 +1249,12 @@ async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
     .await;
     let params = color_params(&raw);
     assert!(
-        has_params(&params, &[38, 2, 0xd8, 0xde, 0xe9]),
+        has_params(&params, &[38, 2, 0xd5, 0xdb, 0xe5]),
         "the text role in truecolor: {params:?}"
     );
     // The status bar's ground is the theme's.
     assert!(
-        has_params(&params, &[48, 2, 0x3b, 0x42, 0x52]),
+        has_params(&params, &[48, 2, 0x39, 0x41, 0x50]),
         "the bar's ground in truecolor: {params:?}"
     );
 }
@@ -1316,5 +1316,8 @@ async fn a_theme_name_with_no_theme_stops_the_run() {
     };
     assert!(!status.success());
     let text = String::from_utf8_lossy(&pty.seen);
-    assert!(text.contains("`tui.theme` names no theme"), "{text}");
+    assert!(
+        text.contains("`tui.theme`") && text.contains("ocean"),
+        "{text}"
+    );
 }

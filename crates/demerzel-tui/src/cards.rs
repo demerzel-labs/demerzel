@@ -376,8 +376,9 @@ impl Card {
         let header_end = self.header_end.min(len);
         if header_end > 0 {
             let mark = self.state.glyph().len_utf8().min(header_end);
-            out.push((0, Face::TITLE | self.state.face()));
-            if mark < header_end {
+            let state = self.state.face();
+            out.push((0, Face::TITLE | state));
+            if mark < header_end && state != Face::PLAIN {
                 out.push((mark as u32, Face::TITLE));
             }
             out.push((header_end as u32, Face::PLAIN));
@@ -797,11 +798,12 @@ mod tests {
         card.faces(shown.len(), &mut faces);
         let removed = "· edit src/lib.rs\n  ".len() as u32;
         let added = "· edit src/lib.rs\n  - old line\n  ".len() as u32;
+        // A running call's mark has no face of its own, so the
+        // header is one entry.
         assert_eq!(
             faces,
             vec![
                 (0, Face::TITLE),
-                ("·".len() as u32, Face::TITLE),
                 ("· edit src/lib.rs".len() as u32, Face::PLAIN),
                 (removed, Face::DIFF_REMOVE),
                 (removed + "- old line".len() as u32, Face::PLAIN),
@@ -814,6 +816,27 @@ mod tests {
         card.faces(removed as usize + 4, &mut faces);
         assert!(faces.iter().all(|&(at, _)| at <= removed + 4));
         assert!(faces.iter().any(|&(_, face)| face == Face::DIFF_REMOVE));
+
+        // The output starts where the last preview line ends: one
+        // change there, and the entries stay in order.
+        card.set_preview("src/lib.rs\n+ new line");
+        finish(&mut card, "out", false);
+        let shown = text(&mut card);
+        let mut faces = Vec::new();
+        card.faces(shown.len(), &mut faces);
+        let added = "✓ edit src/lib.rs\n  ".len() as u32;
+        assert_eq!(
+            faces,
+            vec![
+                (0, Face::TITLE | Face::SUCCESS),
+                ("✓".len() as u32, Face::TITLE),
+                ("✓ edit src/lib.rs".len() as u32, Face::PLAIN),
+                (added, Face::DIFF_ADD),
+                (added + "+ new line".len() as u32, Face::MUTED),
+                (added + "+ new line\n  out".len() as u32, Face::PLAIN),
+            ]
+        );
+        assert!(faces.windows(2).all(|pair| pair[0].0 < pair[1].0));
 
         finish(&mut card, "", true);
         let shown = text(&mut card);

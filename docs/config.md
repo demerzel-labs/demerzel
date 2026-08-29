@@ -107,8 +107,8 @@ built-in name edits that theme. A table with a new name starts from
 
 | Role | What it colors |
 |---|---|
-| `text` | replies, cards, the input box |
-| `dim` | thinking blocks, notices, a card's output tail, markdown marks |
+| `text` | replies, cards, the input box, the status bar's text |
+| `dim` | thinking blocks, notices, a card's output tail, markdown marks, link destinations, the completions not selected |
 | `accent` | card headers, the selected completion, the browse indicator |
 | `error` | failure messages, a failed call's mark |
 | `success` | a finished call's mark |
@@ -118,7 +118,7 @@ built-in name edits that theme. A table with a new name starts from
 | `inline_code` | code spans |
 | `code_block` | the lines of a code fence |
 | `prompt` | the prompt |
-| `status_bar` | the status bar's background |
+| `status_bar` | the status bar's ground |
 | `progress_line` | the progress line |
 | `diff_add` | a `+` line of an edit preview |
 | `diff_remove` | a `-` line of an edit preview |
@@ -127,9 +127,11 @@ built-in name edits that theme. A table with a new name starts from
 A value is `#rrggbb`, one of the sixteen palette names (`black`,
 `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and
 each with a `bright-` prefix), or `none`. `none` takes the color
-away; the terminal's own foreground shows. A key that names no role
-warns. A value that is no color stops the run. A name with no
-built-in theme and no table stops the run.
+away; the terminal's own foreground shows. One exception: a
+`comment` with no color drops the fence's color and dims. A
+`status_bar` with no `text` color reverses onto its ground. A key
+that names no role warns. A value that is no color stops the run. A
+name with no built-in theme and no table stops the run.
 
 Both files can define tables. For one theme, the user file's table
 applies first, then the project file's, role by role.
@@ -143,7 +145,9 @@ The interface fits the theme to the terminal:
 - Any other `TERM`: each RGB value becomes the nearest of the
   sixteen palette entries.
 - A non-empty `NO_COLOR`: no color at all. Bold, dim, italic, and
-  underline stay, so each element still reads apart.
+  underline stay, so headings, emphasis, links, marks, and thinking
+  still read apart. The line interface follows the same rule for
+  its dim text.
 
 ## Keyboard keys
 
