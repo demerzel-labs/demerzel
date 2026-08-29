@@ -101,13 +101,14 @@ snap 12-idle
 # a code fence. The captures show whether the fence, the frame, and
 # the wrap keep the diagram readable at 120 columns, in follow mode
 # and browsed. The model ends the reply with a marker, the only
-# needle a text reply offers. Then copy mode selects three rows and
+# needle a text reply offers; the prompt spells the marker apart, so
+# the echoed prompt cannot match it. Then copy mode selects three rows and
 # pastes them into the input box with bracketed paste, as a terminal
 # would: the rendered rows must come back as text. The fence frame
 # comes with them; step 8b's own copy leaves it out.
-send 'describe this codebase in ascii visuals of the flow and the core components, inside one code fence; end your reply with the line DIAGRAM-DONE' Enter
+send 'describe this codebase in ascii visuals of the flow and the core components, inside one code fence; end your reply with one line that holds the word DONE, a space, then the word DIAGRAM' Enter
 wait_for 13-diagram-live '╭─' 180
-wait_for 14-diagram-done 'DIAGRAM-DONE' 300
+wait_for 14-diagram-done 'DONE DIAGRAM' 300
 sleep 6
 snap 15-diagram-tail
 send PPage

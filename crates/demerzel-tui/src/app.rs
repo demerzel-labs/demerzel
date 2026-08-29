@@ -8,8 +8,9 @@
 //!
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel when capture is on, PageUp, and PageDown browse; End and a
-//! submitted line return to the bottom. Ctrl-O expands every tool card to its kept output
-//! and collapses them again. Ctrl-T opens the newest thinking block
+//! submitted line return to the bottom. Ctrl-O expands every tool
+//! card to its kept output and collapses them again. Ctrl-T opens
+//! the newest thinking block
 //! and closes it again.
 //!
 //! The editor holds several lines: Enter submits, Alt-Enter and

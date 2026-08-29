@@ -356,9 +356,9 @@ impl Locations {
 ///
 /// The trust rule: a project file travels with the repository, so it
 /// must not raise privilege or move credentials. It cannot raise the
-/// approval mode, it cannot set an endpoint, and it cannot turn the
-/// history file or mouse capture on against a user who turned them
-/// off.
+/// approval mode, it cannot set an endpoint, it cannot turn the
+/// history file on against a user who turned it off, and it cannot
+/// turn mouse capture on.
 pub fn resolve(
     flags: &Flags,
     env: &dyn Fn(&str) -> Option<String>,
