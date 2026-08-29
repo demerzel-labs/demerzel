@@ -84,7 +84,7 @@ interface. A thinking block shows one reasoning summary from the
 model. `closed` shows the state and the summary's first line. `open`
 shows the whole summary. `hidden` shows no block.
 
-## Keys
+## Keyboard keys
 
 The full-screen interface has these keys:
 

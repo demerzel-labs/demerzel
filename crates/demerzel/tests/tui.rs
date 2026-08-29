@@ -849,10 +849,12 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     pty.send(WHEEL_UP);
     pty.send(WHEEL_UP);
     // Two notches of three rows: the window moved up six rows past
-    // the usage notice and the last five reply rows, so a 27-row
-    // pane opens on row 28; the indicator counts the six below.
-    pty.wait_for("row 28 of the long reply");
-    pty.wait_for("6 below");
+    // the usage notice and the last five reply rows. The resize
+    // lands in the same frame: the pane loses one row and the top
+    // row holds, so the scroll deepens to seven. A 27-row pane opens
+    // on row 27; the indicator counts the seven below.
+    pty.wait_for("row 27 of the long reply");
+    pty.wait_for("7 below");
     // End returns to the bottom of the transcript.
     pty.send(END);
     pty.resize(100, 30);

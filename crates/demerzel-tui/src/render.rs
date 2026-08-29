@@ -130,13 +130,15 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
 /// The prompt takes its columns from the first row, and every other
 /// row indents by as much, unless the screen is too narrow for
 /// both. One column stays free at the right, so the cursor can sit
-/// past the last char of a full row.
+/// past the last char of a full row. The text keeps two columns
+/// wherever the screen has them, so a wide char always has a row
+/// that holds it; at two columns the free column goes first.
 fn input_columns(width: u16) -> (u16, bool) {
     let prompt_cols = u16::try_from(display_width(PROMPT)).unwrap_or(u16::MAX);
-    if width > prompt_cols + 1 {
+    if width >= prompt_cols + 3 {
         (width - prompt_cols - 1, true)
     } else {
-        (width.saturating_sub(1).max(1), false)
+        (width.saturating_sub(1).max(2).min(width.max(1)), false)
     }
 }
 
@@ -795,6 +797,61 @@ line 12",
         let (_, cursor, buffer) = render_cursor(10, 2, &mut editor);
         assert_eq!(cursor, (7, 1));
         assert_eq!(buffer[(5u16, 1u16)].symbol(), "日");
+    }
+
+    #[test]
+    fn a_wide_char_shows_on_a_two_column_screen() {
+        let mut editor = Editor::new(Vec::new());
+        editor.set("日");
+        let (lines, cursor, _) = render_cursor(2, 2, &mut editor);
+        assert_eq!(lines[1].trim_end(), "日");
+        assert_eq!(cursor, (1, 1));
+        // A screen too narrow for the prompt and two text columns
+        // drops the prompt.
+        let (lines, cursor, _) = render_cursor(7, 2, &mut editor);
+        assert_eq!(lines[1].trim_end(), "日");
+        assert_eq!(cursor, (2, 1));
+    }
+
+    #[test]
+    fn the_input_box_growing_holds_the_browsed_top_row() {
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut transcript = Transcript::new(false);
+        for i in 0..20 {
+            transcript.push_line(Kind::Text, &format!("line {i:02}"));
+        }
+        let mut editor = Editor::new(Vec::new());
+        let status = status();
+        let mut top_line = |transcript: &mut Transcript, editor: &mut Editor| {
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        View {
+                            transcript,
+                            editor,
+                            status: &status,
+                            approval: None,
+                            progress: None,
+                        },
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..30u16)
+                .map(|x| buffer[(x, 0u16)].symbol())
+                .collect::<String>()
+        };
+        top_line(&mut transcript, &mut editor);
+        transcript.scroll_up(5);
+        let before = top_line(&mut transcript, &mut editor);
+        assert_eq!(before.trim_end(), "line 09");
+        // Two more editor rows take two transcript rows; the top row
+        // stays.
+        editor.set("one\ntwo\nthree");
+        let after = top_line(&mut transcript, &mut editor);
+        assert_eq!(after.trim_end(), "line 09");
+        assert_eq!(transcript.scroll(), 7);
     }
 
     #[test]
