@@ -1061,6 +1061,17 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.send(b"\r");
     pty.send(b"\r");
     pty.wait_for("effort: high");
+    // Esc closes the popup: a repaint shows no popup row, and Enter
+    // then submits the line as typed, which no command answers. The
+    // resize between Esc and Enter keeps the two keys out of one
+    // read, where an Esc before a byte reads as Alt.
+    pty.send(b"/ne");
+    pty.wait_for("start a fresh session at the next prompt");
+    pty.send(b"\x1b");
+    pty.resize(100, 29);
+    pty.absent_until("start a fresh session", "· ask ·");
+    pty.send(b"\r");
+    pty.wait_for("unknown command: /ne");
     // Tab moves the selection: `/e` lists /effort first, then /exit.
     // The completed /exit ends the session; /effort would not.
     pty.send(b"/e");

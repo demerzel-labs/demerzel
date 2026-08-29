@@ -9,57 +9,83 @@
 //! width change rebuilds it, and a frame walks only the rows it
 //! shows.
 //!
-//! A line that is `/` and lowercase letters opens the completion
-//! popup: the commands whose name starts with the line. The loop
-//! routes the selection keys here while the popup is open.
+//! A line that starts with `/` opens the completion popup: the
+//! commands whose name starts with the line. The loop routes the
+//! selection keys here while the popup is open. What a command name
+//! looks like is the driver's business: the popup matches the names
+//! it was given and states no rule of its own.
+//!
+//! The row readers — `row`, `cursor_row`, `cursor_col`,
+//! `scroll_to_cursor` — read the layout and run after `sync` in the
+//! same frame; a debug build checks that.
 
 use unicode_width::UnicodeWidthChar as _;
 
-/// Bytes one row can hold past its columns: room for wide chars and
-/// a few combining marks per cell. A run of zero-width chars breaks
-/// here, so a row never grows without bound.
-const ROW_BYTES_PER_COLUMN: usize = 8;
-const ROW_BYTES_SLACK: usize = 64;
+use crate::wrap::{ROW_BYTES_PER_COLUMN, ROW_BYTES_SLACK};
 
-/// Row-cache capacity kept after a submit. A large paste grows the
-/// cache once; the next prompt must not keep that memory.
+/// Row-cache capacity kept after a submit or a shrink. A large paste
+/// grows the cache once; the next prompt must not keep that memory.
 const KEPT_ROWS: usize = 64;
 
 /// One command the popup can complete: the usage line and the help
 /// line, the same two the `/help` reply shows.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct CommandSpec {
-    /// The usage line. It starts with the command name: `/model
-    /// [name]`.
-    pub usage: String,
-    /// One line of help.
-    pub help: String,
+    usage: String,
+    help: String,
+    /// Bytes of `usage` that are the command name.
+    name_len: usize,
+    /// The usage line names arguments after the command.
+    takes_args: bool,
 }
 
 impl CommandSpec {
+    /// `usage` starts with the command name, then the arguments the
+    /// command takes, if any: `/model [name]`. `help` is one line.
     pub fn new(usage: impl Into<String>, help: impl Into<String>) -> Self {
+        let usage = usage.into();
+        let mut words = usage.split_whitespace();
+        let name_len = words.next().map_or(0, str::len);
+        let takes_args = words.next().is_some();
         Self {
-            usage: usage.into(),
+            usage,
             help: help.into(),
+            name_len,
+            takes_args,
         }
+    }
+
+    /// The usage line.
+    pub fn usage(&self) -> &str {
+        &self.usage
+    }
+
+    /// The help line.
+    pub fn help(&self) -> &str {
+        &self.help
     }
 
     /// The command name: the usage line's first word.
     pub fn name(&self) -> &str {
-        self.usage.split_whitespace().next().unwrap_or("")
+        &self.usage[..self.name_len]
     }
+}
 
-    /// Whether the usage line names arguments after the command.
-    fn takes_args(&self) -> bool {
-        self.usage.split_whitespace().nth(1).is_some()
-    }
+/// What Enter did with the popup open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Completion {
+    /// The selected command went onto the line.
+    Applied,
+    /// The line held the selected command already: submit it.
+    OnTheLine,
+    /// The popup is closed; nothing changed.
+    NoMatch,
 }
 
 /// The editor: the buffer, the cursor, the row layout, the popup.
 /// `cursor` is a byte index on a char boundary.
 #[derive(Debug, Default)]
-pub struct Editor {
+pub(crate) struct Editor {
     buffer: String,
     cursor: usize,
     /// The rows at `width` text columns, as byte ranges of the
@@ -83,59 +109,59 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(commands: Vec<CommandSpec>) -> Self {
+    pub(crate) fn new(commands: Vec<CommandSpec>) -> Self {
         Self {
             commands,
             ..Self::default()
         }
     }
 
-    pub fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         &self.buffer
     }
 
     #[cfg(test)]
-    pub fn cursor(&self) -> usize {
+    pub(crate) fn cursor(&self) -> usize {
         self.cursor
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
 
-    /// Take the buffer and reset the editor.
-    pub fn take(&mut self) -> String {
+    /// Take the buffer and reset the editor. The rows described the
+    /// taken buffer; they go with it.
+    pub(crate) fn take(&mut self) -> String {
         self.cursor = 0;
         self.top = 0;
-        if self.rows.capacity() > KEPT_ROWS {
-            self.rows = Vec::new();
-        }
+        self.rows.clear();
+        self.rows.shrink_to(KEPT_ROWS);
         self.edited();
         std::mem::take(&mut self.buffer)
     }
 
     /// Replace the whole buffer, cursor at the end.
-    pub fn set(&mut self, text: &str) {
+    pub(crate) fn set(&mut self, text: &str) {
         self.buffer.clear();
         self.buffer.push_str(text);
         self.cursor = self.buffer.len();
         self.edited();
     }
 
-    pub fn insert_char(&mut self, ch: char) {
+    pub(crate) fn insert_char(&mut self, ch: char) {
         self.buffer.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
         self.edited();
     }
 
-    pub fn insert_str(&mut self, text: &str) {
+    pub(crate) fn insert_str(&mut self, text: &str) {
         self.buffer.insert_str(self.cursor, text);
         self.cursor += text.len();
         self.edited();
     }
 
     /// Delete the char before the cursor: a newline joins the lines.
-    pub fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         if let Some(ch) = self.prev_char() {
             self.cursor -= ch.len_utf8();
             self.buffer.remove(self.cursor);
@@ -144,38 +170,38 @@ impl Editor {
     }
 
     /// Delete the char under the cursor.
-    pub fn delete(&mut self) {
+    pub(crate) fn delete(&mut self) {
         if self.cursor < self.buffer.len() {
             self.buffer.remove(self.cursor);
             self.edited();
         }
     }
 
-    pub fn left(&mut self) {
+    pub(crate) fn left(&mut self) {
         if let Some(ch) = self.prev_char() {
             self.cursor -= ch.len_utf8();
         }
     }
 
-    pub fn right(&mut self) {
+    pub(crate) fn right(&mut self) {
         if let Some(ch) = self.next_char() {
             self.cursor += ch.len_utf8();
         }
     }
 
     /// The start of the cursor's line.
-    pub fn home(&mut self) {
+    pub(crate) fn home(&mut self) {
         self.cursor = self.line_start();
     }
 
     /// The end of the cursor's line.
-    pub fn end(&mut self) {
+    pub(crate) fn end(&mut self) {
         self.cursor = self.line_end();
     }
 
     /// Move the cursor one row up, at the same column. Returns false
     /// on the first row, where the key means history.
-    pub fn up(&mut self) -> bool {
+    pub(crate) fn up(&mut self) -> bool {
         self.ensure_layout();
         let row = self.cursor_row();
         if row == 0 {
@@ -187,7 +213,7 @@ impl Editor {
 
     /// Move the cursor one row down, at the same column. Returns
     /// false on the last row, where the key means history.
-    pub fn down(&mut self) -> bool {
+    pub(crate) fn down(&mut self) -> bool {
         self.ensure_layout();
         let row = self.cursor_row();
         if row + 1 >= self.rows.len() {
@@ -198,7 +224,7 @@ impl Editor {
     }
 
     /// Delete from the line start to the cursor.
-    pub fn kill_to_start(&mut self) {
+    pub(crate) fn kill_to_start(&mut self) {
         let start = self.line_start();
         if start < self.cursor {
             self.buffer.drain(start..self.cursor);
@@ -209,7 +235,7 @@ impl Editor {
 
     /// Delete from the cursor to the line end. At the line end,
     /// delete the newline: the next line joins this one.
-    pub fn kill_to_end(&mut self) {
+    pub(crate) fn kill_to_end(&mut self) {
         let end = self.line_end();
         if end > self.cursor {
             self.buffer.drain(self.cursor..end);
@@ -223,7 +249,7 @@ impl Editor {
     /// Delete the word before the cursor: trailing spaces, then the
     /// non-space run, inside the line. At the line start, delete the
     /// newline.
-    pub fn kill_word_back(&mut self) {
+    pub(crate) fn kill_word_back(&mut self) {
         let line_start = self.line_start();
         if line_start == self.cursor {
             self.backspace();
@@ -249,6 +275,7 @@ impl Editor {
     /// Move the box so the cursor row is inside its `height` rows.
     /// Returns the first row the box shows. Call after [`Editor::sync`].
     pub(crate) fn scroll_to_cursor(&mut self, height: usize) -> usize {
+        self.laid_out();
         let height = height.max(1);
         let row = self.cursor_row();
         if row < self.top {
@@ -263,12 +290,14 @@ impl Editor {
     /// The text of row `index`, without its newline. Call after
     /// [`Editor::sync`].
     pub(crate) fn row(&self, index: usize) -> &str {
+        self.laid_out();
         let (start, end) = self.rows[index];
         &self.buffer[start..end]
     }
 
     /// The row the cursor is on. Call after [`Editor::sync`].
     pub(crate) fn cursor_row(&self) -> usize {
+        self.laid_out();
         // The first row starts at zero, so the cursor is at or past
         // one row start.
         self.rows
@@ -287,16 +316,14 @@ impl Editor {
     }
 
     /// The commands the popup lists, when it is open: the ones whose
-    /// name starts with the line.
+    /// name starts with the line. A line with a space, a newline, or
+    /// any char outside a name matches no name, so the popup closes
+    /// by itself. Each test is bounded by the name, not the line.
     pub(crate) fn matches(&self) -> impl Iterator<Item = &CommandSpec> {
-        let prefix = if self.dismissed {
-            None
-        } else {
-            self.command_prefix()
-        };
+        let open = !self.dismissed && self.buffer.starts_with('/');
         self.commands
             .iter()
-            .filter(move |command| prefix.is_some_and(|prefix| command.name().starts_with(prefix)))
+            .filter(move |command| open && command.name().starts_with(&self.buffer))
     }
 
     /// The selected match's index among [`Editor::matches`].
@@ -304,18 +331,18 @@ impl Editor {
         self.selected
     }
 
-    pub fn popup_open(&self) -> bool {
+    pub(crate) fn popup_open(&self) -> bool {
         self.matches().next().is_some()
     }
 
-    pub fn select_next(&mut self) {
+    pub(crate) fn select_next(&mut self) {
         let count = self.matches().count();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
         }
     }
 
-    pub fn select_prev(&mut self) {
+    pub(crate) fn select_prev(&mut self) {
         let count = self.matches().count();
         if count > 0 {
             self.selected = (self.selected + count - 1) % count;
@@ -323,44 +350,46 @@ impl Editor {
     }
 
     /// Close the popup until the next edit.
-    pub fn dismiss(&mut self) {
+    pub(crate) fn dismiss(&mut self) {
         self.dismissed = true;
     }
 
     /// Put the selected command on the line, with a space after a
-    /// command that takes arguments. Returns false when the line
-    /// already holds the command, so the key that completes can
-    /// submit instead.
-    pub fn complete(&mut self) -> bool {
+    /// command that takes arguments. When the line holds the command
+    /// already, the key that completes submits instead.
+    pub(crate) fn complete(&mut self) -> Completion {
         let Some(command) = self.matches().nth(self.selected) else {
-            return false;
+            return Completion::NoMatch;
         };
         if self.buffer == command.name() {
-            return false;
+            return Completion::OnTheLine;
         }
         let mut text = command.name().to_string();
-        if command.takes_args() {
+        if command.takes_args {
             text.push(' ');
         }
         self.set(&text);
-        true
+        Completion::Applied
     }
 
-    /// The line as a command prefix: `/` and lowercase letters or
-    /// dashes, nothing else. The same shape the registry takes as a
-    /// command name.
-    fn command_prefix(&self) -> Option<&str> {
-        let rest = self.buffer.strip_prefix('/')?;
-        rest.chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch == '-')
-            .then_some(self.buffer.as_str())
-    }
-
-    /// Every edit: the layout is stale, the popup starts over.
+    /// Every edit: the layout is stale, the popup starts over. An
+    /// emptied buffer gives its capacity back, so a large paste that
+    /// was killed does not stay allocated.
     fn edited(&mut self) {
         self.dirty = true;
         self.selected = 0;
         self.dismissed = false;
+        if self.buffer.is_empty() {
+            self.buffer = String::new();
+        }
+    }
+
+    /// The row readers' precondition: the rows describe this buffer.
+    fn laid_out(&self) {
+        debug_assert!(
+            !self.dirty && !self.rows.is_empty(),
+            "the row readers run after sync"
+        );
     }
 
     fn ensure_layout(&mut self) {
@@ -406,23 +435,34 @@ impl Editor {
             }
             line_start = line_end + 1;
         }
+        // A paste that grew the cache and left does not keep it.
+        let kept = self.rows.len().max(KEPT_ROWS);
+        if self.rows.capacity() > 2 * kept {
+            self.rows.shrink_to(kept);
+        }
         self.width = width;
         self.dirty = false;
     }
 
     /// The byte offset in row `row` at column `col`: the start of the
-    /// char under that column, or the row end past the text.
+    /// char under that column, else the row end. The end of a row
+    /// that wraps is the next row's start, so there the last char's
+    /// start is the answer; the row's own end stays on a row that
+    /// ends at a newline or at the buffer end.
     fn offset_at(&self, row: usize, col: usize) -> usize {
         let (start, end) = self.rows[row];
         let mut cols = 0;
+        let mut last = start;
         for (offset, ch) in self.buffer[start..end].char_indices() {
             let ch_cols = displayed_width(ch);
-            if cols + ch_cols > col {
+            if cols >= col || cols + ch_cols > col {
                 return start + offset;
             }
             cols += ch_cols;
+            last = start + offset;
         }
-        end
+        let wraps = end < self.buffer.len() && self.buffer.as_bytes()[end] != b'\n';
+        if wraps { last } else { end }
     }
 
     fn line_start(&self) -> usize {
@@ -639,10 +679,55 @@ mod tests {
         e.home();
         assert!(!e.up());
         e.end();
+        // The end of a wrapped row is the next row's start, so Up
+        // from the end of the second row lands on the first row's
+        // last char.
         assert!(e.up());
-        assert_eq!(e.cursor(), 3);
+        assert_eq!(e.cursor(), 2);
+        assert_eq!(e.cursor_row(), 0);
         assert_eq!(e.sync(10), 1);
         assert!(!e.up());
+    }
+
+    #[test]
+    fn the_arrows_cross_a_wrapped_row_one_row_at_a_time() {
+        // Line 1 is exactly one row wide: Down from its end must land
+        // on the next row, not skip it.
+        let mut e = editor("abc\ndefg");
+        e.sync(3);
+        e.up();
+        e.up();
+        e.end();
+        assert_eq!((e.cursor_row(), e.cursor_col()), (0, 3));
+        assert!(e.down());
+        assert_eq!((e.cursor_row(), e.cursor_col()), (1, 2));
+        assert!(e.down());
+        assert_eq!((e.cursor_row(), e.cursor_col()), (2, 1));
+        // A row of zero-width chars: Up moves, and at the top it
+        // yields to the history.
+        let mut e = editor(&"\u{200b}".repeat(200));
+        e.sync(10);
+        assert!(e.cursor_row() > 0);
+        while e.up() {}
+        assert_eq!(e.cursor_row(), 0);
+    }
+
+    #[test]
+    fn take_and_a_kill_give_the_capacity_back() {
+        let mut e = editor(&"x\n".repeat(4_000));
+        e.sync(20);
+        assert!(e.rows.capacity() >= 4_000);
+        e.take();
+        assert!(e.rows.capacity() <= KEPT_ROWS);
+        assert_eq!(e.buffer.capacity(), 0);
+        e.set(&"x".repeat(8_000));
+        e.sync(20);
+        assert!(e.rows.capacity() >= 400);
+        e.kill_to_start();
+        assert_eq!(e.text(), "");
+        assert_eq!(e.buffer.capacity(), 0);
+        e.sync(20);
+        assert!(e.rows.capacity() <= 2 * KEPT_ROWS);
     }
 
     #[test]
@@ -697,6 +782,8 @@ mod tests {
         assert!(!e.popup_open());
         e.set("/zzz");
         assert!(!e.popup_open());
+        e.set("/help me");
+        assert!(!e.popup_open());
     }
 
     #[test]
@@ -720,7 +807,7 @@ mod tests {
     fn complete_puts_the_command_on_the_line_and_a_whole_line_submits() {
         let mut e = Editor::new(commands());
         e.insert_str("/mo");
-        assert!(e.complete());
+        assert_eq!(e.complete(), Completion::Applied);
         // A command with arguments gets the space; the popup closes.
         assert_eq!(e.text(), "/model ");
         assert_eq!(e.cursor(), 7);
@@ -728,17 +815,17 @@ mod tests {
 
         let mut e = Editor::new(commands());
         e.insert_str("/he");
-        assert!(e.complete());
+        assert_eq!(e.complete(), Completion::Applied);
         assert_eq!(e.text(), "/help");
         // The line holds the command: the next Enter submits.
         assert!(e.popup_open());
-        assert!(!e.complete());
+        assert_eq!(e.complete(), Completion::OnTheLine);
         assert_eq!(e.text(), "/help");
 
         // No popup, nothing to complete.
         let mut e = Editor::new(commands());
         e.insert_str("plain");
-        assert!(!e.complete());
+        assert_eq!(e.complete(), Completion::NoMatch);
         assert_eq!(e.text(), "plain");
     }
 
@@ -748,7 +835,7 @@ mod tests {
         e.insert_char('/');
         e.dismiss();
         assert!(!e.popup_open());
-        assert!(!e.complete());
+        assert_eq!(e.complete(), Completion::NoMatch);
         e.insert_char('h');
         assert!(e.popup_open());
         e.take();

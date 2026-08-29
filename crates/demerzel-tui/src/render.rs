@@ -22,7 +22,7 @@ use crate::transcript::{Kind, Transcript};
 use crate::wrap::display_width;
 
 /// Rows the input box grows to before it scrolls inside itself.
-pub(crate) const MAX_INPUT_ROWS: u16 = 8;
+const MAX_INPUT_ROWS: u16 = 8;
 
 /// Rows the completion popup shows at most; more matches scroll
 /// inside it.
@@ -71,9 +71,10 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         .saturating_sub(1)
         .clamp(1, MAX_INPUT_ROWS);
     let (text_width, prefix) = input_columns(area.width);
+    let editor_rows = view.editor.sync(text_width);
     let input_rows = match view.approval {
         Some(_) => 1,
-        None => u16::try_from(view.editor.sync(text_width))
+        None => u16::try_from(editor_rows)
             .unwrap_or(u16::MAX)
             .clamp(1, box_cap),
     };
@@ -114,7 +115,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         None => {
-            draw_input(frame, input_area, view.editor, text_width, prefix);
+            draw_input(frame, input_area, view.editor, editor_rows, prefix);
             let above = Rect {
                 height: input_area.y - area.y,
                 ..area
@@ -328,11 +329,11 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
 /// to, the prompt on the first row of the buffer, an indent on the
 /// rest. The layout is a cache the editor keeps, so a frame walks
 /// the rows it shows and a large paste costs its re-layout once.
-fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, text_width: u16, prefix: bool) {
+/// `count` is the row count the caller's `sync` returned.
+fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, count: usize, prefix: bool) {
     let width = usize::from(area.width);
     let prefix_cols = if prefix { display_width(PROMPT) } else { 0 };
     let height = usize::from(area.height);
-    let count = editor.sync(text_width);
     let top = editor.scroll_to_cursor(height);
     let mut lines = Vec::with_capacity(height);
     for row in top..count.min(top + height) {
@@ -386,12 +387,12 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
     };
     let usage_cols = matches
         .iter()
-        .map(|command| display_width(&command.usage))
+        .map(|command| display_width(command.usage()))
         .max()
         .unwrap_or(0);
     let popup_cols = matches
         .iter()
-        .map(|command| usage_cols + 4 + display_width(&command.help))
+        .map(|command| usage_cols + 4 + display_width(command.help()))
         .max()
         .unwrap_or(0);
     let width = u16::try_from(popup_cols)
@@ -407,15 +408,18 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
         height: rows as u16,
     };
     let mut lines = Vec::with_capacity(rows);
+    let width_cols = usize::from(width);
     for (index, command) in matches.iter().enumerate().skip(first).take(rows) {
-        let pad = usage_cols.saturating_sub(display_width(&command.usage)) + 2;
-        let padding = " ".repeat(pad);
-        let (shown, used) = fit_row(
-            [" ", command.usage.as_str(), &padding, &command.help, " "],
-            usize::from(width),
-        );
-        let mut text = shown;
-        text.extend(std::iter::repeat_n(' ', usize::from(width) - used));
+        // The usage column, padded to the widest usage, then the
+        // help; the row fills the popup width.
+        let (mut text, mut used) = fit_row([" ", command.usage()], width_cols);
+        let pad = (usage_cols + 3).saturating_sub(used).min(width_cols - used);
+        text.extend(std::iter::repeat_n(' ', pad));
+        used += pad;
+        let (help, help_used) = fit_row([command.help(), " "], width_cols - used);
+        text.push_str(&help);
+        used += help_used;
+        text.extend(std::iter::repeat_n(' ', width_cols - used));
         let style = if index == selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -763,7 +767,7 @@ line 12",
         }
         let (lines, cursor, _) = render_cursor(10, 8, &mut editor);
         assert_eq!(lines[1], "dmz> abcd ");
-        assert_eq!(lines[6], "     yzab ".replace("yzab", "abcd"));
+        assert_eq!(lines[6], "     abcd ");
         assert_eq!(cursor, (5, 1));
     }
 
@@ -804,13 +808,12 @@ line 12",
         let (lines, cursor, buffer) = render_cursor(60, 6, &mut editor);
         assert_eq!(cursor, (6, 4));
         assert_eq!(lines[4].trim_end(), "dmz> /");
+        // One row per match: the usage, then the help.
+        assert!(lines[2].contains("/help"), "{:?}", lines[2]);
+        assert!(lines[2].contains("list the commands"), "{:?}", lines[2]);
+        assert!(lines[3].contains("/model [name]"), "{:?}", lines[3]);
         assert!(
-            lines[2].contains("/help          list the commands"),
-            "{:?}",
-            lines[2]
-        );
-        assert!(
-            lines[3].contains("/model [name]  show or switch the session model"),
+            lines[3].contains("show or switch the session model"),
             "{:?}",
             lines[3]
         );

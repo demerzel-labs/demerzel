@@ -37,7 +37,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::cards::{self, Outcome};
-use crate::editor::Editor;
+use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::render::{self, Status, View};
@@ -544,9 +544,12 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
+        let newline = key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         // The popup takes the selection keys while it is open. Enter
         // completes the line, or submits it when it holds the command
-        // already.
+        // already; a newline key stays a newline key.
         if plain && self.editor.popup_open() {
             match key.code {
                 KeyCode::Tab | KeyCode::Down => {
@@ -561,7 +564,10 @@ impl App {
                     self.editor.dismiss();
                     return Action::None;
                 }
-                KeyCode::Enter if self.editor.complete() => return Action::None,
+                KeyCode::Enter if !newline => match self.editor.complete() {
+                    Completion::Applied => return Action::None,
+                    Completion::OnTheLine | Completion::NoMatch => {}
+                },
                 _ => {}
             }
         }
@@ -583,13 +589,7 @@ impl App {
             // Alt-Enter is the portable newline; Shift-Enter reaches
             // the loop as its own key where the terminal takes the
             // keyboard-enhancement flags.
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
-            {
-                self.editor.insert_char('\n')
-            }
+            KeyCode::Enter if newline => self.editor.insert_char('\n'),
             KeyCode::Enter => {
                 if phase == Phase::Idle {
                     let line = self.editor.take();
@@ -609,14 +609,18 @@ impl App {
             KeyCode::End => self.editor.end(),
             // The arrows cross the editor's rows; past its first or
             // last row they browse the history.
-            KeyCode::Up if !self.editor.up() => {
-                if let Some(text) = self.history.up(self.editor.text()) {
+            KeyCode::Up => {
+                if !self.editor.up()
+                    && let Some(text) = self.history.up(self.editor.text())
+                {
                     let text = text.to_string();
                     self.editor.set(&text);
                 }
             }
-            KeyCode::Down if !self.editor.down() => {
-                if let Some(text) = self.history.down() {
+            KeyCode::Down => {
+                if !self.editor.down()
+                    && let Some(text) = self.history.down()
+                {
                     let text = text.to_string();
                     self.editor.set(&text);
                 }

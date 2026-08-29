@@ -88,18 +88,21 @@ shows the whole summary. `hidden` shows no block.
 
 The full-screen interface has these keys:
 
-- Enter submits the prompt. Alt-Enter inserts a newline. Shift-Enter
-  inserts a newline on a terminal that takes the keyboard-enhancement
-  flags. A paste keeps its newlines.
-- Up and Down move the cursor across the rows of the prompt. On the
-  first row, Up shows the previous history entry. On the last row,
-  Down shows the next one.
-- Home, End, Ctrl-A, and Ctrl-E move to the start and the end of the
-  line. Ctrl-U and Ctrl-K delete to the start and the end of the
-  line. Ctrl-W deletes the word before the cursor.
-- A prompt that starts with `/` opens the command list. Tab and the
-  arrow keys select a command. Enter puts the command on the line.
-  Enter again submits it. Esc closes the list.
+- Enter submits the line. Alt-Enter inserts a newline. Shift-Enter
+  inserts a newline when the terminal accepts the
+  keyboard-enhancement flags. A paste keeps its newlines.
+- Up and Down move the cursor across the rows of the input box. On
+  the first row, Up shows the previous history entry. On the last
+  row, Down shows the next entry.
+- Home and Ctrl-A move to the start of the line. End and Ctrl-E
+  move to the end of the line. Ctrl-U deletes to the start of the
+  line. Ctrl-K deletes to the end of the line. At the end of the
+  line, Ctrl-K joins the next line. Ctrl-W deletes the word before
+  the cursor. At the start of the line, Ctrl-W joins the previous
+  line.
+- A line that starts with `/` opens the completion popup. Tab and
+  the arrow keys select a command. Enter puts the command on the
+  line. Enter submits the line. Esc closes the popup.
 - Ctrl-O expands every tool card to its kept output and collapses
   them again.
 - Ctrl-T opens the newest thinking block and closes it again.

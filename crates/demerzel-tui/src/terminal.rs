@@ -38,6 +38,11 @@ const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
 /// belongs to someone else.
 static MOUSE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the keyboard flags are pushed, so restore pops them once:
+/// a second restore runs on the main screen, whose stack belongs to
+/// the shell that started the interface.
+static KEYBOARD: AtomicBool = AtomicBool::new(false);
+
 /// The live terminal. Dropping it restores the caller's screen.
 pub struct Guard {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -61,7 +66,14 @@ impl Guard {
         if let Err(error) = execute!(
             std::io::stdout(),
             EnterAlternateScreen,
-            EnableBracketedPaste,
+            EnableBracketedPaste
+        ) {
+            restore();
+            return Err(error);
+        }
+        KEYBOARD.store(true, Ordering::Relaxed);
+        if let Err(error) = execute!(
+            std::io::stdout(),
             PushKeyboardEnhancementFlags(KEYBOARD_FLAGS)
         ) {
             restore();
@@ -91,16 +103,20 @@ impl Drop for Guard {
     }
 }
 
-/// Release the mouse when it was captured, pop the keyboard flags,
-/// leave the alternate screen and raw mode. Safe to call twice: a
-/// second pop on the alternate screen's empty stack is a no-op.
+/// Release the mouse when it was captured, pop the keyboard flags
+/// when they were pushed, leave the alternate screen and raw mode.
+/// Safe to call twice: the panic hook and the guard's drop both run
+/// on a panic, and the second call sends nothing that belongs to
+/// the screen underneath.
 fn restore() {
     if MOUSE.swap(false, Ordering::Relaxed) {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
+    if KEYBOARD.swap(false, Ordering::Relaxed) {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         std::io::stdout(),
-        PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         cursor::Show
