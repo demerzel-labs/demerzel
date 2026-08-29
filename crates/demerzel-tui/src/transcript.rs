@@ -516,6 +516,9 @@ pub struct Transcript {
     /// Rows between the viewport bottom and the transcript end. The
     /// renderer clamps it against the rows that exist.
     scroll: usize,
+    /// Viewport height at the last frame. A height change moves the
+    /// scroll by the difference, so the top row holds.
+    height: u16,
     /// The width of the last frame; zero before the first.
     width: u16,
     /// The absolute block count at the last frame: blocks past it
@@ -536,6 +539,7 @@ impl Transcript {
             thinking: Thinking::default(),
             live: None,
             scroll: 0,
+            height: 0,
             width: 0,
             frame_end: 0,
         }
@@ -805,7 +809,11 @@ impl Transcript {
     }
 
     /// Start a frame on a viewport of `width` by `height`. A width
-    /// change returns to follow mode. In browse mode, the walk lays
+    /// change returns to follow mode. In browse mode, a height change
+    /// moves the scroll by the rows the viewport lost or gained, so
+    /// the top row holds when the input box grows or the terminal
+    /// shrinks; a viewport that grows past the bottom returns to
+    /// follow mode. Then the walk lays
     /// out the blocks from the end up to the top of the viewport —
     /// the blocks the frame shows or counts, no others — and adds the
     /// rows they gained or lost to the scroll, so the row the user
@@ -817,6 +825,13 @@ impl Transcript {
         if width != self.width {
             self.width = width;
             self.scroll = 0;
+        }
+        if height != self.height {
+            if self.scroll > 0 {
+                let lost = i32::from(self.height) - i32::from(height);
+                self.scroll = self.scroll.saturating_add_signed(lost as isize);
+            }
+            self.height = height;
         }
         let end = self.dropped + self.blocks.len();
         if self.scroll > 0 {
@@ -2017,5 +2032,30 @@ mod tests {
         assert_eq!(t.scroll(), 2);
         t.follow();
         assert!(!t.browsing());
+    }
+
+    #[test]
+    fn a_height_change_holds_the_top_row_in_browse_mode() {
+        let mut t = Transcript::new(false);
+        for i in 0..10 {
+            t.push_line(Kind::Text, &format!("line {i}"));
+        }
+        frame(&mut t, 20, 4);
+        t.scroll_up(3);
+        frame(&mut t, 20, 4);
+        assert_eq!(t.scroll(), 3);
+        // The viewport loses two rows: the scroll deepens by two, so
+        // the top row stays where it was.
+        frame(&mut t, 20, 2);
+        assert_eq!(t.scroll(), 5);
+        frame(&mut t, 20, 4);
+        assert_eq!(t.scroll(), 3);
+        // A viewport that grows past the bottom returns to follow
+        // mode.
+        frame(&mut t, 20, 9);
+        assert_eq!(t.scroll(), 0);
+        // Follow mode ignores the height.
+        frame(&mut t, 20, 4);
+        assert_eq!(t.scroll(), 0);
     }
 }

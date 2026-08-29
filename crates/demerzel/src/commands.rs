@@ -40,6 +40,15 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
+/// The registry as the full-screen interface's completion list: the
+/// same usage and help lines `/help` shows.
+pub(crate) fn specs() -> Vec<demerzel_tui::CommandSpec> {
+    COMMANDS
+        .iter()
+        .map(|command| demerzel_tui::CommandSpec::new(command.usage, command.help))
+        .collect()
+}
+
 /// The note both interfaces show after `/new`.
 pub(crate) const NEW_SESSION_NOTE: &str = "the next prompt starts a fresh session";
 

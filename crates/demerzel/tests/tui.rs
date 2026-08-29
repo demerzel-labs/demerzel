@@ -25,6 +25,14 @@ const END: &[u8] = b"\x1b[F";
 const CTRL_O: &[u8] = b"\x0f";
 const CTRL_T: &[u8] = b"\x14";
 const PAGE_UP: &[u8] = b"\x1b[5~";
+/// Alt-Enter as a legacy terminal reports it.
+const ALT_ENTER: &[u8] = b"\x1b\r";
+/// Shift-Enter as a terminal with the keyboard-enhancement flags
+/// reports it.
+const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
+/// The keyboard-enhancement push the interface sends on entry, with
+/// the disambiguate flag. A PTY can observe the request alone.
+const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
 /// Mouse reporting mode 1000, the first sequence capture turns on.
@@ -841,10 +849,12 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     pty.send(WHEEL_UP);
     pty.send(WHEEL_UP);
     // Two notches of three rows: the window moved up six rows past
-    // the usage notice and the last five reply rows, so a 27-row
-    // pane opens on row 28; the indicator counts the six below.
-    pty.wait_for("row 28 of the long reply");
-    pty.wait_for("6 below");
+    // the usage notice and the last five reply rows. The resize
+    // lands in the same frame: the pane loses one row and the top
+    // row holds, so the scroll deepens to seven. A 27-row pane opens
+    // on row 27; the indicator counts the seven below.
+    pty.wait_for("row 27 of the long reply");
+    pty.wait_for("7 below");
     // End returns to the bottom of the transcript.
     pty.send(END);
     pty.resize(100, 30);
@@ -1022,4 +1032,75 @@ async fn the_effort_flag_and_command_reach_the_requests() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body["reasoning"]["effort"], "low");
     assert_eq!(requests[1].body["reasoning"]["effort"], "high");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_editor_takes_several_lines_and_completes_a_command() {
+    let mock = MockServer::start(vec![text_turn("four rows seen")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    // Alt-Enter and Shift-Enter each add a row; a paste keeps its
+    // newlines. Each row reaches the screen as it grows the box.
+    pty.send(b"first-row");
+    pty.send(ALT_ENTER);
+    pty.send(b"second-row");
+    pty.send(SHIFT_ENTER);
+    pty.send(b"\x1b[200~third-row\nfourth-row\x1b[201~");
+    pty.wait_for("first-row");
+    pty.wait_for("second-row");
+    pty.wait_for("third-row");
+    pty.wait_for("fourth-row");
+    pty.send(b"\r");
+    pty.wait_for("four rows seen");
+
+    // A command completes from the popup: the prefix lists it with
+    // its usage and help, Enter puts it on the line, Enter again
+    // submits it. The prefix alone would answer "unknown command".
+    pty.send(b"/ef");
+    pty.wait_for("/effort [level]");
+    pty.wait_for("show or set the reasoning effort");
+    pty.send(b"\r");
+    pty.send(b"\r");
+    pty.wait_for("effort: high");
+    // Shift-Enter with the popup open stays a newline: the line
+    // submits as typed, not as the completed /effort.
+    pty.send(b"/e");
+    pty.wait_for("/exit");
+    pty.send(SHIFT_ENTER);
+    pty.send(b"row-two");
+    pty.wait_for("row-two");
+    pty.send(b"\r");
+    pty.wait_for("unknown command: /e");
+    // Esc closes the popup: a repaint shows no popup row, and Enter
+    // then submits the line as typed, which no command answers. The
+    // resize between Esc and Enter keeps the two keys out of one
+    // read, where an Esc before a byte reads as Alt.
+    pty.send(b"/ne");
+    pty.wait_for("start a fresh session at the next prompt");
+    pty.send(b"\x1b");
+    pty.resize(100, 29);
+    pty.absent_until("start a fresh session", "· ask ·");
+    pty.send(b"\r");
+    pty.wait_for("unknown command: /ne");
+    // Tab moves the selection: `/e` lists /effort first, then /exit.
+    // The completed /exit ends the session; /effort would not.
+    pty.send(b"/e");
+    pty.wait_for("/exit");
+    pty.send(b"\t");
+    pty.send(b"\r");
+    pty.send(b"\r");
+    let raw = pty.wait_exit();
+
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains(KEYBOARD_PUSH),
+        "the keyboard-enhancement flags were not pushed"
+    );
+    // The prompt reached the model with its four rows as lines.
+    let body = mock.received()[0].body.to_string();
+    assert!(
+        body.contains("first-row\\nsecond-row\\nthird-row\\nfourth-row"),
+        "{body}"
+    );
 }

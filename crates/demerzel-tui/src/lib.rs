@@ -1,7 +1,7 @@
 //! The full-screen terminal interface for demerzel.
 //!
 //! This crate owns the screen: the alternate-screen session, the
-//! transcript pane, the input line, and the keys. It renders the
+//! transcript pane, the input editor, and the keys. It renders the
 //! engine's display events; it never talks to a provider and the
 //! engine does not change for it. The binary crate supplies a
 //! [`Driver`] that turns a submitted line into work:
@@ -20,10 +20,10 @@ mod app;
 #[doc(hidden)]
 pub mod bench;
 mod cards;
+mod editor;
 mod events;
 mod highlight;
 mod history;
-mod input;
 mod markdown;
 mod render;
 mod terminal;
@@ -35,6 +35,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender};
 pub use thinking::Thinking;
 
@@ -99,6 +100,10 @@ pub struct Options {
     /// How a thinking block starts: closed to one line, open, or not
     /// shown. Closed by default; Ctrl-T opens and closes the newest.
     pub thinking: Thinking,
+    /// The commands the completion popup lists when a line starts
+    /// with `/`. The driver still dispatches the submitted line; the
+    /// list only completes it.
+    pub commands: Vec<CommandSpec>,
 }
 
 impl Default for Options {
@@ -111,6 +116,7 @@ impl Default for Options {
             mouse: true,
             markdown: true,
             thinking: Thinking::default(),
+            commands: Vec::new(),
         }
     }
 }

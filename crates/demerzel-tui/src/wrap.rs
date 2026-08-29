@@ -9,8 +9,8 @@ use unicode_width::UnicodeWidthChar;
 /// Bytes one row can hold past its columns: room for wide chars and
 /// a few combining marks per cell. A run of zero-width chars breaks
 /// here, so a row never grows without bound.
-const ROW_BYTES_PER_COLUMN: usize = 8;
-const ROW_BYTES_SLACK: usize = 64;
+pub(crate) const ROW_BYTES_PER_COLUMN: usize = 8;
+pub(crate) const ROW_BYTES_SLACK: usize = 64;
 
 /// Feed `row` the byte offset where each row of `line` starts when
 /// wrapped at `width` columns, first row at zero. A break lands after

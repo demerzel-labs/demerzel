@@ -1,24 +1,32 @@
 //! Frame rendering: the transcript pane above, the progress line
-//! while a turn runs, the input line, and the status bar at the
-//! bottom.
+//! while a turn runs, the input box, the completion popup over the
+//! rows above the box, and the status bar at the bottom.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
 //! the blocks it shows and clamps the transcript's scroll to the rows
-//! that exist.
+//! that exist; it lays out the editor's rows and moves its box to
+//! the cursor.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
-use crate::input::Input;
+use crate::editor::{CommandSpec, Editor, displayed};
 use crate::markdown::Face;
 use crate::transcript::{Kind, Transcript};
 use crate::wrap::display_width;
+
+/// Rows the input box grows to before it scrolls inside itself.
+const MAX_INPUT_ROWS: u16 = 8;
+
+/// Rows the completion popup shows at most; more matches scroll
+/// inside it.
+const MAX_POPUP_ROWS: usize = 8;
 
 /// What the status bar names: the model, the mode, the open session,
 /// and the open session's token totals, counted from this run's
@@ -35,9 +43,9 @@ pub(crate) struct Status {
 /// What one frame shows.
 pub(crate) struct View<'a> {
     pub transcript: &'a mut Transcript,
-    pub input: &'a Input,
+    pub editor: &'a mut Editor,
     pub status: &'a Status,
-    /// An approval question replaces the input prompt.
+    /// An approval question replaces the input box.
     pub approval: Option<&'a str>,
     /// The progress line, shown under the transcript while a turn
     /// runs.
@@ -53,18 +61,30 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     }
     // The status bar takes the bottom row when the screen has room
     // for all three panes; a two-row screen keeps transcript and
-    // input. The input sits above the bar, and the progress line
-    // takes one more row above the input when it shows and the
-    // screen has a fourth row.
+    // input. The input box sits above the bar and grows with its
+    // rows up to the cap, and the transcript keeps one row at least.
+    // The progress line takes one more row above the box when it
+    // shows and the screen has a fourth row.
     let bar_rows = u16::from(area.height >= 3);
     let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
-    let input_row = Rect {
-        y: area.y + area.height - 1 - bar_rows,
-        height: 1,
+    let box_cap = (area.height - bar_rows - progress_rows)
+        .saturating_sub(1)
+        .clamp(1, MAX_INPUT_ROWS);
+    let (text_width, prefix) = input_columns(area.width);
+    let editor_rows = view.editor.sync(text_width);
+    let input_rows = match view.approval {
+        Some(_) => 1,
+        None => u16::try_from(editor_rows)
+            .unwrap_or(u16::MAX)
+            .clamp(1, box_cap),
+    };
+    let input_area = Rect {
+        y: area.y + area.height - input_rows - bar_rows,
+        height: input_rows,
         ..area
     };
     let transcript_area = Rect {
-        height: area.height - 1 - bar_rows - progress_rows,
+        height: area.height - input_rows - bar_rows - progress_rows,
         ..area
     };
 
@@ -73,7 +93,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         && progress_rows > 0
     {
         let progress_row = Rect {
-            y: area.y + area.height - 2 - bar_rows,
+            y: input_area.y - 1,
             height: 1,
             ..area
         };
@@ -90,13 +110,36 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     match view.approval {
         Some(question) => draw_line(
             frame,
-            input_row,
+            input_area,
             question,
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        None => draw_input(frame, input_row, view.input),
+        None => {
+            draw_input(frame, input_area, view.editor, editor_rows, prefix);
+            let above = Rect {
+                height: input_area.y - area.y,
+                ..area
+            };
+            draw_popup(frame, above, view.editor, prefix);
+        }
     }
     transcript_area.height
+}
+
+/// The text columns of the input box and whether the prompt shows.
+/// The prompt takes its columns from the first row, and every other
+/// row indents by as much, unless the screen is too narrow for
+/// both. One column stays free at the right, so the cursor can sit
+/// past the last char of a full row. The text keeps two columns
+/// wherever the screen has them, so a wide char always has a row
+/// that holds it; at two columns the free column goes first.
+fn input_columns(width: u16) -> (u16, bool) {
+    let prompt_cols = u16::try_from(display_width(PROMPT)).unwrap_or(u16::MAX);
+    if width >= prompt_cols + 3 {
+        (width - prompt_cols - 1, true)
+    } else {
+        (width.saturating_sub(1).max(2).min(width.max(1)), false)
+    }
 }
 
 /// One reversed row: model, mode, session, token totals, cut to the
@@ -284,65 +327,110 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
     frame.render_widget(Paragraph::new(line), corner);
 }
 
-/// The prompt and the buffer, windowed so the cursor stays visible.
-/// Cost is bounded by the window, not the buffer length, so a large
-/// paste cannot slow every later frame. Zero-width chars never fill
-/// the window; only a long unbroken run of them can extend the walk.
-fn draw_input(frame: &mut Frame, area: Rect, input: &Input) {
+/// The input box: the editor's rows from the one the box scrolled
+/// to, the prompt on the first row of the buffer, an indent on the
+/// rest. The layout is a cache the editor keeps, so a frame walks
+/// the rows it shows and a large paste costs its re-layout once.
+/// `count` is the row count the caller's `sync` returned.
+fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, count: usize, prefix: bool) {
     let width = usize::from(area.width);
-    // One column stays free so the cursor can sit past the last char.
-    let avail_before = width.saturating_sub(1);
-
-    // Walk back from the cursor to find the window start.
-    let mut before_cols = 0usize;
-    let mut window_start = input.cursor();
-    for ch in input.text()[..input.cursor()].chars().rev() {
-        let cols = displayed(ch).map(|shown| shown.width().unwrap_or(0));
-        if let Some(cols) = cols
-            && before_cols + cols > avail_before
-        {
-            break;
+    let prefix_cols = if prefix { display_width(PROMPT) } else { 0 };
+    let height = usize::from(area.height);
+    let top = editor.scroll_to_cursor(height);
+    let mut lines = Vec::with_capacity(height);
+    for row in top..count.min(top + height) {
+        let mut text = String::with_capacity(width * 4);
+        let mut used = 0usize;
+        if prefix {
+            if row == 0 {
+                text.push_str(PROMPT);
+            } else {
+                text.extend(std::iter::repeat_n(' ', prefix_cols));
+            }
+            used = prefix_cols;
         }
-        before_cols += cols.unwrap_or(0);
-        window_start -= ch.len_utf8();
-    }
-
-    // The prompt joins only when the whole prefix fits after it.
-    let prompt_cols = display_width(PROMPT);
-    let with_prompt = window_start == 0 && prompt_cols + before_cols <= avail_before;
-    let mut text = String::with_capacity(width * 4);
-    let mut used = 0usize;
-    if with_prompt {
-        text.push_str(PROMPT);
-        used = prompt_cols;
-    }
-    let mut cursor_x = None;
-    for (offset, ch) in input.text()[window_start..].char_indices() {
-        if window_start + offset == input.cursor() {
-            cursor_x = Some(used);
+        for ch in editor.row(row).chars() {
+            let Some(shown) = displayed(ch) else { continue };
+            let cols = shown.width().unwrap_or(0);
+            if used + cols > width {
+                break;
+            }
+            text.push(shown);
+            used += cols;
         }
-        let Some(shown) = displayed(ch) else { continue };
-        let cols = shown.width().unwrap_or(0);
-        if used + cols > width {
-            break;
-        }
-        text.push(shown);
-        used += cols;
+        lines.push(Line::raw(text));
     }
-    let cursor_x = cursor_x.unwrap_or(used).min(width.saturating_sub(1));
+    frame.render_widget(Paragraph::new(lines), area);
 
-    frame.render_widget(Paragraph::new(text), area);
-    frame.set_cursor_position((area.x + cursor_x as u16, area.y));
+    let cursor_y = editor.cursor_row().saturating_sub(top).min(height - 1);
+    let cursor_x = (prefix_cols + editor.cursor_col()).min(width.saturating_sub(1));
+    frame.set_cursor_position((area.x + cursor_x as u16, area.y + cursor_y as u16));
 }
 
-/// The printable stand-in for one input char.
-fn displayed(ch: char) -> Option<char> {
-    match ch {
-        '\n' => Some('⏎'),
-        '\t' => Some('⇥'),
-        ch if ch.is_control() => None,
-        ch => Some(ch),
+/// The completion popup, over the rows above the input box: one row
+/// per matching command, the usage and the help, the selected one
+/// reversed. It sits at the prompt's text column. A popup taller
+/// than its cap scrolls to keep the selection in view.
+fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
+    let matches: Vec<&CommandSpec> = editor.matches().collect();
+    let rows = matches
+        .len()
+        .min(MAX_POPUP_ROWS)
+        .min(usize::from(above.height));
+    if rows == 0 {
+        return;
     }
+    let selected = editor.selected().min(matches.len() - 1);
+    let first = selected.saturating_sub(rows - 1);
+    let x = if prefix {
+        u16::try_from(display_width(PROMPT)).unwrap_or(0)
+    } else {
+        0
+    };
+    let usage_cols = matches
+        .iter()
+        .map(|command| display_width(command.usage()))
+        .max()
+        .unwrap_or(0);
+    let popup_cols = matches
+        .iter()
+        .map(|command| usage_cols + 4 + display_width(command.help()))
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(popup_cols)
+        .unwrap_or(u16::MAX)
+        .min(above.width.saturating_sub(x));
+    if width == 0 {
+        return;
+    }
+    let area = Rect {
+        x: above.x + x,
+        y: above.y + above.height - rows as u16,
+        width,
+        height: rows as u16,
+    };
+    let mut lines = Vec::with_capacity(rows);
+    let width_cols = usize::from(width);
+    for (index, command) in matches.iter().enumerate().skip(first).take(rows) {
+        // The usage column, padded to the widest usage, then the
+        // help; the row fills the popup width.
+        let (mut text, mut used) = fit_row([" ", command.usage()], width_cols);
+        let pad = (usage_cols + 3).saturating_sub(used).min(width_cols - used);
+        text.extend(std::iter::repeat_n(' ', pad));
+        used += pad;
+        let (help, help_used) = fit_row([command.help(), " "], width_cols - used);
+        text.push_str(&help);
+        used += help_used;
+        text.extend(std::iter::repeat_n(' ', width_cols - used));
+        let style = if index == selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        lines.push(Line::styled(text, style));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 #[cfg(test)]
@@ -384,14 +472,14 @@ mod tests {
     #[test]
     fn a_fresh_screen_shows_the_bar_and_the_prompt() {
         let mut transcript = Transcript::new(false);
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, rows) = render(
             30,
             4,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -405,7 +493,7 @@ mod tests {
     #[test]
     fn the_status_bar_names_the_session_and_the_totals() {
         let mut transcript = Transcript::new(false);
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = Status {
             session: Some("s-9".into()),
             input_tokens: 12,
@@ -418,7 +506,7 @@ mod tests {
             3,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -434,14 +522,14 @@ mod tests {
     #[test]
     fn a_narrow_bar_cuts_from_the_right() {
         let mut transcript = Transcript::new(false);
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, _) = render(
             12,
             3,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -454,14 +542,14 @@ mod tests {
     fn a_two_row_screen_drops_the_bar_and_keeps_the_prompt() {
         let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "tail");
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, rows) = render(
             20,
             2,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -478,14 +566,14 @@ mod tests {
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, _) = render(
             20,
             4,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -501,7 +589,7 @@ mod tests {
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         // The first frame sets the width; a scroll before it would
         // reset with the width change.
@@ -510,7 +598,7 @@ mod tests {
             4,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -522,7 +610,7 @@ mod tests {
             4,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -537,7 +625,7 @@ mod tests {
             4,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -553,15 +641,15 @@ mod tests {
         for i in 0..10 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
-        let view = |transcript: &mut Transcript| {
+        let mut view = |transcript: &mut Transcript| {
             render(
                 30,
                 4,
                 View {
                     transcript,
-                    input: &input,
+                    editor: &mut editor,
                     status: &status,
                     approval: None,
                     progress: None,
@@ -603,14 +691,14 @@ line 12",
     fn long_entries_wrap_inside_the_pane() {
         let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "alpha beta gamma");
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, _) = render(
             8,
             5,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: None,
@@ -621,34 +709,15 @@ line 12",
         assert_eq!(lines[2].trim_end(), "gamma");
     }
 
-    #[test]
-    fn a_long_input_windows_around_the_cursor() {
+    /// Draw one frame and return the rows, the cursor, and the
+    /// buffer, for the input-box tests.
+    fn render_cursor(
+        width: u16,
+        height: u16,
+        editor: &mut Editor,
+    ) -> (Vec<String>, (u16, u16), ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut transcript = Transcript::new(false);
-        let mut input = Input::new();
-        input.set(&"abcdefghij".repeat(3));
-        let status = status();
-        let (lines, _) = render(
-            10,
-            2,
-            View {
-                transcript: &mut transcript,
-                input: &input,
-                status: &status,
-                approval: None,
-                progress: None,
-            },
-        );
-        // The tail is visible; the head scrolled off with the prompt.
-        assert!(lines[1].contains("j"), "{:?}", lines[1]);
-        assert!(!lines[1].contains("dmz>"));
-    }
-
-    #[test]
-    fn a_wide_char_at_the_window_edge_keeps_the_cursor_aligned() {
-        let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
-        let mut transcript = Transcript::new(false);
-        let mut input = Input::new();
-        input.set("日本日本日");
         let status = status();
         terminal
             .draw(|frame| {
@@ -656,7 +725,7 @@ line 12",
                     frame,
                     View {
                         transcript: &mut transcript,
-                        input: &input,
+                        editor,
                         status: &status,
                         approval: None,
                         progress: None,
@@ -664,12 +733,168 @@ line 12",
                 );
             })
             .unwrap();
-        // Four wide chars fit before the cursor; the fifth straddles
-        // the edge and drops whole, so the cursor sits at column 8.
         let position = terminal.get_cursor_position().unwrap();
-        assert_eq!((position.x, position.y), (8, 1));
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0u16, 1u16)].symbol(), "本");
+        let buffer = terminal.backend().buffer().clone();
+        let lines = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        (lines, (position.x, position.y), buffer)
+    }
+
+    #[test]
+    fn a_long_input_wraps_into_the_box_and_the_box_scrolls_to_the_cursor() {
+        let mut editor = Editor::new(Vec::new());
+        editor.set(&"abcdefghij".repeat(3));
+        // A two-row screen keeps a one-row box: the row with the
+        // cursor shows, indented, without the prompt.
+        let (lines, cursor, _) = render_cursor(10, 2, &mut editor);
+        assert_eq!(lines[1], "     ij   ");
+        assert_eq!(cursor, (7, 1));
+        // A tall screen shows every row under the cap, the prompt
+        // on the first.
+        let (lines, cursor, _) = render_cursor(10, 12, &mut editor);
+        assert_eq!(lines[3], "dmz> abcd ");
+        assert_eq!(lines[4], "     efgh ");
+        assert_eq!(lines[10], "     ij   ");
+        assert_eq!(cursor, (7, 10));
+        // Past the cap the box scrolls: the cursor at the top row
+        // brings the first rows back.
+        editor.home();
+        for _ in 0..7 {
+            editor.up();
+        }
+        let (lines, cursor, _) = render_cursor(10, 8, &mut editor);
+        assert_eq!(lines[1], "dmz> abcd ");
+        assert_eq!(lines[6], "     abcd ");
+        assert_eq!(cursor, (5, 1));
+    }
+
+    #[test]
+    fn a_multi_line_input_shows_each_line_on_its_row() {
+        let mut editor = Editor::new(Vec::new());
+        editor.set("one\ntwo");
+        let (lines, cursor, _) = render_cursor(20, 4, &mut editor);
+        assert_eq!(lines[1].trim_end(), "dmz> one");
+        assert_eq!(lines[2].trim_end(), "     two");
+        assert_eq!(cursor, (8, 2));
+        assert!(lines[3].contains("test-model"), "{:?}", lines[3]);
+        // A one-row screen keeps the row with the cursor.
+        let (lines, cursor, _) = render_cursor(20, 1, &mut editor);
+        assert_eq!(lines[0].trim_end(), "     two");
+        assert_eq!(cursor, (8, 0));
+    }
+
+    #[test]
+    fn a_wide_char_at_the_box_edge_keeps_the_cursor_aligned() {
+        let mut editor = Editor::new(Vec::new());
+        editor.set("日本日本日");
+        // Four text columns: two wide chars per row, the fifth on a
+        // row of its own, the cursor after it.
+        let (_, cursor, buffer) = render_cursor(10, 2, &mut editor);
+        assert_eq!(cursor, (7, 1));
+        assert_eq!(buffer[(5u16, 1u16)].symbol(), "日");
+    }
+
+    #[test]
+    fn a_wide_char_shows_on_a_two_column_screen() {
+        let mut editor = Editor::new(Vec::new());
+        editor.set("日");
+        let (lines, cursor, _) = render_cursor(2, 2, &mut editor);
+        assert_eq!(lines[1].trim_end(), "日");
+        assert_eq!(cursor, (1, 1));
+        // A screen too narrow for the prompt and two text columns
+        // drops the prompt.
+        let (lines, cursor, _) = render_cursor(7, 2, &mut editor);
+        assert_eq!(lines[1].trim_end(), "日");
+        assert_eq!(cursor, (2, 1));
+    }
+
+    #[test]
+    fn the_input_box_growing_holds_the_browsed_top_row() {
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut transcript = Transcript::new(false);
+        for i in 0..20 {
+            transcript.push_line(Kind::Text, &format!("line {i:02}"));
+        }
+        let mut editor = Editor::new(Vec::new());
+        let status = status();
+        let mut top_line = |transcript: &mut Transcript, editor: &mut Editor| {
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        View {
+                            transcript,
+                            editor,
+                            status: &status,
+                            approval: None,
+                            progress: None,
+                        },
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..30u16)
+                .map(|x| buffer[(x, 0u16)].symbol())
+                .collect::<String>()
+        };
+        top_line(&mut transcript, &mut editor);
+        transcript.scroll_up(5);
+        let before = top_line(&mut transcript, &mut editor);
+        assert_eq!(before.trim_end(), "line 09");
+        // Two more editor rows take two transcript rows; the top row
+        // stays.
+        editor.set("one\ntwo\nthree");
+        let after = top_line(&mut transcript, &mut editor);
+        assert_eq!(after.trim_end(), "line 09");
+        assert_eq!(transcript.scroll(), 7);
+    }
+
+    #[test]
+    fn the_popup_lists_the_matches_above_the_box_with_one_selected() {
+        let commands = vec![
+            CommandSpec::new("/help", "list the commands"),
+            CommandSpec::new("/model [name]", "show or switch the session model"),
+        ];
+        let mut editor = Editor::new(commands);
+        editor.set("/");
+        let (lines, cursor, buffer) = render_cursor(60, 6, &mut editor);
+        assert_eq!(cursor, (6, 4));
+        assert_eq!(lines[4].trim_end(), "dmz> /");
+        // One row per match: the usage, then the help.
+        assert!(lines[2].contains("/help"), "{:?}", lines[2]);
+        assert!(lines[2].contains("list the commands"), "{:?}", lines[2]);
+        assert!(lines[3].contains("/model [name]"), "{:?}", lines[3]);
+        assert!(
+            lines[3].contains("show or switch the session model"),
+            "{:?}",
+            lines[3]
+        );
+        let selected = buffer[(6u16, 2u16)].style();
+        let other = buffer[(6u16, 3u16)].style();
+        assert!(selected.add_modifier.contains(Modifier::REVERSED));
+        assert!(!other.add_modifier.contains(Modifier::REVERSED));
+        // The selection moves; a narrower match set shrinks the popup.
+        editor.select_next();
+        let (_, _, buffer) = render_cursor(60, 6, &mut editor);
+        assert!(
+            buffer[(6u16, 3u16)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        editor.insert_char('m');
+        let (lines, _, _) = render_cursor(60, 6, &mut editor);
+        assert!(lines[3].contains("/model [name]"), "{:?}", lines[3]);
+        assert!(!lines[2].contains("/help"), "{:?}", lines[2]);
+        // A dismissed popup leaves the rows to the transcript.
+        editor.dismiss();
+        let (lines, _, _) = render_cursor(60, 6, &mut editor);
+        assert!(!lines[3].contains("/model"), "{:?}", lines[3]);
     }
 
     #[test]
@@ -677,7 +902,7 @@ line 12",
         let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
         let mut transcript = Transcript::new(true);
         transcript.push_delta(Kind::Text, "# Title\n\nplain `code`");
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         terminal
             .draw(|frame| {
@@ -685,7 +910,7 @@ line 12",
                     frame,
                     View {
                         transcript: &mut transcript,
-                        input: &input,
+                        editor: &mut editor,
                         status: &status,
                         approval: None,
                         progress: None,
@@ -712,14 +937,14 @@ line 12",
         for i in 0..5 {
             transcript.push_line(Kind::Text, &format!("line {i}"));
         }
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, rows) = render(
             30,
             5,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: Some("⠋ 3s · bash\x1b[2J"),
@@ -736,7 +961,7 @@ line 12",
             3,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: None,
                 progress: Some("⠋ 3s · bash"),
@@ -750,14 +975,14 @@ line 12",
     #[test]
     fn an_approval_question_replaces_the_prompt() {
         let mut transcript = Transcript::new(false);
-        let input = Input::new();
+        let mut editor = Editor::new(Vec::new());
         let status = status();
         let (lines, _) = render(
             40,
             2,
             View {
                 transcript: &mut transcript,
-                input: &input,
+                editor: &mut editor,
                 status: &status,
                 approval: Some("approve ba\x1bsh? [y]es / [a]lways / [N]o"),
                 progress: None,

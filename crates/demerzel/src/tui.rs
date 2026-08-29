@@ -34,6 +34,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.mouse = config.mouse;
     options.markdown = config.markdown;
     options.thinking = config.thinking;
+    options.commands = crate::commands::specs();
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,

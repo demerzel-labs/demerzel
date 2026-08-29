@@ -6,17 +6,17 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use crate::input::Input;
+use crate::editor::Editor;
 use crate::render::{self, Status, View};
 use crate::transcript::{Kind, Transcript};
 
 pub use crate::transcript::MAX_BLOCK_BYTES;
 
-/// A transcript, an input line, a status bar, and a frame buffer of
-/// one size. Frames render into the buffer and go nowhere.
+/// A transcript, an input editor, a status bar, and a frame buffer
+/// of one size. Frames render into the buffer and go nowhere.
 pub struct Screen {
     transcript: Transcript,
-    input: Input,
+    editor: Editor,
     status: Status,
     terminal: Terminal<TestBackend>,
 }
@@ -27,7 +27,7 @@ impl Screen {
     pub fn new(width: u16, height: u16, markdown: bool) -> Self {
         Self {
             transcript: Transcript::new(markdown),
-            input: Input::new(),
+            editor: Editor::new(Vec::new()),
             status: Status {
                 model: "bench-model".into(),
                 mode: "auto".into(),
@@ -55,7 +55,7 @@ impl Screen {
     pub fn draw(&mut self) {
         let Self {
             transcript,
-            input,
+            editor,
             status,
             terminal,
         } = self;
@@ -65,7 +65,7 @@ impl Screen {
                     frame,
                     View {
                         transcript,
-                        input,
+                        editor,
                         status,
                         approval: None,
                         progress: None,
