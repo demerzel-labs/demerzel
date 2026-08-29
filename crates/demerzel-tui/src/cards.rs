@@ -94,6 +94,16 @@ impl State {
         }
     }
 
+    /// The face of the state's mark.
+    fn face(self) -> Face {
+        match self {
+            State::Running => Face::PLAIN,
+            State::Pending | State::Declined | State::Interrupted => Face::WARNING,
+            State::Done => Face::SUCCESS,
+            State::Error => Face::FAILURE,
+        }
+    }
+
     /// The footer word of an ended call, for a card whose tool gave
     /// no summary. An open call has no footer.
     fn word(self) -> Option<&'static str> {
@@ -360,12 +370,36 @@ impl Card {
     }
 
     /// The face changes over the last render, clamped to `len`: the
-    /// header strong, the output muted.
+    /// state mark in its state's face, the header a title, a `+` or
+    /// `-` line of the preview a diff line, the output muted.
     pub fn faces(&self, len: usize, out: &mut Vec<(u32, Face)>) {
         let header_end = self.header_end.min(len);
         if header_end > 0 {
-            out.push((0, Face::STRONG));
+            let mark = self.state.glyph().len_utf8().min(header_end);
+            out.push((0, Face::TITLE | self.state.face()));
+            if mark < header_end {
+                out.push((mark as u32, Face::TITLE));
+            }
             out.push((header_end as u32, Face::PLAIN));
+        }
+        if let Some(body) = &self.body {
+            // The body renders as `\n  ` plus each line, from the
+            // header's end; the offsets follow that layout.
+            let mut at = self.header_end;
+            for line in body.lines() {
+                let start = at + 3;
+                at = start + line.len();
+                let face = match line.as_bytes() {
+                    [b'+', b' ', ..] => Face::DIFF_ADD,
+                    [b'-', b' ', ..] => Face::DIFF_REMOVE,
+                    _ => continue,
+                };
+                if start >= len {
+                    break;
+                }
+                out.push((start as u32, face));
+                out.push((at.min(len) as u32, Face::PLAIN));
+            }
         }
         let (start, end) = (self.output_span.0.min(len), self.output_span.1.min(len));
         if end > start {
@@ -755,18 +789,54 @@ mod tests {
     }
 
     #[test]
+    fn the_faces_mark_the_diff_lines_of_a_preview_and_the_state() {
+        let mut card = Card::new("edit", false);
+        card.set_preview("src/lib.rs\n- old line\n+ new line\n  context");
+        let shown = text(&mut card);
+        let mut faces = Vec::new();
+        card.faces(shown.len(), &mut faces);
+        let removed = "· edit src/lib.rs\n  ".len() as u32;
+        let added = "· edit src/lib.rs\n  - old line\n  ".len() as u32;
+        assert_eq!(
+            faces,
+            vec![
+                (0, Face::TITLE),
+                ("·".len() as u32, Face::TITLE),
+                ("· edit src/lib.rs".len() as u32, Face::PLAIN),
+                (removed, Face::DIFF_REMOVE),
+                (removed + "- old line".len() as u32, Face::PLAIN),
+                (added, Face::DIFF_ADD),
+                (added + "+ new line".len() as u32, Face::PLAIN),
+            ]
+        );
+        // A cut text keeps the entries inside it.
+        let mut faces = Vec::new();
+        card.faces(removed as usize + 4, &mut faces);
+        assert!(faces.iter().all(|&(at, _)| at <= removed + 4));
+        assert!(faces.iter().any(|&(_, face)| face == Face::DIFF_REMOVE));
+
+        finish(&mut card, "", true);
+        let shown = text(&mut card);
+        let mut faces = Vec::new();
+        card.faces(shown.len(), &mut faces);
+        assert_eq!(faces[0], (0, Face::TITLE | Face::FAILURE));
+    }
+
+    #[test]
     fn the_faces_mark_the_header_and_the_output() {
         let mut card = Card::new("bash", false);
         finish(&mut card, "out", false);
         let shown = text(&mut card);
         let mut faces = Vec::new();
         card.faces(shown.len(), &mut faces);
+        let mark = "✓".len() as u32;
         let header = "✓ bash".len() as u32;
         let output_end = "✓ bash\n  out".len() as u32;
         assert_eq!(
             faces,
             vec![
-                (0, Face::STRONG),
+                (0, Face::TITLE | Face::SUCCESS),
+                (mark, Face::TITLE),
                 (header, Face::MUTED),
                 (output_end, Face::PLAIN),
             ]
@@ -775,10 +845,10 @@ mod tests {
         let shown = text(&mut card);
         let mut faces = Vec::new();
         card.faces(shown.len(), &mut faces);
-        assert_eq!(faces.len(), 4);
-        assert_eq!(faces[1], ("✓ bash $ true".len() as u32, Face::PLAIN));
+        assert_eq!(faces.len(), 5);
+        assert_eq!(faces[2], ("✓ bash $ true".len() as u32, Face::PLAIN));
         assert_eq!(
-            faces[2],
+            faces[3],
             ("✓ bash $ true\n    more".len() as u32, Face::MUTED)
         );
         // Offsets clamp to a text the transcript cut at its cap.

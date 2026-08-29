@@ -146,6 +146,18 @@ impl Pty {
         project_config: Option<&str>,
         user_config: Option<&str>,
     ) -> Self {
+        Self::spawn_with_env(base_url, extra_args, project_config, user_config, &[])
+    }
+
+    /// [`Pty::spawn_with_configs`] with extra environment variables
+    /// on the child: the color depth the terminal declares.
+    fn spawn_with_env(
+        base_url: &str,
+        extra_args: &[&str],
+        project_config: Option<&str>,
+        user_config: Option<&str>,
+        env: &[(&str, &str)],
+    ) -> Self {
         let dirs = tempfile::tempdir().unwrap();
         let home = dirs.path().join("home");
         let data = dirs.path().join("data");
@@ -176,11 +188,15 @@ impl Pty {
             .env("XDG_CONFIG_HOME", dirs.path().join("config"))
             .env("XDG_DATA_HOME", &data)
             .env("TERM", "xterm-256color")
+            .env_remove("COLORTERM")
             .env_remove("NO_COLOR")
             .env_remove("DEMERZEL_PROVIDER")
             .env_remove("DEMERZEL_MODEL")
             .env_remove("DEMERZEL_BASE_URL")
             .env_remove("ANTHROPIC_API_KEY");
+        for (name, value) in env {
+            command.env(name, value);
+        }
         unsafe {
             use std::os::unix::process::CommandExt as _;
             command.pre_exec(move || {
@@ -424,6 +440,52 @@ fn strip_escapes(raw: &[u8]) -> Vec<u8> {
 
 /// Whether the stripped, space-free view of `raw` contains `marker`,
 /// the same comparison [`Pty::wait_for`] runs with a cursor.
+/// The parameters of every `ESC [ … m` sequence in `raw` that sets
+/// a color: `38;5;n` for a palette entry, `38;2;r;g;b` for truecolor,
+/// `48;…` for a background, in one list per sequence. The theme
+/// scenarios read the depth off them.
+fn color_params(raw: &[u8]) -> Vec<Vec<u16>> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + 1 < raw.len() {
+        if raw[i] != 0x1b || raw[i + 1] != b'[' {
+            i += 1;
+            continue;
+        }
+        let start = i + 2;
+        let mut end = start;
+        while end < raw.len() && (raw[end].is_ascii_digit() || raw[end] == b';') {
+            end += 1;
+        }
+        if end < raw.len() && raw[end] == b'm' {
+            let params: Vec<u16> = String::from_utf8_lossy(&raw[start..end])
+                .split(';')
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if params
+                .iter()
+                .any(|p| matches!(p, 30..=38 | 40..=48 | 90..=97 | 100..=107))
+            {
+                found.push(params);
+            }
+        }
+        i = end.max(i + 1);
+    }
+    found
+}
+
+/// Whether one sequence carries `needle` as a run of parameters.
+fn has_params(params: &[Vec<u16>], needle: &[u16]) -> bool {
+    params
+        .iter()
+        .any(|sequence| sequence.windows(needle.len()).any(|w| w == needle))
+}
+
+/// Whether any sequence sets a truecolor foreground or background.
+fn has_truecolor(params: &[Vec<u16>]) -> bool {
+    has_params(params, &[38, 2]) || has_params(params, &[48, 2])
+}
+
 fn contains_marker(raw: &[u8], marker: &str) -> bool {
     let needle: Vec<u8> = marker.bytes().filter(|byte| *byte != b' ').collect();
     let haystack: Vec<u8> = strip_escapes(raw)
@@ -1134,4 +1196,125 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
         body.contains("first-row\\nsecond-row\\nthird-row\\nfourth-row"),
         "{body}"
     );
+}
+
+/// A reply with a code fence, so the terminal theme's palette
+/// entries — the fence's cyan — reach the stream.
+const THEMED_REPLY: &str = "Done.\n\n```rust\nfn main() {}\n```\n";
+
+/// One session over `configs` and `env`; returns the raw stream.
+async fn themed_session(
+    project_config: Option<&str>,
+    user_config: Option<&str>,
+    env: &[(&str, &str)],
+) -> Vec<u8> {
+    let mock = MockServer::start(vec![text_turn(THEMED_REPLY)], Vec::new()).await;
+    let mut pty = Pty::spawn_with_env(&mock.url(), &[], project_config, user_config, env);
+    pty.wait_for(PROMPT);
+    pty.send(b"paint\r");
+    pty.wait_for("2 cached");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("fn main");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_terminal_theme_names_palette_entries_only() {
+    // The backend writes a palette entry as `38;5;n`, n under 16.
+    let raw = themed_session(None, None, &[("COLORTERM", "truecolor")]).await;
+    let params = color_params(&raw);
+    assert!(
+        has_params(&params, &[38, 5, 6]),
+        "the fence takes the palette's cyan: {params:?}"
+    );
+    assert!(!has_truecolor(&params), "no truecolor: {params:?}");
+    let own = params
+        .iter()
+        .flat_map(|p| p.windows(3))
+        .filter(|w| w[0] == 38 && w[1] == 5)
+        .all(|w| w[2] < 16);
+    assert!(own, "no entry past the terminal's own: {params:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
+    let raw = themed_session(
+        None,
+        Some("[tui]\ntheme = \"dark\"\n"),
+        &[("COLORTERM", "truecolor")],
+    )
+    .await;
+    let params = color_params(&raw);
+    assert!(
+        has_params(&params, &[38, 2, 0xd8, 0xde, 0xe9]),
+        "the text role in truecolor: {params:?}"
+    );
+    // The status bar's ground is the theme's.
+    assert!(
+        has_params(&params, &[48, 2, 0x3b, 0x42, 0x52]),
+        "the bar's ground in truecolor: {params:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_light_theme_fits_a_256_color_terminal() {
+    // TERM=xterm-256color and no COLORTERM: every RGB value lands on
+    // a palette index.
+    let raw = themed_session(Some("[tui]\ntheme = \"light\"\n"), None, &[]).await;
+    let params = color_params(&raw);
+    let past_sixteen = params
+        .iter()
+        .flat_map(|p| p.windows(3))
+        .any(|w| (w[0] == 38 || w[0] == 48) && w[1] == 5 && w[2] >= 16);
+    assert!(past_sixteen, "palette entries past sixteen: {params:?}");
+    assert!(!has_truecolor(&params), "no truecolor: {params:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_defined_theme_reaches_the_screen() {
+    // The user file defines the theme; the project file picks it
+    // and edits one role.
+    let raw = themed_session(
+        Some("[tui]\ntheme = \"ocean\"\n[theme.ocean]\ncode_block = \"#010203\"\n"),
+        Some("[theme.ocean]\ncode_block = \"#5fafd7\"\nkeyword = \"#040506\"\n"),
+        &[("COLORTERM", "truecolor")],
+    )
+    .await;
+    let params = color_params(&raw);
+    assert!(has_params(&params, &[38, 2, 1, 2, 3]), "{params:?}");
+    assert!(has_params(&params, &[38, 2, 4, 5, 6]), "{params:?}");
+    assert!(!has_params(&params, &[38, 2, 95, 175, 215]), "{params:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_color_keeps_every_color_off_the_screen() {
+    let raw = themed_session(
+        None,
+        Some("[tui]\ntheme = \"dark\"\n"),
+        &[("COLORTERM", "truecolor"), ("NO_COLOR", "1")],
+    )
+    .await;
+    let params = color_params(&raw);
+    assert!(params.is_empty(), "{params:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_theme_name_with_no_theme_stops_the_run() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty =
+        Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\ntheme = \"ocean\"\n"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        pty.poll_read();
+        if let Some(status) = pty.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the run did not stop");
+    };
+    assert!(!status.success());
+    let text = String::from_utf8_lossy(&pty.seen);
+    assert!(text.contains("`tui.theme` names no theme"), "{text}");
 }

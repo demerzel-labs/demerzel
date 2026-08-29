@@ -8,6 +8,7 @@ use ratatui::backend::TestBackend;
 
 use crate::editor::Editor;
 use crate::render::{self, Status, View};
+use crate::theme::{Depth, Palette, Theme};
 use crate::transcript::{Kind, Transcript};
 
 pub use crate::transcript::MAX_BLOCK_BYTES;
@@ -18,6 +19,7 @@ pub struct Screen {
     transcript: Transcript,
     editor: Editor,
     status: Status,
+    palette: Palette,
     terminal: Terminal<TestBackend>,
 }
 
@@ -36,6 +38,7 @@ impl Screen {
                 output_tokens: 0,
                 cached_tokens: 0,
             },
+            palette: Palette::new(&Theme::default(), Depth::TrueColor),
             terminal: Terminal::new(TestBackend::new(width, height)).expect("headless terminal"),
         }
     }
@@ -57,6 +60,7 @@ impl Screen {
             transcript,
             editor,
             status,
+            palette,
             terminal,
         } = self;
         terminal
@@ -67,6 +71,7 @@ impl Screen {
                         transcript,
                         editor,
                         status,
+                        palette,
                         approval: None,
                         progress: None,
                     },

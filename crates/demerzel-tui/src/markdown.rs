@@ -44,10 +44,10 @@ use crate::highlight::{Class, Highlighter};
 use crate::wrap::{display_width, row_starts};
 
 /// The style classes of one span, as a set: strong text inside a
-/// link carries both. The frame maps a set to one style; the theme
-/// owns that map once it lands.
+/// link carries both. The frame maps a set to one style through the
+/// theme's roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Face(u16);
+pub(crate) struct Face(u32);
 
 impl Face {
     /// Body text in the block's own style.
@@ -72,6 +72,22 @@ impl Face {
     pub const NUMBER: Face = Face(1 << 11);
     /// Secondary text the interface adds: a tool card's output tail.
     pub const MUTED: Face = Face(1 << 12);
+    /// A line of a code fence, over `CODE`; inline code has `CODE`
+    /// alone.
+    pub const FENCE: Face = Face(1 << 13);
+    /// A tool card's header.
+    pub const TITLE: Face = Face(1 << 14);
+    /// A card's state mark: the call finished.
+    pub const SUCCESS: Face = Face(1 << 15);
+    /// A card's state mark: the call waits, was declined, or was
+    /// interrupted.
+    pub const WARNING: Face = Face(1 << 16);
+    /// A card's state mark: the call failed.
+    pub const FAILURE: Face = Face(1 << 17);
+    /// A `+` line of an edit preview on a card.
+    pub const DIFF_ADD: Face = Face(1 << 18);
+    /// A `-` line of an edit preview on a card.
+    pub const DIFF_REMOVE: Face = Face(1 << 19);
 
     /// The face of one highlight class.
     fn class(class: Class) -> Face {
@@ -434,7 +450,7 @@ impl<'s> Renderer<'_, 's> {
                     }
                 }
                 self.prefix.push_str("│ ");
-                self.push_face(Face::CODE);
+                self.push_face(Face::CODE | Face::FENCE);
             }
             Tag::HtmlBlock => {
                 self.flush_pending();
@@ -1212,8 +1228,8 @@ mod tests {
             rows[1].1,
             vec![
                 (0, Face::MARKER),
-                ("│ ".len(), Face::CODE | Face::KEYWORD),
-                ("│ fn".len(), Face::CODE)
+                ("│ ".len(), Face::CODE | Face::FENCE | Face::KEYWORD),
+                ("│ fn".len(), Face::CODE | Face::FENCE)
             ]
         );
         // No language: the frame alone. An indented block is one too.
@@ -1232,7 +1248,7 @@ mod tests {
 
     #[test]
     fn a_fence_with_a_known_label_gets_highlight_classes() {
-        let code = Face::CODE;
+        let code = Face::CODE | Face::FENCE;
         let bar = "│ ".len();
         let shown = rows("```rust\nlet x = \"s\"; // c\n```", 80);
         assert_eq!(shown[1].0, "│ let x = \"s\"; // c");
@@ -1288,7 +1304,7 @@ mod tests {
         assert_eq!(shown[5].1, vec![(0, Face::MARKER), (bar, code)]);
         assert_eq!(shown[9].1[1], (bar, code | Face::KEYWORD));
         // An inline code span is not a fence.
-        assert_eq!(rows("`let`", 80)[0].1, vec![(0, code)]);
+        assert_eq!(rows("`let`", 80)[0].1, vec![(0, Face::CODE)]);
         // A tab widens before the scan, so the offsets are over the
         // shown line.
         let shown = rows("```rust\n\tlet x\n```", 80);
@@ -1325,7 +1341,10 @@ mod tests {
             },
         ));
         assert_eq!(&text[..starts[1] as usize], "│ let b = 2; /* open");
-        assert_eq!(faces[1], ("│ ".len() as u32, Face::CODE | Face::KEYWORD));
+        assert_eq!(
+            faces[1],
+            ("│ ".len() as u32, Face::CODE | Face::FENCE | Face::KEYWORD)
+        );
         assert!(faces.iter().any(|&(_, face)| face.has(Face::COMMENT)));
     }
 
@@ -1352,11 +1371,11 @@ mod tests {
         assert_eq!(starts.len(), 3);
         assert!(faces.len() > 1000 && faces.len() < 1030, "{}", faces.len());
         assert_eq!(faces.last().map(|&(_, face)| face), Some(Face::MARKER));
-        assert_eq!(faces[faces.len() - 2].1, Face::CODE);
+        assert_eq!(faces[faces.len() - 2].1, Face::CODE | Face::FENCE);
         assert!(
             faces
                 .iter()
-                .any(|&(_, face)| face == Face::CODE | Face::NUMBER)
+                .any(|&(_, face)| face == Face::CODE | Face::FENCE | Face::NUMBER)
         );
     }
 

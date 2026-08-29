@@ -43,6 +43,7 @@ use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender}
 use crate::history::History;
 use crate::render::{self, Status, View};
 use crate::terminal::Guard;
+use crate::theme::{Depth, Palette};
 use crate::transcript::{Kind, Transcript};
 use crate::{Options, PROMPT, Submission, TurnFuture};
 
@@ -151,6 +152,8 @@ struct App {
     editor: Editor,
     history: History,
     status: Status,
+    /// The theme at the terminal's color depth, built once.
+    palette: Palette,
     mode: Mode,
     /// Set while a turn runs.
     progress: Option<Progress>,
@@ -202,6 +205,7 @@ impl App {
                 output_tokens: 0,
                 cached_tokens: 0,
             },
+            palette: Palette::new(&options.theme, Depth::from_env()),
             mode: Mode::Edit,
             progress: None,
             progress_line: String::new(),
@@ -690,6 +694,7 @@ impl App {
             transcript,
             editor,
             status,
+            palette,
             page,
             progress,
             progress_line,
@@ -711,6 +716,7 @@ impl App {
                     transcript,
                     editor,
                     status,
+                    palette,
                     approval: question,
                     progress,
                 },

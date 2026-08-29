@@ -58,8 +58,8 @@ const MAX_RENDER_BYTES: usize = 2 * MAX_BLOCK_BYTES;
 /// room its header and cut mark take.
 const SUMMARY_BYTES: usize = MAX_BLOCK_BYTES - SUMMARY_RESERVE;
 
-/// What a block is. Kinds map to terminal-native styles until the
-/// theme lands.
+/// What a block is. The frame maps a kind to an attribute and a
+/// theme role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// The user's submitted line, echoed with the prompt.
@@ -1453,7 +1453,10 @@ mod tests {
         let spans = spans(&mut t, 80);
         assert_eq!(
             spans[0],
-            vec![(Face::STRONG, "✓ bash $ cargo test".to_string())]
+            vec![
+                (Face::TITLE | Face::SUCCESS, "✓".to_string()),
+                (Face::TITLE, " bash $ cargo test".to_string()),
+            ]
         );
         assert_eq!(spans[1], vec![(Face::MUTED, "  ok".to_string())]);
         assert_eq!(spans[2][0].0, Face::PLAIN);
