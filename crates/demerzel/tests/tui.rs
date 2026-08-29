@@ -136,6 +136,16 @@ impl Pty {
         extra_args: &[&str],
         project_config: Option<&str>,
     ) -> Self {
+        Self::spawn_with_configs(base_url, extra_args, project_config, None)
+    }
+
+    /// [`Pty::spawn`] with a project file and a user file.
+    fn spawn_with_configs(
+        base_url: &str,
+        extra_args: &[&str],
+        project_config: Option<&str>,
+        user_config: Option<&str>,
+    ) -> Self {
         let dirs = tempfile::tempdir().unwrap();
         let home = dirs.path().join("home");
         let data = dirs.path().join("data");
@@ -146,6 +156,11 @@ impl Pty {
         write_auth_store(&data);
         if let Some(config) = project_config {
             let dir = project.join(".demerzel");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), config).unwrap();
+        }
+        if let Some(config) = user_config {
+            let dir = dirs.path().join("config").join("demerzel");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("config.toml"), config).unwrap();
         }
@@ -834,7 +849,8 @@ fn long_reply() -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let mock = MockServer::start(vec![text_turn(&long_reply())], Vec::new()).await;
-    let mut pty = Pty::spawn(&mock.url(), &[]);
+    // Capture is off by default; the user file turns it on.
+    let mut pty = Pty::spawn_with_configs(&mock.url(), &[], None, Some("[tui]\nmouse = true\n"));
 
     pty.wait_for(PROMPT);
     pty.send(b"long\r");
@@ -867,14 +883,29 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let text = String::from_utf8_lossy(&raw);
     assert!(
         text.contains(MOUSE_CAPTURE),
-        "mouse capture is on by default"
+        "the mouse key turns capture on"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_mouse_config_key_turns_capture_off() {
+async fn a_project_file_cannot_turn_mouse_capture_on() {
     let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
-    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = false\n"));
+    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = true\n"));
+
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("no mouse");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    let text = String::from_utf8_lossy(&raw);
+    assert!(!text.contains(MOUSE_CAPTURE), "capture must stay off");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mouse_capture_is_off_by_default() {
+    let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");

@@ -91,8 +91,9 @@ pub struct Options {
     pub model: String,
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
-    /// Capture the mouse, so the wheel scrolls the transcript. On by
-    /// default; off, the terminal keeps its own text selection.
+    /// Capture the mouse, so the wheel scrolls the transcript. Off by
+    /// default; on, the terminal loses its own text selection. The
+    /// binary sets it from the `tui.mouse` config key.
     pub mouse: bool,
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.
@@ -113,7 +114,7 @@ impl Default for Options {
             banner: None,
             model: String::new(),
             mode: String::new(),
-            mouse: true,
+            mouse: false,
             markdown: true,
             thinking: Thinking::default(),
             commands: Vec::new(),
