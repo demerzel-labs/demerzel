@@ -250,7 +250,7 @@ impl Theme {
             (Role::DiffAdd, 0x8fbf6f),
             (Role::DiffRemove, 0xe37070),
             (Role::Keyword, 0xba8db4),
-            (Role::String, 0xa9c48c),
+            (Role::String, 0xa6c48c),
             (Role::Comment, 0x6c7384),
             (Role::Number, 0xe0a458),
         ])
@@ -277,7 +277,7 @@ impl Theme {
             (Role::Keyword, 0x7a1fa2),
             (Role::String, 0x0e5591),
             (Role::Comment, 0x6c7384),
-            (Role::Number, 0x0e5591),
+            (Role::Number, 0x9a5200),
         ])
     }
 
@@ -439,32 +439,41 @@ fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     }
 }
 
-/// The nearest of the sixteen named colors, by the values most
-/// terminals ship.
+/// The nearest of the sixteen named colors, by hue. A straight
+/// distance to the palette's values pulls every muted color to gray,
+/// and a theme's classes then merge; so a color with chroma keeps its
+/// hue, bright above mid-lightness, and only a color with little
+/// chroma lands on the four grays.
 fn nearest_16(r: u8, g: u8, b: u8) -> u8 {
-    const PALETTE: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (205, 0, 0),
-        (0, 205, 0),
-        (205, 205, 0),
-        (0, 0, 238),
-        (205, 0, 205),
-        (0, 205, 205),
-        (229, 229, 229),
-        (127, 127, 127),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (92, 92, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-    PALETTE
-        .iter()
-        .enumerate()
-        .min_by_key(|&(_, &entry)| distance((r, g, b), entry))
-        .map_or(0, |(index, _)| index as u8)
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let chroma = f32::from(max) - f32::from(min);
+    let light = (u16::from(max) + u16::from(min)) / 2;
+    if chroma < 32.0 {
+        return match light {
+            0..=63 => 0,
+            64..=159 => 8,
+            160..=223 => 7,
+            _ => 15,
+        };
+    }
+    let (rf, gf, bf) = (f32::from(r), f32::from(g), f32::from(b));
+    let hue = if max == r {
+        ((gf - bf) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (bf - rf) / chroma + 2.0
+    } else {
+        (rf - gf) / chroma + 4.0
+    } * 60.0;
+    // Sectors of 60 degrees, centered on the six palette hues.
+    let base = match ((hue + 30.0) % 360.0) as u16 / 60 {
+        0 => 1,
+        1 => 3,
+        2 => 2,
+        3 => 6,
+        4 => 4,
+        _ => 5,
+    };
+    if light >= 128 { base + 8 } else { base }
 }
 
 #[cfg(test)]
@@ -605,5 +614,25 @@ mod tests {
         assert_eq!(nearest_16(200, 10, 10), 1);
         assert_eq!(nearest_16(255, 255, 255), 15);
         assert_eq!(nearest_16(100, 100, 255), 12);
+        // A pastel keeps its hue; a muted gray-blue is gray.
+        assert_eq!(nearest_16(186, 141, 180), 13);
+        assert_eq!(nearest_16(123, 132, 148), 8);
+        assert_eq!(nearest_16(238, 241, 246), 15);
+        assert_eq!(nearest_16(140, 100, 0), 3);
+    }
+
+    #[test]
+    fn the_built_in_themes_keep_their_classes_apart_at_sixteen_colors() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let palette = Palette::new(&theme, Depth::Ansi16);
+            let classes = [Role::Keyword, Role::String, Role::Number, Role::Comment]
+                .map(|role| palette.color(role));
+            for (i, a) in classes.iter().enumerate() {
+                for b in &classes[i + 1..] {
+                    assert_ne!(a, b, "{classes:?}");
+                }
+            }
+            assert_ne!(palette.color(Role::Text), palette.color(Role::Dim));
+        }
     }
 }
