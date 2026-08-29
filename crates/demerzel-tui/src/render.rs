@@ -215,13 +215,12 @@ fn fit_row<'a>(parts: impl IntoIterator<Item = &'a str>, width: usize) -> (Strin
     (shown, used)
 }
 
-/// `style` with `color` as its foreground, or unchanged when the
-/// role has none: the terminal's own foreground stays.
+/// `style` with `color` as its foreground. A role with no color
+/// paints the terminal's own foreground, so `none` on a nested role
+/// — inline code inside colored text, a keyword inside a fence —
+/// takes the enclosing color away, as the config contract says.
 fn paint(style: Style, color: Option<ratatui::style::Color>) -> Style {
-    match color {
-        Some(color) => style.fg(color),
-        None => style,
-    }
+    style.fg(color.unwrap_or(ratatui::style::Color::Reset))
 }
 
 /// A block's own style: the attribute the kind carries, and the
@@ -296,14 +295,13 @@ fn face_style(kind: Kind, face: Face, palette: &Palette) -> Style {
         style = paint(style, palette.color(Role::Number));
     }
     if face.has(Face::COMMENT) {
-        // With no color of its own a comment drops the fence's color
-        // and dims, so it still reads apart from the code.
-        style = match palette.color(Role::Comment) {
-            Some(color) => style.fg(color),
-            None => style
-                .fg(ratatui::style::Color::Reset)
-                .add_modifier(Modifier::DIM),
-        };
+        // With no color of its own a comment also dims, so it still
+        // reads apart from the code.
+        let color = palette.color(Role::Comment);
+        style = paint(style, color);
+        if color.is_none() {
+            style = style.add_modifier(Modifier::DIM);
+        }
     }
     if face.has(Face::SUCCESS) {
         style = paint(style, palette.color(Role::Success));
@@ -1107,6 +1105,12 @@ line 12",
         let bar = colored[(1u16, 5u16)].style();
         assert_eq!(bar.bg, Some(TermColor::Rgb(0x36, 0x3e, 0x4e)));
         assert!(!bar.add_modifier.contains(Modifier::REVERSED));
+        // `none` on a nested role takes the enclosing color away.
+        theme.set(Role::InlineCode, None);
+        let reset = themed_buffer(&Palette::new(&theme, Depth::TrueColor));
+        assert_eq!(reset[(6u16, 2u16)].style().fg, Some(TermColor::Reset));
+        assert_ne!(reset[(0u16, 2u16)].style().fg, Some(TermColor::Reset));
+        theme.set(Role::InlineCode, Some(Color::Indexed(6)));
         // A ground with no text color reverses onto the ground.
         theme.set(Role::Text, None);
         let bar = themed_buffer(&Palette::new(&theme, Depth::TrueColor))[(1u16, 5u16)].style();

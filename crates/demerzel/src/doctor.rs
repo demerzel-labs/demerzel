@@ -89,7 +89,7 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         &settings.tui.theme.value,
         settings.tui.theme.origin,
     )?;
-    if let Err(error) = config::theme(&settings.tui.theme.value, project.as_ref(), user.as_ref()) {
+    if let Err(error) = config::theme(&settings.tui.theme.value, user.as_ref()) {
         problems += 1;
         writeln!(out, "  problem: {error}")?;
     }

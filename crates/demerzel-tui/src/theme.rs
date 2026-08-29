@@ -330,8 +330,12 @@ impl Depth {
         }
     }
 
+    /// `var_os`, decoded lossily: a `NO_COLOR` that is not UTF-8 is
+    /// still set and non-empty, so it still turns color off.
     pub(crate) fn from_env() -> Self {
-        Self::detect(|name| std::env::var(name).ok())
+        Self::detect(|name| {
+            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+        })
     }
 }
 
@@ -369,7 +373,23 @@ fn fit(color: Color, depth: Depth) -> Option<Color> {
         (Depth::TrueColor, color) => Some(color),
         (Depth::Ansi256, Color::Rgb(r, g, b)) => Some(Color::Indexed(nearest_256(r, g, b))),
         (Depth::Ansi16, Color::Rgb(r, g, b)) => Some(Color::Indexed(nearest_16(r, g, b))),
+        (Depth::Ansi16, Color::Indexed(index)) if index >= 16 => {
+            let (r, g, b) = palette_rgb(index);
+            Some(Color::Indexed(nearest_16(r, g, b)))
+        }
         (_, indexed @ Color::Indexed(_)) => Some(indexed),
+    }
+}
+
+/// The value of a 256-color palette entry past the terminal's own
+/// sixteen: the cube, then the grays.
+fn palette_rgb(index: u8) -> (u8, u8, u8) {
+    if index >= 232 {
+        let gray = 8 + 10 * (index - 232);
+        (gray, gray, gray)
+    } else {
+        let cube = usize::from(index.saturating_sub(16));
+        (CUBE[cube / 36], CUBE[cube / 6 % 6], CUBE[cube % 6])
     }
 }
 
@@ -598,6 +618,18 @@ mod tests {
         let terminal = Palette::new(&Theme::terminal(), Depth::Ansi16);
         assert_eq!(terminal.color(Role::Error), Some(TermColor::Red));
         assert_eq!(terminal.color(Role::Text), None);
+        // An entry past sixteen — reachable through the API, not
+        // config — fits to sixteen like the value it stands for.
+        let mut past = Theme::terminal();
+        past.set(Role::Accent, Some(Color::Indexed(196)));
+        past.set(Role::Dim, Some(Color::Indexed(244)));
+        let sixteen = Palette::new(&past, Depth::Ansi16);
+        assert_eq!(sixteen.color(Role::Accent), Some(TermColor::Red));
+        assert_eq!(sixteen.color(Role::Dim), Some(TermColor::DarkGray));
+        assert_eq!(palette_rgb(196), (255, 0, 0));
+        assert_eq!(palette_rgb(67), (95, 135, 175));
+        assert_eq!(palette_rgb(232), (8, 8, 8));
+        assert_eq!(palette_rgb(255), (238, 238, 238));
     }
 
     #[test]

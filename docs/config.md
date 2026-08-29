@@ -127,14 +127,17 @@ built-in name edits that theme. A table with a new name starts from
 A value is `#rrggbb`, one of the sixteen palette names (`black`,
 `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and
 each with a `bright-` prefix), or `none`. `none` takes the color
-away; the terminal's own foreground shows. One exception: a
-`comment` with no color drops the fence's color and dims. A
+away; the terminal's own foreground shows, also inside a colored
+fence or colored text. A `comment` with no color also dims. A
 `status_bar` with no `text` color reverses onto its ground. A key
 that names no role warns. A value that is no color stops the run. A
 name with no built-in theme and no table stops the run.
 
-Both files can define tables. For one theme, the user file's table
-applies first, then the project file's, role by role.
+Only the user file can define tables. A project file can pick a
+theme by name, a built-in one or one the user file defines. A
+`[theme.<name>]` table in a project file is ignored, with a warning:
+a repository must not color the approval question or a preview
+away.
 
 The interface fits the theme to the terminal:
 
@@ -194,6 +197,8 @@ privilege, move credentials, or raise cost:
   terminal's own text selection from a user who set no key.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
+- It cannot define a theme's colors. It can pick `tui.theme`. A color
+  can hide the approval question or a preview.
 
 A flag or a variable decides outright. Ignored project keys warn on
 stderr and in `doctor`.

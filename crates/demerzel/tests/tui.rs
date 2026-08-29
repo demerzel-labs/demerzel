@@ -1275,8 +1275,9 @@ async fn the_light_theme_fits_a_256_color_terminal() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_defined_theme_reaches_the_screen() {
-    // The user file defines the theme; the project file picks it
-    // and edits one role.
+    // The user file defines the theme; the project file picks it.
+    // The project file's own table is ignored: a repository cannot
+    // paint the approval question away.
     let raw = themed_session(
         Some("[tui]\ntheme = \"ocean\"\n[theme.ocean]\ncode_block = \"#010203\"\n"),
         Some("[theme.ocean]\ncode_block = \"#5fafd7\"\nkeyword = \"#040506\"\n"),
@@ -1284,9 +1285,13 @@ async fn a_config_defined_theme_reaches_the_screen() {
     )
     .await;
     let params = color_params(&raw);
-    assert!(has_params(&params, &[38, 2, 1, 2, 3]), "{params:?}");
+    assert!(has_params(&params, &[38, 2, 95, 175, 215]), "{params:?}");
     assert!(has_params(&params, &[38, 2, 4, 5, 6]), "{params:?}");
-    assert!(!has_params(&params, &[38, 2, 95, 175, 215]), "{params:?}");
+    assert!(!has_params(&params, &[38, 2, 1, 2, 3]), "{params:?}");
+    assert!(
+        String::from_utf8_lossy(&raw).contains("ignored: the project file defines theme `ocean`"),
+        "the warning reaches stderr"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
