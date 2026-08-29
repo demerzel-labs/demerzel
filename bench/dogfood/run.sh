@@ -97,6 +97,38 @@ wait_for 11-declined 'declined' 120
 sleep 6
 snap 12-idle
 
+# A long structured reply: an ASCII diagram of the codebase inside
+# a code fence. The captures show whether the fence, the frame, and
+# the wrap keep the diagram readable at 120 columns, in follow mode
+# and browsed. The model ends the reply with a marker, the only
+# needle a text reply offers; the prompt spells the marker apart, so
+# the echoed prompt cannot match it. Then copy mode selects three rows and
+# pastes them into the input box with bracketed paste, as a terminal
+# would: the rendered rows must come back as text. The fence frame
+# comes with them; step 8b's own copy leaves it out.
+send 'describe this codebase in ascii visuals of the flow and the core components, inside one code fence; end your reply with one line that holds the word DONE, a space, then the word DIAGRAM' Enter
+wait_for 13-diagram-live '╭─' 180
+wait_for 14-diagram-done 'DONE DIAGRAM' 300
+sleep 6
+snap 15-diagram-tail
+send PPage
+send PPage
+sleep 0.5
+snap 16-diagram-browse
+send End
+sleep 0.5
+tmux copy-mode -t "$SESSION"
+tmux send-keys -t "$SESSION" -X top-line
+tmux send-keys -t "$SESSION" -X begin-selection
+tmux send-keys -t "$SESSION" -X cursor-down
+tmux send-keys -t "$SESSION" -X cursor-down
+tmux send-keys -t "$SESSION" -X end-of-line
+tmux send-keys -t "$SESSION" -X copy-selection-and-cancel
+tmux paste-buffer -p -t "$SESSION"
+sleep 0.5
+snap 17-diagram-pasted
+send C-c
+
 send '/exit' Enter
 sleep 1
 tmux kill-session -t "$SESSION" 2>/dev/null

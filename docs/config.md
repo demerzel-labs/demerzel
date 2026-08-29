@@ -37,7 +37,7 @@ base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 
 [tui]
-mouse = true                     # wheel scroll in the full screen
+mouse = false                    # on: the wheel scrolls, no terminal selection
 markdown = true                  # render model replies as markdown
 thinking = "closed"              # closed | open | hidden
 ```
@@ -50,7 +50,7 @@ thinking = "closed"              # closed | open | hidden
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `history_file` | — | — | `true` |
-| `tui.mouse` | — | — | `true` |
+| `tui.mouse` | — | — | `false` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 
@@ -86,6 +86,9 @@ shows the whole summary. `hidden` shows no block.
 
 ## Keyboard keys
 
+Mouse capture sends the wheel and the buttons to Demerzel. It takes
+the terminal's own text selection, so it is off by default.
+
 The full-screen interface has these keys:
 
 - Enter submits the line. Alt-Enter inserts a newline. Shift-Enter
@@ -104,8 +107,8 @@ The full-screen interface has these keys:
 - A line that starts with `/` opens the completion popup. Tab and
   the arrow keys select a command. Enter puts the command on the
   line. The next Enter submits the line. Esc closes the popup.
-- PageUp and PageDown scroll the transcript. The mouse wheel scrolls
-  it too.
+- PageUp and PageDown scroll the transcript. With `tui.mouse` on, the
+  mouse wheel scrolls it too.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
@@ -120,8 +123,10 @@ privilege, move credentials, or raise cost:
 - It cannot raise `approval` above the user file's mode, or above
   `ask`.
 - It cannot set `base_url`.
-- It cannot turn `history_file` or `tui.mouse` on against a user file
-  that turned them off.
+- It cannot turn `history_file` on against a user file that turned
+  it off.
+- It cannot turn `tui.mouse` on. A repository must not take the
+  terminal's own text selection from a user who set no key.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
 
@@ -135,3 +140,6 @@ files and the first keys. M2.5 ([`m2.5-plan.md`](m2.5-plan.md))
 added the `[tui]` table. `effort` landed on 2026-08-24, between
 M2.5 steps 3 and 4. Cache-hit receipts before that date ran at the
 Codex adapter's fixed `low` effort and the Anthropic default.
+`tui.mouse` changed its default to `false` on 2026-08-29, after the
+M2.5 step-7 dogfood. Capture takes the terminal's own text
+selection.
