@@ -46,6 +46,11 @@ current.
   stability, correctness. Fix the material findings. Verify the fixes
   with one more review pass. Record the review results in the pull
   request body.
+- The pull request body keeps this layout: a summary, then
+  `Decisions`, `Verify`, `Review`, and `Contract growth`. Before the
+  pull request opens, one subagent tightens the draft. It cuts
+  words, repeats, and narration. It keeps every decision, number,
+  finding, and fix. Apply the tightened text.
 - Test discipline, checked by the correctness lens: tests exercise
   public contracts. Do not pin incidental output, such as report
   wording, unless a plan doc names that output as contract.
