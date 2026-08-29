@@ -151,7 +151,7 @@ fn doctor_shows_the_layer_that_set_each_key() {
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = gpt-5.6-sol (default)"), "{out}");
     assert!(out.contains("provider = openai-codex (default)"), "{out}");
-    assert!(out.contains("tui.mouse = on (default)"), "{out}");
+    assert!(out.contains("tui.mouse = off (default)"), "{out}");
     assert!(out.contains("tui.markdown = on (default)"), "{out}");
     assert!(out.contains("effort = high (default)"), "{out}");
 

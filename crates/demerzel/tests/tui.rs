@@ -834,7 +834,8 @@ fn long_reply() -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let mock = MockServer::start(vec![text_turn(&long_reply())], Vec::new()).await;
-    let mut pty = Pty::spawn(&mock.url(), &[]);
+    // Capture is off by default; the key turns it on.
+    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = true\n"));
 
     pty.wait_for(PROMPT);
     pty.send(b"long\r");
@@ -867,14 +868,14 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let text = String::from_utf8_lossy(&raw);
     assert!(
         text.contains(MOUSE_CAPTURE),
-        "mouse capture is on by default"
+        "the mouse key turns capture on"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_mouse_config_key_turns_capture_off() {
+async fn mouse_capture_is_off_by_default() {
     let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
-    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = false\n"));
+    let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");

@@ -74,7 +74,8 @@ pub struct RunConfig {
     /// memory only.
     pub history_path: Option<PathBuf>,
     /// Capture the mouse in the full-screen interface, so the wheel
-    /// scrolls the transcript.
+    /// scrolls the transcript. Off by default: capture takes the
+    /// terminal's own text selection.
     pub mouse: bool,
     /// Render model replies as markdown in the full-screen interface.
     pub markdown: bool,
@@ -97,7 +98,7 @@ impl RunConfig {
             effort: config::DEFAULT_EFFORT,
             auth: None,
             history_path: None,
-            mouse: true,
+            mouse: false,
             markdown: true,
             thinking: Thinking::default(),
         }

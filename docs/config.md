@@ -37,7 +37,7 @@ base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 
 [tui]
-mouse = true                     # wheel scroll in the full screen
+mouse = false                    # capture the mouse: wheel scroll, no terminal selection
 markdown = true                  # render model replies as markdown
 thinking = "closed"              # closed | open | hidden
 ```
@@ -50,7 +50,7 @@ thinking = "closed"              # closed | open | hidden
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `history_file` | — | — | `true` |
-| `tui.mouse` | — | — | `true` |
+| `tui.mouse` | — | — | `false` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 
@@ -104,8 +104,8 @@ The full-screen interface has these keys:
 - A line that starts with `/` opens the completion popup. Tab and
   the arrow keys select a command. Enter puts the command on the
   line. The next Enter submits the line. Esc closes the popup.
-- PageUp and PageDown scroll the transcript. The mouse wheel scrolls
-  it too.
+- PageUp and PageDown scroll the transcript. With `tui.mouse` on, the
+  mouse wheel scrolls it too.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses

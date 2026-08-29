@@ -533,7 +533,7 @@ pub fn resolve(
     // Trust rule: the project file can turn mouse capture off, never
     // on against a user who turned it off — capture takes the
     // terminal's own text selection, and the user knows their
-    // terminal.
+    // terminal. Off by default for the same reason.
     let user_mouse = layer_key(user, Origin::User, |l| l.tui.mouse);
     let project_mouse = match layer_key(project, Origin::Project, |l| l.tui.mouse) {
         Some(setting) if setting.value && user_mouse.as_ref().is_some_and(|user| !user.value) => {
@@ -544,7 +544,7 @@ pub fn resolve(
     };
     let mouse = project_mouse
         .or(user_mouse)
-        .unwrap_or_else(|| Setting::new(true, Origin::Default));
+        .unwrap_or_else(|| Setting::new(false, Origin::Default));
 
     // Cosmetic: either file can set it, the project file first.
     let markdown = layer_key(project, Origin::Project, |l| l.tui.markdown)
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
-        assert!(settings.tui.mouse.value);
+        assert!(!settings.tui.mouse.value);
         assert_eq!(settings.tui.mouse.origin, Origin::Default);
         assert_eq!(settings.approval_mode(true), ApprovalMode::Ask);
         assert_eq!(settings.approval_mode(false), ApprovalMode::ReadOnly);
