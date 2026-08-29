@@ -1061,6 +1061,15 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.send(b"\r");
     pty.send(b"\r");
     pty.wait_for("effort: high");
+    // Shift-Enter with the popup open stays a newline: the line
+    // submits as typed, not as the completed /effort.
+    pty.send(b"/e");
+    pty.wait_for("/exit");
+    pty.send(SHIFT_ENTER);
+    pty.send(b"row-two");
+    pty.wait_for("row-two");
+    pty.send(b"\r");
+    pty.wait_for("unknown command: /e");
     // Esc closes the popup: a repaint shows no popup row, and Enter
     // then submits the line as typed, which no command answers. The
     // resize between Esc and Enter keeps the two keys out of one

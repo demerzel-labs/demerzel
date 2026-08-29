@@ -19,9 +19,9 @@
 //! completion popup: Tab and the arrows select, Enter completes, Esc
 //! closes it.
 //!
-//! While a turn runs, a progress line above the input shows a
+//! While a turn runs, a progress line above the input box shows a
 //! spinner, the elapsed time, and the stage. The status bar is the
-//! bottom row, under the input. A tick timer wakes the
+//! bottom row, under the input box. A tick timer wakes the
 //! loop for it during the turn only; at idle nothing wakes.
 
 use std::future::poll_fn;
@@ -97,7 +97,7 @@ impl Progress {
     }
 }
 
-/// The input row is either the editor or an approval question.
+/// The input box is either the editor or an approval question.
 enum Mode {
     Edit,
     Approval {

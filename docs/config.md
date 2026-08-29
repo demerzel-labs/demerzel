@@ -89,20 +89,25 @@ shows the whole summary. `hidden` shows no block.
 The full-screen interface has these keys:
 
 - Enter submits the line. Alt-Enter inserts a newline. Shift-Enter
-  inserts a newline when the terminal accepts the
+  inserts a newline when the terminal supports the
   keyboard-enhancement flags. A paste keeps its newlines.
 - Up and Down move the cursor across the rows of the input box. On
   the first row, Up shows the previous history entry. On the last
   row, Down shows the next entry.
 - Home and Ctrl-A move to the start of the line. End and Ctrl-E
-  move to the end of the line. Ctrl-U deletes to the start of the
-  line. Ctrl-K deletes to the end of the line. At the end of the
-  line, Ctrl-K joins the next line. Ctrl-W deletes the word before
-  the cursor. At the start of the line, Ctrl-W joins the previous
-  line.
+  move to the end of the line. While the transcript scrolls, End
+  returns it to the bottom.
+- Ctrl-U deletes to the start of the line. Ctrl-K deletes to the
+  end of the line. Ctrl-W deletes the word before the cursor.
+- At the end of the line, Ctrl-K joins the next line. At the start
+  of the line, Ctrl-W joins the previous line.
 - A line that starts with `/` opens the completion popup. Tab and
   the arrow keys select a command. Enter puts the command on the
-  line. Enter submits the line. Esc closes the popup.
+  line. The next Enter submits the line. Esc closes the popup.
+- PageUp and PageDown scroll the transcript. The mouse wheel scrolls
+  it too.
+- Ctrl-C clears the input box. During a turn, Ctrl-C stops the
+  turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
   them again.
 - Ctrl-T opens the newest thinking block and closes it again.

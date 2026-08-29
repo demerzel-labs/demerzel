@@ -28,7 +28,8 @@ use crate::wrap::{ROW_BYTES_PER_COLUMN, ROW_BYTES_SLACK};
 const KEPT_ROWS: usize = 64;
 
 /// One command the popup can complete: the usage line and the help
-/// line, the same two the `/help` reply shows.
+/// line, the same two the `/help` reply shows. The popup lists the
+/// commands in the order the driver gave them.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     usage: String,
@@ -41,9 +42,13 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     /// `usage` starts with the command name, then the arguments the
-    /// command takes, if any: `/model [name]`. `help` is one line.
+    /// command takes, if any: `/model [name]`. The name starts with
+    /// `/`, as the popup opens on that char; leading whitespace is
+    /// dropped. `help` is one line.
     pub fn new(usage: impl Into<String>, help: impl Into<String>) -> Self {
-        let usage = usage.into();
+        let mut usage = usage.into();
+        let lead = usage.len() - usage.trim_start().len();
+        usage.drain(..lead);
         let mut words = usage.split_whitespace();
         let name_len = words.next().map_or(0, str::len);
         let takes_args = words.next().is_some();
@@ -72,6 +77,7 @@ impl CommandSpec {
 }
 
 /// What Enter did with the popup open.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Completion {
     /// The selected command went onto the line.
@@ -275,7 +281,7 @@ impl Editor {
     /// Move the box so the cursor row is inside its `height` rows.
     /// Returns the first row the box shows. Call after [`Editor::sync`].
     pub(crate) fn scroll_to_cursor(&mut self, height: usize) -> usize {
-        self.laid_out();
+        self.assert_laid_out();
         let height = height.max(1);
         let row = self.cursor_row();
         if row < self.top {
@@ -290,14 +296,14 @@ impl Editor {
     /// The text of row `index`, without its newline. Call after
     /// [`Editor::sync`].
     pub(crate) fn row(&self, index: usize) -> &str {
-        self.laid_out();
+        self.assert_laid_out();
         let (start, end) = self.rows[index];
         &self.buffer[start..end]
     }
 
     /// The row the cursor is on. Call after [`Editor::sync`].
     pub(crate) fn cursor_row(&self) -> usize {
-        self.laid_out();
+        self.assert_laid_out();
         // The first row starts at zero, so the cursor is at or past
         // one row start.
         self.rows
@@ -385,7 +391,7 @@ impl Editor {
     }
 
     /// The row readers' precondition: the rows describe this buffer.
-    fn laid_out(&self) {
+    fn assert_laid_out(&self) {
         debug_assert!(
             !self.dirty && !self.rows.is_empty(),
             "the row readers run after sync"
@@ -784,6 +790,17 @@ mod tests {
         assert!(!e.popup_open());
         e.set("/help me");
         assert!(!e.popup_open());
+    }
+
+    #[test]
+    fn a_spec_name_is_the_first_word_and_leading_space_drops() {
+        let spec = CommandSpec::new("  /model [name]", "help");
+        assert_eq!(spec.name(), "/model");
+        assert_eq!(spec.usage(), "/model [name]");
+        assert!(spec.takes_args);
+        let spec = CommandSpec::new(" /é", "help");
+        assert_eq!(spec.name(), "/é");
+        assert!(!spec.takes_args);
     }
 
     #[test]

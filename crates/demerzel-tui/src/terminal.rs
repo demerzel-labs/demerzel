@@ -106,8 +106,8 @@ impl Drop for Guard {
 /// Release the mouse when it was captured, pop the keyboard flags
 /// when they were pushed, leave the alternate screen and raw mode.
 /// Safe to call twice: the panic hook and the guard's drop both run
-/// on a panic, and the second call sends nothing that belongs to
-/// the screen underneath.
+/// on a panic, and the second call sends no keyboard or mouse
+/// sequence that belongs to the screen underneath.
 fn restore() {
     if MOUSE.swap(false, Ordering::Relaxed) {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
