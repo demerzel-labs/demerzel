@@ -92,7 +92,8 @@ pub struct Options {
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
     /// Capture the mouse, so the wheel scrolls the transcript. Off by
-    /// default: the terminal keeps its own text selection.
+    /// default; on, the terminal loses its own text selection. The
+    /// binary sets it from the `tui.mouse` config key.
     pub mouse: bool,
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.

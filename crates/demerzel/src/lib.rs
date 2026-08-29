@@ -98,7 +98,7 @@ impl RunConfig {
             effort: config::DEFAULT_EFFORT,
             auth: None,
             history_path: None,
-            mouse: false,
+            mouse: config::DEFAULT_MOUSE,
             markdown: true,
             thinking: Thinking::default(),
         }
