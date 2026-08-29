@@ -68,8 +68,10 @@ impl FromStr for Color {
             if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(bad());
             }
-            let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).map_err(|_| bad());
-            return Ok(Color::Rgb(channel(0)?, channel(2)?, channel(4)?));
+            let [_, r, g, b] = u32::from_str_radix(hex, 16)
+                .map_err(|_| bad())?
+                .to_be_bytes();
+            return Ok(Color::Rgb(r, g, b));
         }
         NAMES
             .iter()
@@ -232,24 +234,24 @@ impl Theme {
     /// Light text on a dark ground.
     pub fn dark() -> Self {
         Self::from_rgb([
-            (Role::Text, 0xd5dbe5),
+            (Role::Text, 0xd0d8e4),
             (Role::Dim, 0x7b8494),
             (Role::Accent, 0x6fa8dc),
-            (Role::Error, 0xe57373),
+            (Role::Error, 0xe37070),
             (Role::Success, 0x8fbf6f),
             (Role::Warning, 0xd9a65a),
-            (Role::Heading, 0xf0f2f5),
+            (Role::Heading, 0xeef1f6),
             (Role::Link, 0x62b7c9),
             (Role::InlineCode, 0xd9a65a),
             (Role::CodeBlock, 0xcdd3de),
             (Role::Prompt, 0x6fa8dc),
-            (Role::StatusBar, 0x394150),
+            (Role::StatusBar, 0x363e4e),
             (Role::ProgressLine, 0x6fa8dc),
             (Role::DiffAdd, 0x8fbf6f),
-            (Role::DiffRemove, 0xe57373),
-            (Role::Keyword, 0xb78fb0),
-            (Role::String, 0xa6c08f),
-            (Role::Comment, 0x6b7280),
+            (Role::DiffRemove, 0xe37070),
+            (Role::Keyword, 0xba8db4),
+            (Role::String, 0xa9c48c),
+            (Role::Comment, 0x6c7384),
             (Role::Number, 0xe0a458),
         ])
     }
@@ -257,25 +259,25 @@ impl Theme {
     /// Dark text on a light ground.
     pub fn light() -> Self {
         Self::from_rgb([
-            (Role::Text, 0x2b3140),
-            (Role::Dim, 0x6b7280),
+            (Role::Text, 0x293043),
+            (Role::Dim, 0x6c7384),
             (Role::Accent, 0x1f6fb2),
-            (Role::Error, 0xb3261e),
-            (Role::Success, 0x2e7d32),
+            (Role::Error, 0xb02a21),
+            (Role::Success, 0x2c7a35),
             (Role::Warning, 0x8a6100),
             (Role::Heading, 0x1b1f24),
             (Role::Link, 0x1f6fb2),
             (Role::InlineCode, 0x8a3b00),
-            (Role::CodeBlock, 0x2b3140),
+            (Role::CodeBlock, 0x293043),
             (Role::Prompt, 0x1f6fb2),
-            (Role::StatusBar, 0xd5dbe5),
+            (Role::StatusBar, 0xd0d8e4),
             (Role::ProgressLine, 0x1f6fb2),
-            (Role::DiffAdd, 0x2e7d32),
-            (Role::DiffRemove, 0xb3261e),
+            (Role::DiffAdd, 0x2c7a35),
+            (Role::DiffRemove, 0xb02a21),
             (Role::Keyword, 0x7a1fa2),
-            (Role::String, 0x0b5394),
-            (Role::Comment, 0x6b7280),
-            (Role::Number, 0x0b5394),
+            (Role::String, 0x0e5591),
+            (Role::Comment, 0x6c7384),
+            (Role::Number, 0x0e5591),
         ])
     }
 

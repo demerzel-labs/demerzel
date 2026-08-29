@@ -1249,12 +1249,12 @@ async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
     .await;
     let params = color_params(&raw);
     assert!(
-        has_params(&params, &[38, 2, 0xd5, 0xdb, 0xe5]),
+        has_params(&params, &[38, 2, 0xd0, 0xd8, 0xe4]),
         "the text role in truecolor: {params:?}"
     );
     // The status bar's ground is the theme's.
     assert!(
-        has_params(&params, &[48, 2, 0x39, 0x41, 0x50]),
+        has_params(&params, &[48, 2, 0x36, 0x3e, 0x4e]),
         "the bar's ground in truecolor: {params:?}"
     );
 }

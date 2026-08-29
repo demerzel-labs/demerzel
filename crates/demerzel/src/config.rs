@@ -829,7 +829,9 @@ mod tests {
 
         let error = theme("ocean", Some(&project), Some(&user)).unwrap_err();
         assert!(
-            error.contains("`tui.theme`") && error.contains("ocean") && error.contains("dark"),
+            error.contains("`tui.theme`")
+                && error.contains("ocean")
+                && error.contains("terminal, dark, light"),
             "{error}"
         );
         assert!(

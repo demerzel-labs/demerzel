@@ -146,8 +146,8 @@ The interface fits the theme to the terminal:
   sixteen palette entries.
 - A non-empty `NO_COLOR`: no color at all. Bold, dim, italic, and
   underline stay, so headings, emphasis, links, marks, and thinking
-  still read apart. The line interface follows the same rule for
-  its dim text.
+  still read apart. A non-empty `NO_COLOR` also turns the line
+  interface's dim text off.
 
 ## Keyboard keys
 

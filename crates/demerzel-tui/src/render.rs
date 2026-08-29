@@ -1101,16 +1101,16 @@ line 12",
         assert_eq!(colored[(6u16, 2u16)].style().fg, Some(TermColor::Cyan));
         assert_eq!(
             colored[(0u16, 3u16)].style().fg,
-            Some(TermColor::Rgb(0xe5, 0x73, 0x73))
+            Some(TermColor::Rgb(0xe3, 0x70, 0x70))
         );
         // The bar takes the theme's ground instead of reversing.
         let bar = colored[(1u16, 5u16)].style();
-        assert_eq!(bar.bg, Some(TermColor::Rgb(0x39, 0x41, 0x50)));
+        assert_eq!(bar.bg, Some(TermColor::Rgb(0x36, 0x3e, 0x4e)));
         assert!(!bar.add_modifier.contains(Modifier::REVERSED));
         // A ground with no text color reverses onto the ground.
         theme.set(Role::Text, None);
         let bar = themed_buffer(&Palette::new(&theme, Depth::TrueColor))[(1u16, 5u16)].style();
-        assert_eq!(bar.fg, Some(TermColor::Rgb(0x39, 0x41, 0x50)));
+        assert_eq!(bar.fg, Some(TermColor::Rgb(0x36, 0x3e, 0x4e)));
         assert!(bar.add_modifier.contains(Modifier::REVERSED));
         theme.set(Role::Text, Theme::dark().get(Role::Text));
         // The prompt takes its role's color.
