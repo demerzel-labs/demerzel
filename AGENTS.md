@@ -46,6 +46,13 @@ current.
   stability, correctness. Fix the material findings. Verify the fixes
   with one more review pass. Record the review results in the pull
   request body.
+- The pull request body keeps this layout: a summary, then
+  `Decisions`, `Verify`, `Review`, and `Contract growth`. Before the
+  pull request opens, one subagent edits the draft for clear
+  presentation. The reference is the Google developer documentation
+  style guide (https://developers.google.com/style). The pass keeps
+  every decision, number, finding, and fix. Word count is not the
+  target. Apply the edited text.
 - Test discipline, checked by the correctness lens: tests exercise
   public contracts. Do not pin incidental output, such as report
   wording, unless a plan doc names that output as contract.
