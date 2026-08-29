@@ -23,7 +23,7 @@ use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
-pub use demerzel_tui::Thinking;
+pub use demerzel_tui::{Theme, Thinking};
 
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
@@ -81,6 +81,8 @@ pub struct RunConfig {
     pub markdown: bool,
     /// How a thinking block starts in the full-screen interface.
     pub thinking: Thinking,
+    /// The colors of the full-screen interface.
+    pub theme: Theme,
 }
 
 impl RunConfig {
@@ -101,6 +103,7 @@ impl RunConfig {
             mouse: config::DEFAULT_MOUSE,
             markdown: true,
             thinking: Thinking::default(),
+            theme: Theme::default(),
         }
     }
 }

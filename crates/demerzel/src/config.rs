@@ -20,7 +20,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use demerzel_core::{ApprovalMode, Effort};
-use demerzel_tui::Thinking;
+use demerzel_tui::theme::{self, Color, Role};
+use demerzel_tui::{Theme, Thinking};
 
 /// The provider id a run uses when nothing picks one.
 pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID;
@@ -30,6 +31,8 @@ pub const DEFAULT_EFFORT: Effort = Effort::High;
 /// Mouse capture in the full-screen interface when nothing sets it.
 /// Off: capture takes the terminal's own text selection.
 pub const DEFAULT_MOUSE: bool = false;
+/// The theme when nothing picks one: the terminal's own palette.
+pub const DEFAULT_THEME: &str = "terminal";
 
 /// Environment variables, one per flag.
 pub const ENV_PROVIDER: &str = "DEMERZEL_PROVIDER";
@@ -98,6 +101,8 @@ pub struct TuiSettings {
     pub markdown: Setting<bool>,
     /// How a thinking block starts in the full-screen interface.
     pub thinking: Setting<Thinking>,
+    /// The theme name. [`theme()`] turns it into the colors.
+    pub theme: Setting<String>,
 }
 
 impl Settings {
@@ -137,7 +142,12 @@ struct TuiKeys {
     mouse: Option<bool>,
     markdown: Option<bool>,
     thinking: Option<Thinking>,
+    theme: Option<String>,
 }
+
+/// The roles one `[theme.<name>]` table sets, in key order. `None`
+/// takes a role's color away.
+type ThemeKeys = Vec<(Role, Option<Color>)>;
 
 /// One parsed config file.
 #[derive(Debug, Default, PartialEq)]
@@ -149,6 +159,7 @@ pub struct Layer {
     history_file: Option<bool>,
     providers: BTreeMap<String, ProviderKeys>,
     tui: TuiKeys,
+    themes: BTreeMap<String, ThemeKeys>,
 }
 
 impl Layer {
@@ -202,6 +213,14 @@ impl Layer {
                         return Err(format!("`tui` must be a table, not {}", other.type_str()));
                     }
                 },
+                "theme" => match value {
+                    toml::Value::Table(tables) => {
+                        parse_themes(tables, &mut layer.themes, &mut warnings)?;
+                    }
+                    other => {
+                        return Err(format!("`theme` must be a table, not {}", other.type_str()));
+                    }
+                },
                 _ => warnings.push(format!("unknown key `{key}`")),
             }
         }
@@ -247,8 +266,40 @@ fn parse_tui(
             "mouse" => into.mouse = Some(expect_bool(&path, value)?),
             "markdown" => into.markdown = Some(expect_bool(&path, value)?),
             "thinking" => into.thinking = Some(expect_thinking(&path, value)?),
+            "theme" => into.theme = Some(expect_string(&path, value)?),
             _ => warnings.push(format!("unknown key `{path}`")),
         }
+    }
+    Ok(())
+}
+
+/// The `[theme.<name>]` tables: one role per key, a color per value.
+/// A key that names no role warns, like any unknown key; a value
+/// that is no color is an error.
+fn parse_themes(
+    tables: toml::Table,
+    into: &mut BTreeMap<String, ThemeKeys>,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    for (name, value) in tables {
+        let toml::Value::Table(table) = value else {
+            return Err(format!(
+                "`theme.{name}` must be a table, not {}",
+                value.type_str()
+            ));
+        };
+        let mut keys = ThemeKeys::with_capacity(table.len());
+        for (key, value) in table {
+            let path = format!("theme.{name}.{key}");
+            let Ok(role) = key.parse::<Role>() else {
+                warnings.push(format!("unknown key `{path}`"));
+                continue;
+            };
+            let color = theme::parse_color(&expect_string(&path, value)?)
+                .map_err(|error| format!("`{path}` {error}"))?;
+            keys.push((role, color));
+        }
+        into.insert(name, keys);
     }
     Ok(())
 }
@@ -557,6 +608,17 @@ pub fn resolve(
     let thinking = layer_key(project, Origin::Project, |l| l.tui.thinking)
         .or_else(|| layer_key(user, Origin::User, |l| l.tui.thinking))
         .unwrap_or_else(|| Setting::new(Thinking::default(), Origin::Default));
+    let theme = layer_key(project, Origin::Project, |l| l.tui.theme.clone())
+        .or_else(|| layer_key(user, Origin::User, |l| l.tui.theme.clone()))
+        .unwrap_or_else(|| Setting::new(DEFAULT_THEME.to_string(), Origin::Default));
+    // Trust rule: a project file picks a theme, never paints one. A
+    // table in it could hide the approval question or a preview.
+    for name in project.into_iter().flat_map(|l| l.themes.keys()) {
+        warnings.push(format!(
+            "ignored: the project file defines theme `{name}`; \
+             a project file cannot set colors; move the table to the user file"
+        ));
+    }
 
     (
         Settings {
@@ -570,10 +632,42 @@ pub fn resolve(
                 mouse,
                 markdown,
                 thinking,
+                theme,
             },
         },
         warnings,
     )
+}
+
+/// The colors of the theme called `name`. A built-in name starts
+/// from its own colors; another name starts from `terminal`. Then
+/// the `[theme.<name>]` table of the user file applies, role by role
+/// — so a table can edit a built-in theme or define a new one from a
+/// few keys. A name with no built-in theme and no table is an error,
+/// like any bad value on a known key.
+///
+/// Trust rule: only the user file paints. A project file picks a
+/// theme by name; its tables are ignored, with a warning from
+/// [`resolve`]. A repository must not set the colors of the approval
+/// question, the previews, or the status bar — a color that hides
+/// them hides what the user approves.
+pub fn theme(name: &str, user: Option<&Layer>) -> Result<Theme, String> {
+    let table = user.and_then(|layer| layer.themes.get(name));
+    let mut theme = match (Theme::named(name), table) {
+        (Some(theme), _) => theme,
+        (None, Some(_)) => Theme::terminal(),
+        (None, None) => {
+            return Err(format!(
+                "`tui.theme` names no theme: `{name}`. The built-in themes are {}. \
+                 A `[theme.{name}]` table in the user file defines a new theme.",
+                Theme::BUILT_IN.join(", ")
+            ));
+        }
+    };
+    for &(role, color) in table.into_iter().flatten() {
+        theme.set(role, color);
+    }
+    Ok(theme)
 }
 
 /// Privilege order of the approval modes.
@@ -719,6 +813,133 @@ mod tests {
         );
         let error = Layer::parse("[tui]\nthinking = true").unwrap_err();
         assert!(error.contains("`tui.thinking`"), "{error}");
+    }
+
+    #[test]
+    fn the_theme_key_resolves_by_layer_and_names_a_theme() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.tui.theme.value, DEFAULT_THEME);
+        assert_eq!(settings.tui.theme.origin, Origin::Default);
+        assert_eq!(theme(DEFAULT_THEME, None), Ok(Theme::terminal()));
+
+        let user = layer("[tui]\ntheme = \"dark\"");
+        let project = layer("[tui]\ntheme = \"light\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.tui.theme.value, "dark");
+        assert_eq!(settings.tui.theme.origin, Origin::User);
+        // Cosmetic: the project file picks either way.
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.tui.theme.value, "light");
+        assert_eq!(settings.tui.theme.origin, Origin::Project);
+        assert_eq!(
+            theme(&settings.tui.theme.value, Some(&user)),
+            Ok(Theme::light())
+        );
+
+        let error = theme("ocean", Some(&user)).unwrap_err();
+        assert!(
+            error.contains("`tui.theme`")
+                && error.contains("ocean")
+                && error.contains("terminal, dark, light"),
+            "{error}"
+        );
+        assert!(
+            Layer::parse("[tui]\ntheme = \"\"")
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            Layer::parse("[tui]\ntheme = 1")
+                .unwrap_err()
+                .contains("string")
+        );
+    }
+
+    #[test]
+    fn a_theme_table_defines_a_theme_or_edits_a_built_in_one() {
+        // A new name starts from the terminal theme and takes the
+        // keys the table sets; `none` takes a color away.
+        let user = layer(
+            "[theme.ocean]\n\
+             accent = \"#5fafd7\"\n\
+             error = \"bright-red\"\n\
+             keyword = \"none\"",
+        );
+        let ocean = theme("ocean", Some(&user)).unwrap();
+        assert_eq!(ocean.get(Role::Accent), Some(Color::Rgb(0x5f, 0xaf, 0xd7)));
+        assert_eq!(ocean.get(Role::Error), Some(Color::Indexed(9)));
+        assert_eq!(ocean.get(Role::Keyword), None);
+        assert_eq!(ocean.get(Role::String), Theme::terminal().get(Role::String));
+
+        // A built-in name keeps its colors under the edit.
+        let user = layer("[theme.dark]\naccent = \"#010203\"\nlink = \"#040506\"");
+        let dark = theme("dark", Some(&user)).unwrap();
+        assert_eq!(dark.get(Role::Accent), Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(dark.get(Role::Link), Some(Color::Rgb(4, 5, 6)));
+        assert_eq!(dark.get(Role::Text), Theme::dark().get(Role::Text));
+        assert!(theme("reef", Some(&user)).is_err());
+        assert!(theme("reef", None).is_err());
+
+        // A bad color is an error; a key that names no role warns.
+        let error = Layer::parse("[theme.ocean]\naccent = \"blue-ish\"").unwrap_err();
+        assert!(
+            error.contains("`theme.ocean.accent`") && error.contains("#rrggbb"),
+            "{error}"
+        );
+        assert!(
+            Layer::parse("[theme.ocean]\naccent = 1")
+                .unwrap_err()
+                .contains("string")
+        );
+        assert!(Layer::parse("theme = 1").unwrap_err().contains("table"));
+        assert!(
+            Layer::parse("[theme]\nocean = 1")
+                .unwrap_err()
+                .contains("`theme.ocean`")
+        );
+        let (layer, warnings) = Layer::parse("[theme.ocean]\ncard_frame = \"red\"").unwrap();
+        assert_eq!(warnings, vec!["unknown key `theme.ocean.card_frame`"]);
+        assert!(layer.themes["ocean"].is_empty());
+    }
+
+    #[test]
+    fn the_project_file_picks_a_theme_and_cannot_paint_one() {
+        // Trust rule: a project table is ignored with a warning, so a
+        // repository cannot color the approval question away.
+        let project = layer("[tui]\ntheme = \"reef\"\n[theme.reef]\nwarning = \"black\"");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), None);
+        assert_eq!(settings.tui.theme.value, "reef");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("reef") && warnings[0].contains("user file"),
+            "{}",
+            warnings[0]
+        );
+        assert!(theme("reef", None).is_err(), "no table names it");
+
+        // The user file's table names it; the project's edit does not apply.
+        let user = layer("[theme.reef]\nwarning = \"yellow\"");
+        let reef = theme("reef", Some(&user)).unwrap();
+        assert_eq!(reef.get(Role::Warning), Some(Color::Indexed(3)));
+        // A project file still picks a built-in theme without a warning.
+        let project = layer("[tui]\ntheme = \"dark\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
+        assert_eq!(theme(&settings.tui.theme.value, None), Ok(Theme::dark()));
+    }
+
+    #[test]
+    fn the_config_docs_name_every_theme_role_and_theme() {
+        let docs = include_str!("../../../docs/config.md");
+        for &role in Role::ALL {
+            let cell = format!("`{}`", role.name());
+            assert!(docs.contains(&cell), "config.md lacks the role {cell}");
+        }
+        for &name in Theme::BUILT_IN {
+            assert!(
+                docs.contains(&format!("`{name}`")),
+                "config.md lacks {name}"
+            );
+        }
     }
 
     #[test]

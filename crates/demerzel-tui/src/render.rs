@@ -10,7 +10,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthChar as _;
@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthChar as _;
 use crate::PROMPT;
 use crate::editor::{CommandSpec, Editor, displayed};
 use crate::markdown::Face;
+use crate::theme::{Palette, Role};
 use crate::transcript::{Kind, Transcript};
 use crate::wrap::display_width;
 
@@ -45,6 +46,8 @@ pub(crate) struct View<'a> {
     pub transcript: &'a mut Transcript,
     pub editor: &'a mut Editor,
     pub status: &'a Status,
+    /// The theme at the terminal's color depth.
+    pub palette: &'a Palette,
     /// An approval question replaces the input box.
     pub approval: Option<&'a str>,
     /// The progress line, shown under the transcript while a turn
@@ -88,7 +91,8 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         ..area
     };
 
-    draw_transcript(frame, transcript_area, view.transcript);
+    let palette = view.palette;
+    draw_transcript(frame, transcript_area, view.transcript, palette);
     if let Some(progress) = view.progress
         && progress_rows > 0
     {
@@ -97,7 +101,8 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             height: 1,
             ..area
         };
-        draw_line(frame, progress_row, progress, Style::default());
+        let style = paint(Style::default(), palette.color(Role::ProgressLine));
+        draw_line(frame, progress_row, progress, style);
     }
     if bar_rows > 0 {
         let bar_row = Rect {
@@ -105,22 +110,23 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             height: 1,
             ..area
         };
-        draw_status(frame, bar_row, view.status);
+        draw_status(frame, bar_row, view.status, palette);
     }
     match view.approval {
-        Some(question) => draw_line(
-            frame,
-            input_area,
-            question,
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Some(question) => {
+            let style = paint(
+                Style::default().add_modifier(Modifier::BOLD),
+                palette.color(Role::Warning),
+            );
+            draw_line(frame, input_area, question, style);
+        }
         None => {
-            draw_input(frame, input_area, view.editor, editor_rows, prefix);
+            draw_input(frame, input_area, view.editor, editor_rows, prefix, palette);
             let above = Rect {
                 height: input_area.y - area.y,
                 ..area
             };
-            draw_popup(frame, above, view.editor, prefix);
+            draw_popup(frame, above, view.editor, prefix, palette);
         }
     }
     transcript_area.height
@@ -142,9 +148,10 @@ fn input_columns(width: u16) -> (u16, bool) {
     }
 }
 
-/// One reversed row: model, mode, session, token totals, cut to the
+/// One row on the bar's ground — the theme's, or reversed when the
+/// theme sets none: model, mode, session, token totals, cut to the
 /// width from the right.
-fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
+fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let totals = format!(
         " · {} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
@@ -165,8 +172,15 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status) {
     let (mut shown, used) = fit_row(segments, width);
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));
-    let line = Line::styled(shown, Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_widget(Paragraph::new(line), area);
+    // With one of the two colors the row reverses onto it: the
+    // terminal's own background reads on the ground, or on the text
+    // color, whatever it is.
+    let style = match (palette.color(Role::StatusBar), palette.color(Role::Text)) {
+        (Some(ground), Some(text)) => Style::default().bg(ground).fg(text),
+        (Some(ground), None) => Style::default().fg(ground).add_modifier(Modifier::REVERSED),
+        (None, text) => paint(Style::default().add_modifier(Modifier::REVERSED), text),
+    };
+    frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
 
 /// One row of text cut to the width: the progress line, the
@@ -201,21 +215,52 @@ fn fit_row<'a>(parts: impl IntoIterator<Item = &'a str>, width: usize) -> (Strin
     (shown, used)
 }
 
-fn style(kind: Kind) -> Style {
+/// `style` with `color` as its foreground. A role with no color
+/// paints the terminal's own foreground, so `none` on a nested role
+/// — inline code inside colored text, a keyword inside a fence —
+/// takes the enclosing color away, as the config contract says.
+fn paint(style: Style, color: Option<ratatui::style::Color>) -> Style {
+    style.fg(color.unwrap_or(ratatui::style::Color::Reset))
+}
+
+/// A block's own style: the attribute the kind carries, and the
+/// role's color.
+fn style(kind: Kind, palette: &Palette) -> Style {
     match kind {
-        Kind::Prompt => Style::default().add_modifier(Modifier::BOLD),
-        Kind::Text | Kind::Tool => Style::default(),
-        Kind::Reasoning | Kind::Notice => Style::default().add_modifier(Modifier::DIM),
-        Kind::Error => Style::default().fg(Color::Red),
+        Kind::Prompt => paint(
+            Style::default().add_modifier(Modifier::BOLD),
+            palette.color(Role::Prompt),
+        ),
+        Kind::Text | Kind::Tool => paint(Style::default(), palette.color(Role::Text)),
+        Kind::Reasoning | Kind::Notice => paint(
+            Style::default().add_modifier(Modifier::DIM),
+            palette.color(Role::Dim),
+        ),
+        Kind::Error => paint(Style::default(), palette.color(Role::Error)),
     }
 }
 
-/// A face over the block's own style. Terminal attributes and one
-/// color until the theme lands.
-fn face_style(kind: Kind, face: Face) -> Style {
-    let mut style = style(kind);
-    if face.has(Face::HEADING) || face.has(Face::STRONG) {
+/// A face over the block's own style. Each class keeps its attribute
+/// — bold, italic, underline, dim — so the faces read apart with no
+/// color at all; the theme adds the color of the class's role. The
+/// more specific class paints last: a keyword inside a fence takes
+/// the keyword's color over the fence's.
+fn face_style(kind: Kind, face: Face, palette: &Palette) -> Style {
+    let mut style = style(kind, palette);
+    if face.has(Face::HEADING) {
+        style = paint(
+            style.add_modifier(Modifier::BOLD),
+            palette.color(Role::Heading),
+        );
+    }
+    if face.has(Face::STRONG) {
         style = style.add_modifier(Modifier::BOLD);
+    }
+    if face.has(Face::TITLE) {
+        style = paint(
+            style.add_modifier(Modifier::BOLD),
+            palette.color(Role::Accent),
+        );
     }
     if face.has(Face::EMPHASIS) {
         style = style.add_modifier(Modifier::ITALIC);
@@ -223,26 +268,55 @@ fn face_style(kind: Kind, face: Face) -> Style {
     if face.has(Face::STRIKE) {
         style = style.add_modifier(Modifier::CROSSED_OUT);
     }
-    if face.has(Face::CODE) {
-        style = style.fg(Color::Cyan);
-    }
-    if face.has(Face::KEYWORD) {
-        style = style.fg(Color::Magenta);
-    }
-    if face.has(Face::STRING) {
-        style = style.fg(Color::Green);
-    }
-    if face.has(Face::NUMBER) {
-        style = style.fg(Color::Yellow);
-    }
-    if face.has(Face::COMMENT) {
-        style = style.fg(Color::Reset).add_modifier(Modifier::DIM);
-    }
     if face.has(Face::LINK) {
-        style = style.add_modifier(Modifier::UNDERLINED);
+        style = paint(
+            style.add_modifier(Modifier::UNDERLINED),
+            palette.color(Role::Link),
+        );
     }
     if face.has(Face::URL) || face.has(Face::MARKER) || face.has(Face::MUTED) {
-        style = style.add_modifier(Modifier::DIM);
+        style = paint(style.add_modifier(Modifier::DIM), palette.color(Role::Dim));
+    }
+    if face.has(Face::CODE) {
+        let role = if face.has(Face::FENCE) {
+            Role::CodeBlock
+        } else {
+            Role::InlineCode
+        };
+        style = paint(style, palette.color(role));
+    }
+    if face.has(Face::KEYWORD) {
+        style = paint(style, palette.color(Role::Keyword));
+    }
+    if face.has(Face::STRING) {
+        style = paint(style, palette.color(Role::String));
+    }
+    if face.has(Face::NUMBER) {
+        style = paint(style, palette.color(Role::Number));
+    }
+    if face.has(Face::COMMENT) {
+        // With no color of its own a comment also dims, so it still
+        // reads apart from the code.
+        let color = palette.color(Role::Comment);
+        style = paint(style, color);
+        if color.is_none() {
+            style = style.add_modifier(Modifier::DIM);
+        }
+    }
+    if face.has(Face::SUCCESS) {
+        style = paint(style, palette.color(Role::Success));
+    }
+    if face.has(Face::WARNING) {
+        style = paint(style, palette.color(Role::Warning));
+    }
+    if face.has(Face::FAILURE) {
+        style = paint(style, palette.color(Role::Error));
+    }
+    if face.has(Face::DIFF_ADD) {
+        style = paint(style, palette.color(Role::DiffAdd));
+    }
+    if face.has(Face::DIFF_REMOVE) {
+        style = paint(style, palette.color(Role::DiffRemove));
     }
     style
 }
@@ -251,7 +325,7 @@ fn face_style(kind: Kind, face: Face) -> Style {
 /// Only the blocks the viewport and the scroll need lay out, and a
 /// block lays out once per width, so a long session pays for its
 /// window, not its history.
-fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
+fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, palette: &Palette) {
     if area.height == 0 {
         return;
     }
@@ -288,11 +362,11 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
                 break 'collect;
             }
             if block.plain() {
-                lines.push(Line::styled(block.row(index), style(block.kind)));
+                lines.push(Line::styled(block.row(index), style(block.kind, palette)));
             } else {
                 let mut spans = Vec::new();
                 block.spans(index, |face, text| {
-                    spans.push(Span::styled(text, face_style(block.kind, face)));
+                    spans.push(Span::styled(text, face_style(block.kind, face, palette)));
                 });
                 lines.push(Line::from(spans));
             }
@@ -303,13 +377,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript) {
     frame.render_widget(Paragraph::new(lines), area);
 
     if scroll > 0 {
-        draw_indicator(frame, area, scroll);
+        draw_indicator(frame, area, scroll, palette);
     }
 }
 
 /// Browse mode: the rows below the viewport and the key back to
 /// follow mode, on the viewport's last row at the right.
-fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
+fn draw_indicator(frame: &mut Frame, area: Rect, below: usize, palette: &Palette) {
     let text = format!(" ↓ {below} below · End ");
     let Ok(width) = u16::try_from(display_width(&text)) else {
         return;
@@ -323,8 +397,18 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
         width,
         height: 1,
     };
-    let line = Line::styled(text, Style::default().add_modifier(Modifier::REVERSED));
+    let line = Line::styled(text, highlight(palette));
     frame.render_widget(Paragraph::new(line), corner);
+}
+
+/// The style of a highlighted row — the browse indicator, the
+/// selected completion: reversed, on the accent when the theme has
+/// one.
+fn highlight(palette: &Palette) -> Style {
+    paint(
+        Style::default().add_modifier(Modifier::REVERSED),
+        palette.color(Role::Accent),
+    )
 }
 
 /// The input box: the editor's rows from the one the box scrolled
@@ -332,18 +416,28 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize) {
 /// rest. The layout is a cache the editor keeps, so a frame walks
 /// the rows it shows and a large paste costs its re-layout once.
 /// `count` is the row count the caller's `sync` returned.
-fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, count: usize, prefix: bool) {
+fn draw_input(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &mut Editor,
+    count: usize,
+    prefix: bool,
+    palette: &Palette,
+) {
     let width = usize::from(area.width);
     let prefix_cols = if prefix { display_width(PROMPT) } else { 0 };
     let height = usize::from(area.height);
     let top = editor.scroll_to_cursor(height);
+    let text_style = paint(Style::default(), palette.color(Role::Text));
+    let prompt_style = paint(Style::default(), palette.color(Role::Prompt));
     let mut lines = Vec::with_capacity(height);
     for row in top..count.min(top + height) {
         let mut text = String::with_capacity(width * 4);
         let mut used = 0usize;
+        let mut spans = Vec::with_capacity(2);
         if prefix {
             if row == 0 {
-                text.push_str(PROMPT);
+                spans.push(Span::styled(PROMPT, prompt_style));
             } else {
                 text.extend(std::iter::repeat_n(' ', prefix_cols));
             }
@@ -358,7 +452,8 @@ fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, count: usize, 
             text.push(shown);
             used += cols;
         }
-        lines.push(Line::raw(text));
+        spans.push(Span::styled(text, text_style));
+        lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines), area);
 
@@ -371,7 +466,7 @@ fn draw_input(frame: &mut Frame, area: Rect, editor: &mut Editor, count: usize, 
 /// per matching command, the usage and the help, the selected one
 /// reversed. It sits at the prompt's text column. A popup taller
 /// than its cap scrolls to keep the selection in view.
-fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
+fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool, palette: &Palette) {
     let matches: Vec<&CommandSpec> = editor.matches().collect();
     let rows = matches
         .len()
@@ -423,9 +518,12 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
         used += help_used;
         text.extend(std::iter::repeat_n(' ', width_cols - used));
         let style = if index == selected {
-            Style::default().add_modifier(Modifier::REVERSED)
+            highlight(palette)
         } else {
-            Style::default().add_modifier(Modifier::DIM)
+            paint(
+                Style::default().add_modifier(Modifier::DIM),
+                palette.color(Role::Dim),
+            )
         };
         lines.push(Line::styled(text, style));
     }
@@ -436,8 +534,13 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::{Color, Depth, Theme};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn palette() -> Palette {
+        Palette::new(&Theme::default(), Depth::TrueColor)
+    }
 
     fn status() -> Status {
         Status {
@@ -474,6 +577,7 @@ mod tests {
         let mut transcript = Transcript::new(false);
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, rows) = render(
             30,
             4,
@@ -481,6 +585,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -501,6 +606,7 @@ mod tests {
             cached_tokens: 2,
             ..status()
         };
+        let palette = palette();
         let (lines, _) = render(
             60,
             3,
@@ -508,6 +614,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -524,6 +631,7 @@ mod tests {
         let mut transcript = Transcript::new(false);
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, _) = render(
             12,
             3,
@@ -531,6 +639,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -544,6 +653,7 @@ mod tests {
         transcript.push_line(Kind::Text, "tail");
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, rows) = render(
             20,
             2,
@@ -551,6 +661,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -568,6 +679,7 @@ mod tests {
         }
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, _) = render(
             20,
             4,
@@ -575,6 +687,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -591,6 +704,7 @@ mod tests {
         }
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         // The first frame sets the width; a scroll before it would
         // reset with the width change.
         render(
@@ -600,6 +714,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -612,6 +727,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -627,6 +743,7 @@ mod tests {
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -643,6 +760,7 @@ mod tests {
         }
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let mut view = |transcript: &mut Transcript| {
             render(
                 30,
@@ -651,6 +769,7 @@ mod tests {
                     transcript,
                     editor: &mut editor,
                     status: &status,
+                    palette: &palette,
                     approval: None,
                     progress: None,
                 },
@@ -693,6 +812,7 @@ line 12",
         transcript.push_line(Kind::Text, "alpha beta gamma");
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, _) = render(
             8,
             5,
@@ -700,6 +820,7 @@ line 12",
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: None,
             },
@@ -719,6 +840,7 @@ line 12",
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut transcript = Transcript::new(false);
         let status = status();
+        let palette = palette();
         terminal
             .draw(|frame| {
                 draw(
@@ -727,6 +849,7 @@ line 12",
                         transcript: &mut transcript,
                         editor,
                         status: &status,
+                        palette: &palette,
                         approval: None,
                         progress: None,
                     },
@@ -822,6 +945,7 @@ line 12",
         }
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let mut top_line = |transcript: &mut Transcript, editor: &mut Editor| {
             terminal
                 .draw(|frame| {
@@ -831,6 +955,7 @@ line 12",
                             transcript,
                             editor,
                             status: &status,
+                            palette: &palette,
                             approval: None,
                             progress: None,
                         },
@@ -904,6 +1029,7 @@ line 12",
         transcript.push_delta(Kind::Text, "# Title\n\nplain `code`");
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         terminal
             .draw(|frame| {
                 draw(
@@ -912,6 +1038,7 @@ line 12",
                         transcript: &mut transcript,
                         editor: &mut editor,
                         status: &status,
+                        palette: &palette,
                         approval: None,
                         progress: None,
                     },
@@ -931,6 +1058,101 @@ line 12",
         assert_ne!(buffer[(6u16, 2u16)].style(), plain);
     }
 
+    /// Draw one frame of a formatted reply and a card over `palette`
+    /// and return the buffer.
+    fn themed_buffer(palette: &Palette) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        let mut transcript = Transcript::new(true);
+        transcript.push_delta(Kind::Text, "# Title\n\nplain `code`");
+        transcript.push_line(Kind::Error, "failed");
+        let mut editor = Editor::new(Vec::new());
+        let status = status();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    View {
+                        transcript: &mut transcript,
+                        editor: &mut editor,
+                        status: &status,
+                        palette,
+                        approval: None,
+                        progress: None,
+                    },
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn a_theme_paints_the_roles_and_no_color_keeps_the_attributes() {
+        use ratatui::style::Color as TermColor;
+        let mut theme = Theme::dark();
+        theme.set(Role::Heading, Some(Color::Rgb(1, 2, 3)));
+        theme.set(Role::InlineCode, Some(Color::Indexed(6)));
+        let colored = themed_buffer(&Palette::new(&theme, Depth::TrueColor));
+        // Rows: title, blank, plain `code`, error, prompt, bar.
+        let heading = colored[(2u16, 0u16)].style();
+        assert_eq!(heading.fg, Some(TermColor::Rgb(1, 2, 3)));
+        assert!(heading.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(colored[(6u16, 2u16)].style().fg, Some(TermColor::Cyan));
+        assert_eq!(
+            colored[(0u16, 3u16)].style().fg,
+            Some(TermColor::Rgb(0xe3, 0x70, 0x70))
+        );
+        // The bar takes the theme's ground instead of reversing.
+        let bar = colored[(1u16, 5u16)].style();
+        assert_eq!(bar.bg, Some(TermColor::Rgb(0x36, 0x3e, 0x4e)));
+        assert!(!bar.add_modifier.contains(Modifier::REVERSED));
+        // `none` on a nested role takes the enclosing color away.
+        theme.set(Role::InlineCode, None);
+        let reset = themed_buffer(&Palette::new(&theme, Depth::TrueColor));
+        assert_eq!(reset[(6u16, 2u16)].style().fg, Some(TermColor::Reset));
+        assert_ne!(reset[(0u16, 2u16)].style().fg, Some(TermColor::Reset));
+        theme.set(Role::InlineCode, Some(Color::Indexed(6)));
+        // A text color with no ground reverses onto the text color.
+        theme.set(Role::StatusBar, None);
+        let bar = themed_buffer(&Palette::new(&theme, Depth::TrueColor))[(1u16, 5u16)].style();
+        assert_eq!(bar.fg, Some(TermColor::Rgb(0xd0, 0xd8, 0xe4)));
+        assert!(bar.add_modifier.contains(Modifier::REVERSED));
+        theme.set(Role::StatusBar, Theme::dark().get(Role::StatusBar));
+        // A ground with no text color reverses onto the ground.
+        theme.set(Role::Text, None);
+        let bar = themed_buffer(&Palette::new(&theme, Depth::TrueColor))[(1u16, 5u16)].style();
+        assert_eq!(bar.fg, Some(TermColor::Rgb(0x36, 0x3e, 0x4e)));
+        assert!(bar.add_modifier.contains(Modifier::REVERSED));
+        theme.set(Role::Text, Theme::dark().get(Role::Text));
+        // The prompt takes its role's color.
+        assert_eq!(
+            colored[(0u16, 4u16)].style().fg,
+            Some(TermColor::Rgb(0x6f, 0xa8, 0xdc))
+        );
+
+        // Under 256 colors an RGB value lands on a palette index.
+        let indexed = themed_buffer(&Palette::new(&theme, Depth::Ansi256));
+        assert!(matches!(
+            indexed[(0u16, 3u16)].style().fg,
+            Some(TermColor::Indexed(16..=255))
+        ));
+
+        // No color: the attributes carry the faces alone, and the bar
+        // reverses again.
+        // A cell with no color reads as the terminal's own.
+        let plain = themed_buffer(&Palette::new(&theme, Depth::None));
+        let heading = plain[(2u16, 0u16)].style();
+        assert_eq!(heading.fg, Some(TermColor::Reset));
+        assert!(heading.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(plain[(6u16, 2u16)].style().fg, Some(TermColor::Reset));
+        assert_eq!(plain[(0u16, 3u16)].style().fg, Some(TermColor::Reset));
+        assert!(
+            plain[(1u16, 5u16)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
     #[test]
     fn the_progress_line_sits_above_the_input_and_takes_a_transcript_row() {
         let mut transcript = Transcript::new(false);
@@ -939,6 +1161,7 @@ line 12",
         }
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, rows) = render(
             30,
             5,
@@ -946,6 +1169,7 @@ line 12",
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: Some("⠋ 3s · bash\x1b[2J"),
             },
@@ -963,6 +1187,7 @@ line 12",
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: None,
                 progress: Some("⠋ 3s · bash"),
             },
@@ -977,6 +1202,7 @@ line 12",
         let mut transcript = Transcript::new(false);
         let mut editor = Editor::new(Vec::new());
         let status = status();
+        let palette = palette();
         let (lines, _) = render(
             40,
             2,
@@ -984,6 +1210,7 @@ line 12",
                 transcript: &mut transcript,
                 editor: &mut editor,
                 status: &status,
+                palette: &palette,
                 approval: Some("approve ba\x1bsh? [y]es / [a]lways / [N]o"),
                 progress: None,
             },

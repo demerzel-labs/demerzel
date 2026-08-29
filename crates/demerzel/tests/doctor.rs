@@ -153,10 +153,12 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("provider = openai-codex (default)"), "{out}");
     assert!(out.contains("tui.mouse = off (default)"), "{out}");
     assert!(out.contains("tui.markdown = on (default)"), "{out}");
+    assert!(out.contains("tui.theme = terminal (default)"), "{out}");
     assert!(out.contains("effort = high (default)"), "{out}");
 
     bed.write_user_config(
-        "model = \"user-model\"\nhistory_file = false\neffort = \"low\"\n[tui]\nmouse = false\nmarkdown = false",
+        "model = \"user-model\"\nhistory_file = false\neffort = \"low\"\n\
+         [tui]\nmouse = false\nmarkdown = false\ntheme = \"dark\"",
     );
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = user-model (user file)"), "{out}");
@@ -164,6 +166,7 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("history_file = off (user file)"), "{out}");
     assert!(out.contains("tui.mouse = off (user file)"), "{out}");
     assert!(out.contains("tui.markdown = off (user file)"), "{out}");
+    assert!(out.contains("tui.theme = dark (user file)"), "{out}");
 
     bed.write_project_config("model = \"project-model\"\napproval = \"read-only\"");
     let (out, _) = bed.doctor(&[]);
@@ -277,6 +280,30 @@ fn doctor_warns_on_unknown_keys_and_secret_values() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("unknown key `future_key`"), "{out}");
     assert!(out.contains("looks like a secret"), "{out}");
+}
+
+#[test]
+fn doctor_counts_a_theme_name_with_no_theme_as_a_problem() {
+    let bed = Bed::new();
+    bed.write_store();
+    bed.write_user_config("[tui]\ntheme = \"ocean\"");
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("tui.theme = ocean (user file)"), "{out}");
+    assert!(out.contains("problem: `tui.theme`"), "{out}");
+
+    // A table in the project file is ignored, with a warning; the
+    // problem stands. The user file's table names it.
+    bed.write_project_config("[theme.ocean]\naccent = \"#5fafd7\"");
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("warning: ignored: the project file defines theme `ocean`"),
+        "{out}"
+    );
+    bed.write_user_config("[tui]\ntheme = \"ocean\"\n[theme.ocean]\naccent = \"#5fafd7\"");
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 0, "{out}");
 }
 
 #[test]

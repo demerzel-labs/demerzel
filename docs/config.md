@@ -40,6 +40,11 @@ model = "claude-sonnet-5"
 mouse = false                    # on: the wheel scrolls, no terminal selection
 markdown = true                  # render model replies as markdown
 thinking = "closed"              # closed | open | hidden
+theme = "terminal"               # terminal | dark | light | a [theme.<name>] table
+
+[theme.ocean]                    # a theme of your own, see Themes
+accent = "#5fafd7"
+error = "bright-red"
 ```
 
 | Key | Flag | Variable | Default |
@@ -53,6 +58,7 @@ thinking = "closed"              # closed | open | hidden
 | `tui.mouse` | — | — | `false` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
+| `tui.theme` | — | — | `terminal` |
 
 In one layer, a `[providers.<id>]` value is more specific than the
 top-level key, so it wins. A top-level `model` in a layer that names
@@ -83,6 +89,69 @@ from config, not from the file.
 interface. A thinking block shows one reasoning summary from the
 model. `closed` shows the state and the summary's first line. `open`
 shows the whole summary. `hidden` shows no block.
+
+## Themes
+
+`tui.theme` names the colors of the full-screen interface. Three
+themes ship:
+
+- `terminal`: the terminal's own palette. This is the default. It
+  names palette entries and no RGB value, so it follows the
+  terminal's colors.
+- `dark`: light text for a dark ground.
+- `light`: dark text for a light ground.
+
+A `[theme.<name>]` table sets colors role by role. A table with a
+built-in name edits that theme. A table with a new name starts from
+`terminal`. Each key is one role:
+
+| Role | What it colors |
+|---|---|
+| `text` | replies, cards, the input box, the status bar's text |
+| `dim` | thinking blocks, notices, a card's output tail, markdown marks, link destinations, the completions not selected |
+| `accent` | card headers, the selected completion, the browse indicator |
+| `error` | failure messages, a failed call's mark |
+| `success` | a finished call's mark |
+| `warning` | a waiting, declined, or interrupted call's mark; the approval question |
+| `heading` | markdown headings |
+| `link` | link text |
+| `inline_code` | code spans |
+| `code_block` | the lines of a code fence |
+| `prompt` | the prompt |
+| `status_bar` | the status bar's ground |
+| `progress_line` | the progress line |
+| `diff_add` | a `+` line of an edit preview |
+| `diff_remove` | a `-` line of an edit preview |
+| `keyword`, `string`, `comment`, `number` | the highlight classes of a code fence |
+
+A value is `#rrggbb`, one of the sixteen palette names (`black`,
+`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and
+each with a `bright-` prefix), or `none`. `none` takes the color
+away; the terminal's own foreground shows, also inside a colored
+fence or colored text. A `comment` with no color also dims. A
+`status_bar` with no `text` color reverses onto its ground; with
+no ground it reverses onto the `text` color. A key
+that names no role warns. A value that is no color stops the run. A
+name with no built-in theme and no table stops the run.
+
+Only the user file can define tables. A project file can pick a
+theme by name, a built-in one or one the user file defines. A
+`[theme.<name>]` table in a project file is ignored, with a warning:
+a repository must not color the approval question or a preview
+away.
+
+The interface fits the theme to the terminal:
+
+- `COLORTERM=truecolor` or `24bit`, or a `TERM` with `direct`:
+  every RGB value goes out as it is.
+- A `TERM` with `256color`: each RGB value becomes the nearest entry
+  of the 256-color palette.
+- Any other `TERM`: each RGB value becomes the nearest of the
+  sixteen palette entries.
+- A non-empty `NO_COLOR`: no color at all. Bold, dim, italic, and
+  underline stay, so headings, emphasis, links, marks, and thinking
+  still read apart. A non-empty `NO_COLOR` also turns the line
+  interface's dim text off.
 
 ## Keyboard keys
 
@@ -129,6 +198,8 @@ privilege, move credentials, or raise cost:
   terminal's own text selection from a user who set no key.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
+- It cannot define a theme's colors. It can pick `tui.theme`. A color
+  can hide the approval question or a preview.
 
 A flag or a variable decides outright. Ignored project keys warn on
 stderr and in `doctor`.
@@ -142,4 +213,5 @@ M2.5 steps 3 and 4. Cache-hit receipts before that date ran at the
 Codex adapter's fixed `low` effort and the Anthropic default.
 `tui.mouse` changed its default to `false` on 2026-08-29, after the
 M2.5 step-7 dogfood. Capture takes the terminal's own text
-selection.
+selection. `tui.theme` and the `[theme.<name>]` tables landed with
+M2.5 step 8.

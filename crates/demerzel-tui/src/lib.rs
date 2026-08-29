@@ -27,6 +27,7 @@ mod history;
 mod markdown;
 mod render;
 mod terminal;
+pub mod theme;
 mod thinking;
 mod transcript;
 mod wrap;
@@ -37,6 +38,7 @@ use std::pin::Pin;
 
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender};
+pub use theme::Theme;
 pub use thinking::Thinking;
 
 /// The input prompt, shared with the REPL. The bench probe waits for
@@ -101,6 +103,10 @@ pub struct Options {
     /// How a thinking block starts: closed to one line, open, or not
     /// shown. Closed by default; Ctrl-T opens and closes the newest.
     pub thinking: Thinking,
+    /// The colors. The terminal's own palette by default; the binary
+    /// sets it from the `tui.theme` config key. The interface fits it
+    /// to the color depth the terminal declares, and to `NO_COLOR`.
+    pub theme: Theme,
     /// The commands the completion popup lists when a line starts
     /// with `/`. The driver still dispatches the submitted line; the
     /// list only completes it.
@@ -117,6 +123,7 @@ impl Default for Options {
             mouse: false,
             markdown: true,
             thinking: Thinking::default(),
+            theme: Theme::default(),
             commands: Vec::new(),
         }
     }

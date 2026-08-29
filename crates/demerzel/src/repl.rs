@@ -178,7 +178,10 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(show_reasoning: bool) -> Self {
         use std::io::IsTerminal as _;
-        let dim = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        // A non-empty `NO_COLOR` turns the dim off, the rule the
+        // full-screen interface follows too.
+        let dim = std::io::stderr().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
         Self {
             show_reasoning,
             dim,
