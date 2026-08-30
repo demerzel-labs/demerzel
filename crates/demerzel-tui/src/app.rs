@@ -77,17 +77,6 @@ enum Action {
     AbortTurn,
 }
 
-/// The approval modes in the order Shift-Tab cycles them, by the
-/// names the driver's `/approval` command takes.
-const APPROVAL_CYCLE: [&str; 3] = ["ask", "auto", "read-only"];
-
-/// The mode after `current` in [`APPROVAL_CYCLE`]; a name outside
-/// the cycle starts it.
-fn next_approval(current: &str) -> &'static str {
-    let at = APPROVAL_CYCLE.iter().position(|mode| *mode == current);
-    APPROVAL_CYCLE[at.map_or(0, |at| (at + 1) % APPROVAL_CYCLE.len())]
-}
-
 /// Whether a turn is running when a key arrives.
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -147,7 +136,8 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
             return Ok(());
         };
         // A command can send display events before it returns its
-        // note — a model or effort switch moves the status — so the
+        // note — a model, effort, or approval switch moves the status
+        // — so the
         // queue drains first and the note's frame shows both.
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
@@ -655,10 +645,11 @@ impl App {
         match key.code {
             KeyCode::Char('c') if ctrl => return self.ctrl_c(phase),
             // Shift-Tab cycles the approval mode between turns; the
-            // popup owns the key while it is open (above).
+            // popup owns the key while it is open (above). The note
+            // lands at the bottom; show it.
             KeyCode::BackTab if phase == Phase::Idle => {
-                let next = next_approval(&self.status.mode);
-                return Action::Command(format!("/approval {next}"));
+                self.transcript.follow();
+                return Action::Command(format!("/approval {}", self.status.mode.next()));
             }
             KeyCode::Char('d') if ctrl => {
                 if !self.editor.is_empty() {
@@ -917,13 +908,5 @@ mod tests {
         ] {
             assert_eq!(thinking_clock(&event, now), Some(now));
         }
-    }
-
-    #[test]
-    fn shift_tab_cycles_the_approval_modes_and_a_stranger_starts_the_cycle() {
-        assert_eq!(next_approval("ask"), "auto");
-        assert_eq!(next_approval("auto"), "read-only");
-        assert_eq!(next_approval("read-only"), "ask");
-        assert_eq!(next_approval(""), "ask");
     }
 }

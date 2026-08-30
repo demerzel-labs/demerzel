@@ -20,16 +20,36 @@ pub enum ToolAccess {
 /// The three approval modes. Non-interactive runs default to
 /// `ReadOnly`; `--auto` enables writes without prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum ApprovalMode {
+    /// Files from before 2026-08-30 spell it `read_only`; readers
+    /// keep them.
+    #[serde(alias = "read_only")]
     ReadOnly,
     Ask,
     Auto,
 }
 
 impl ApprovalMode {
+    /// The modes in their cycle order: Shift-Tab steps from one to
+    /// the next and wraps.
+    pub const ALL: [ApprovalMode; 3] = [
+        ApprovalMode::Ask,
+        ApprovalMode::Auto,
+        ApprovalMode::ReadOnly,
+    ];
+
     /// The mode names, for a usage line.
-    pub const NAMES: &'static str = "read-only, ask, auto";
+    pub const NAMES: &'static str = "ask, auto, read-only";
+
+    /// The mode after this one in [`ApprovalMode::ALL`].
+    pub fn next(self) -> ApprovalMode {
+        let at = ApprovalMode::ALL
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0);
+        ApprovalMode::ALL[(at + 1) % ApprovalMode::ALL.len()]
+    }
 
     /// The mode's config and command name.
     pub fn as_str(self) -> &'static str {
@@ -50,7 +70,7 @@ impl std::str::FromStr for ApprovalMode {
             "ask" => Ok(ApprovalMode::Ask),
             "auto" => Ok(ApprovalMode::Auto),
             other => Err(format!(
-                "unknown approval mode `{other}`; the modes are {}",
+                "must be one of {}, not `{other}`",
                 ApprovalMode::NAMES
             )),
         }
@@ -142,7 +162,7 @@ impl ApprovalPolicy {
         decision
     }
 
-    pub(crate) fn granted(&self, request: &ApprovalRequest<'_>) -> bool {
+    fn granted(&self, request: &ApprovalRequest<'_>) -> bool {
         match request.access {
             ToolAccess::Execute => self
                 .input_grants
@@ -273,13 +293,19 @@ mod tests {
     }
 
     #[test]
-    fn approval_types_use_snake_case_for_the_session_log() {
+    fn approval_types_keep_their_session_log_spelling() {
         // Approval decisions go into the session record as non-prompt
         // events; the serialized shape is part of the session format.
+        // The mode takes its command and config name, and a file from
+        // before the change still reads.
         assert_eq!(
             serde_json::to_value(ApprovalMode::ReadOnly).unwrap(),
-            serde_json::json!("read_only")
+            serde_json::json!("read-only")
         );
+        for old in ["read_only", "read-only"] {
+            let mode: ApprovalMode = serde_json::from_value(serde_json::json!(old)).unwrap();
+            assert_eq!(mode, ApprovalMode::ReadOnly, "{old}");
+        }
         assert_eq!(
             serde_json::to_value(ToolAccess::Execute).unwrap(),
             serde_json::json!("execute")
@@ -291,16 +317,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mode_name_round_trips_and_a_stranger_names_the_modes() {
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Ask,
-            ApprovalMode::Auto,
-        ] {
+    fn a_mode_name_round_trips_and_the_cycle_wraps() {
+        for mode in ApprovalMode::ALL {
             assert_eq!(mode.as_str().parse::<ApprovalMode>(), Ok(mode));
             assert_eq!(mode.to_string(), mode.as_str());
         }
         let error = "Auto".parse::<ApprovalMode>().unwrap_err();
         assert!(error.contains(ApprovalMode::NAMES), "{error}");
+        assert_eq!(ApprovalMode::Ask.next(), ApprovalMode::Auto);
+        assert_eq!(ApprovalMode::Auto.next(), ApprovalMode::ReadOnly);
+        assert_eq!(ApprovalMode::ReadOnly.next(), ApprovalMode::Ask);
     }
 }

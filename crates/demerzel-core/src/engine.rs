@@ -263,13 +263,6 @@ impl<'a> Engine<'a> {
         &self.session
     }
 
-    /// Take the session and the history back, so a driver can rebuild
-    /// the engine — say with another approval mode — without dropping
-    /// the open session file.
-    pub fn into_parts(self) -> (Session, Vec<Message>) {
-        (self.session, self.history)
-    }
-
     /// Switch the model for the turns that follow. The switch appends
     /// a meta record, so the session file names the model that
     /// continues it — an audit trail; resume still takes its model
@@ -283,7 +276,7 @@ impl<'a> Engine<'a> {
             self.provider.id(),
             model,
             self.config.effort,
-            Some(self.policy.mode),
+            self.policy.mode,
         ))?;
         if model != self.config.model {
             for message in &mut self.history {
@@ -419,7 +412,7 @@ impl<'a> Engine<'a> {
             self.provider.id(),
             &self.config.model,
             Some(effort),
-            Some(self.policy.mode),
+            self.policy.mode,
         ))?;
         self.config.effort = Some(effort);
         Ok(())
@@ -427,10 +420,12 @@ impl<'a> Engine<'a> {
 
     /// Set the approval mode for the turns that follow, with the tool
     /// set that goes with it: `read-only` drops the write and execute
-    /// tools, `auto` asks nothing, `ask` asks again. The session's
-    /// grants survive the switch; `read-only` has no tool for them to
-    /// cover. A fresh meta record names the mode, the way a model or
-    /// an effort switch leaves its trail.
+    /// tools, `auto` asks nothing, `ask` asks again. `tools` must be
+    /// the host for `mode` — the runtime's `tools(mode)` — so the
+    /// advertised set and the policy agree. The session's grants
+    /// survive the switch; `read-only` has no tool for them to cover.
+    /// A fresh meta record names the mode, the way a model or an
+    /// effort switch leaves its trail.
     pub fn set_approval(
         &mut self,
         mode: ApprovalMode,
@@ -441,11 +436,15 @@ impl<'a> Engine<'a> {
             self.provider.id(),
             &self.config.model,
             self.config.effort,
-            Some(mode),
+            mode,
         ))?;
         self.policy.mode = mode;
-        self.tools = tools;
-        self.tool_definitions = tools.definitions();
+        // The same host keeps its snapshot: `ask` and `auto` share
+        // one, so a switch between them rebuilds nothing.
+        if !std::ptr::addr_eq(self.tools, tools) {
+            self.tools = tools;
+            self.tool_definitions = tools.definitions();
+        }
         Ok(())
     }
 
@@ -847,7 +846,13 @@ mod tests {
 
     fn session_in(dir: &tempfile::TempDir) -> Session {
         SessionStore::at(dir.path())
-            .create(dir.path(), "scripted", "test-model", None, None)
+            .create(
+                dir.path(),
+                "scripted",
+                "test-model",
+                None,
+                ApprovalMode::Ask,
+            )
             .unwrap()
     }
 
@@ -1483,6 +1488,8 @@ mod tests {
             text_done("two"),
             tool_call("c2", "write", json!({})),
             text_done("three"),
+            tool_call("c3", "exec", json!({"cmd": "x"})),
+            text_done("four"),
         ]);
         let full = FakeTools;
         let read = ReadTools;
@@ -1496,11 +1503,15 @@ mod tests {
         // Read-only: the next request advertises the read tool alone.
         engine.set_approval(ApprovalMode::ReadOnly, &read).unwrap();
         block_on(engine.user_turn("second".into(), &sink, &mut ApproveAll)).unwrap();
-        // Auto: the full set is back, and a write call runs with no
-        // question. The grant survived the switches, unused here.
-        engine.set_approval(ApprovalMode::Auto, &full).unwrap();
+        // Ask again: the full set is back, and the grant carries the
+        // write call with no question — an empty script panics when
+        // asked.
+        engine.set_approval(ApprovalMode::Ask, &full).unwrap();
         let mut none = ScriptedApprover(VecDeque::new());
         block_on(engine.user_turn("third".into(), &sink, &mut none)).unwrap();
+        // Auto: an execute call runs with no question either.
+        engine.set_approval(ApprovalMode::Auto, &full).unwrap();
+        block_on(engine.user_turn("fourth".into(), &sink, &mut none)).unwrap();
 
         let requests = provider.requests();
         let names = |index: usize| -> Vec<String> {
@@ -1513,11 +1524,10 @@ mod tests {
         assert_eq!(names(0), ["note", "write", "exec"]);
         assert_eq!(names(2), ["note"]);
         assert_eq!(names(3), ["note", "write", "exec"]);
-        assert!(engine.policy.granted(&ApprovalRequest {
-            tool: "write",
-            access: ToolAccess::Write,
-            input: &json!({}),
-        }));
+        // The tools block is the same bytes after a round trip: the
+        // provider's cached prefix holds.
+        assert_eq!(requests[0].tools, requests[3].tools);
+        assert_eq!(requests[3].tools, requests[5].tools);
 
         // Each switch left a meta record naming the mode; the last
         // one describes the run that continues.
@@ -1526,9 +1536,9 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .filter(|record| record["type"] == "meta")
-            .map(|record| record["approval"].as_str().unwrap_or("").to_string())
+            .map(|record| record["approval"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(modes, ["", "read-only", "auto"]);
+        assert_eq!(modes, ["ask", "read-only", "ask", "auto"]);
         let replayed = replay(engine.session().path()).unwrap();
         assert_eq!(replayed.meta.unwrap().approval.as_deref(), Some("auto"));
     }
@@ -1708,20 +1718,5 @@ mod tests {
             let text = serde_json::to_string(&request.messages).unwrap();
             assert!(!text.contains("approval"));
         }
-    }
-
-    #[test]
-    fn into_parts_returns_the_session_and_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let provider = ScriptedProvider::new(vec![text_done("hi")]);
-        let tools = FakeTools;
-        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
-        let sink = noop_sink();
-        block_on(engine.user_turn("go".into(), &sink, &mut ApproveAll)).unwrap();
-
-        let (session, history) = engine.into_parts();
-        assert_eq!(history.len(), 2);
-        let replayed = replay(session.path()).unwrap();
-        assert_eq!(replayed.messages, history);
     }
 }

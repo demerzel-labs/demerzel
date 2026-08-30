@@ -339,8 +339,7 @@ fn expect_string(key: &str, value: toml::Value) -> Result<String, String> {
 }
 
 fn parse_approval(text: &str) -> Result<ApprovalMode, String> {
-    text.parse()
-        .map_err(|_| format!("`approval` must be `read-only`, `ask`, or `auto`, not `{text}`"))
+    text.parse().map_err(|error| format!("`approval` {error}"))
 }
 
 /// A config file the run cannot use.

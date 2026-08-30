@@ -37,6 +37,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+use demerzel_core::ApprovalMode;
+
 pub use cards::write_duration;
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
@@ -97,11 +99,11 @@ pub struct Options {
     /// The session model, shown on the status. The driver updates
     /// it through [`EventSender::status`].
     pub model: String,
-    /// The approval mode's name, shown on the status. The driver
-    /// updates it through [`EventSender::status`]; Shift-Tab submits
-    /// `/approval <next>` to the driver, cycling `ask`, `auto`,
-    /// `read-only`.
-    pub mode: String,
+    /// The approval mode, shown on the status. The driver updates it
+    /// through [`EventSender::status`]; Shift-Tab submits
+    /// `/approval <next>` to the driver, the next mode in
+    /// [`ApprovalMode::ALL`].
+    pub mode: ApprovalMode,
     /// The reasoning effort's name, shown on the status. The driver
     /// updates it through [`EventSender::status`].
     pub effort: String,
@@ -142,7 +144,7 @@ impl Default for Options {
             history_path: None,
             banner: None,
             model: String::new(),
-            mode: String::new(),
+            mode: ApprovalMode::Ask,
             effort: String::new(),
             project: String::new(),
             branch: String::new(),

@@ -36,7 +36,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         config.model
     ));
     options.model = config.model.clone();
-    options.mode = mode.to_string();
+    options.mode = mode;
     options.effort = config.effort.to_string();
     // The config takes any path; the name and the branch need a
     // real one, so `.` and `..` name their directory and the walk
@@ -188,7 +188,7 @@ impl Driver for TuiDriver<'_> {
                 }
                 self.approval = mode;
                 let mut patch = StatusPatch::default();
-                patch.mode = Some(mode.to_string());
+                patch.mode = Some(mode);
                 events.status(patch);
                 return Submission::Note(approval_note(mode));
             }

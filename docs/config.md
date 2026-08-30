@@ -90,14 +90,20 @@ from config, not from the file.
 sets it for the turns that follow, in both interfaces. Shift-Tab in
 the full-screen interface cycles the mode: `ask`, `auto`,
 `read-only`, and back. The completion popup owns Shift-Tab while it
-is open. The key does nothing while a turn runs. The switch is
-yours at the keyboard, so the project-file rule does not limit it:
-you can set any mode. A switch swaps the tool set: `read-only`
-drops the write and execute tools, `auto` asks nothing, `ask` asks
-again. The session grants from `always` answers survive a switch.
+is open. The key does nothing while a turn runs. The full-screen
+interface names the mode on its status. The user makes the switch
+at the keyboard, so the trust rules for a project file do not limit
+it: the user can set any mode. A switch swaps the tool set:
+
+- `read-only` drops the write and execute tools.
+- `auto` asks nothing.
+- `ask` asks again.
+
+A grant from an `always` answer survives a switch.
 Each `meta` record in the session file names the mode in force. A
 resumed session takes its mode from the flags and the config, not
-from the file. A one-shot run has no command and no key.
+from the file. A one-shot run has no command and no key, so its
+mode is the one the flags and the config set.
 
 ## Thinking blocks
 
@@ -205,6 +211,9 @@ The full-screen interface has these keys:
   fence gives its code, a card gives its output and its result line.
   The copy is cut at 64 KiB, and a notice says so. A click clears
   the selection.
+- Shift-Tab cycles the approval mode: `ask`, `auto`, `read-only`,
+  and back. While the completion popup is open, Shift-Tab selects
+  the previous command instead.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses

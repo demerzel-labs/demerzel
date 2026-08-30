@@ -102,7 +102,7 @@ impl Bed {
                 "openai-codex",
                 "test-model",
                 None,
-                None,
+                mode,
             )
             .unwrap();
         Engine::new(

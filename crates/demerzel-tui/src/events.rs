@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use demerzel_core::{ApprovalAnswer, EngineEvent, EventSink, Usage};
+use demerzel_core::{ApprovalAnswer, ApprovalMode, EngineEvent, EventSink, Usage};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cards::kept_output;
@@ -66,8 +66,8 @@ pub(crate) enum DisplayEvent {
 pub struct StatusPatch {
     /// The session model's name.
     pub model: Option<String>,
-    /// The approval mode's name.
-    pub mode: Option<String>,
+    /// The approval mode.
+    pub mode: Option<ApprovalMode>,
     /// The reasoning effort's name; empty shows no segment.
     pub effort: Option<String>,
     /// The git branch, or the short hash of a detached head; empty

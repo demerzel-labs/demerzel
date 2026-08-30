@@ -247,7 +247,7 @@ impl Runtime {
                     self.provider.id(),
                     model,
                     Some(effort),
-                    Some(approval),
+                    approval,
                 ))?;
                 return Ok((session, replay.messages));
             }
@@ -257,14 +257,14 @@ impl Runtime {
             self.provider.id(),
             model,
             Some(effort),
-            Some(approval),
+            approval,
         )?;
         Ok((session, Vec::new()))
     }
 
     /// The tool set for an approval mode: `read-only` advertises the
     /// read tools alone, the other modes the full registry.
-    pub fn tools(&self, approval: ApprovalMode) -> &dyn ToolHost {
+    pub(crate) fn tools(&self, approval: ApprovalMode) -> &dyn ToolHost {
         if approval == ApprovalMode::ReadOnly {
             &self.read_only_registry
         } else {

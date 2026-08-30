@@ -179,7 +179,8 @@ fn help_text() -> String {
     }
     out.push_str(
         "\napproval keys: y runs the call, a grants it for the session \
-         (a command grant covers only that exact call), n declines",
+         (a command grant covers only that exact call), n declines\
+         \nShift-Tab cycles the approval mode in the full-screen interface",
     );
     out
 }
@@ -286,7 +287,10 @@ mod tests {
             else {
                 panic!("{line} is a usage note");
             };
-            assert_eq!(note, "usage: /approval [read-only, ask, auto]");
+            assert!(
+                note.starts_with("usage: /approval") && note.contains(ApprovalMode::NAMES),
+                "{note}"
+            );
         }
     }
 

@@ -1335,13 +1335,17 @@ async fn the_approval_command_and_shift_tab_set_the_mode_for_the_turns_that_foll
     // Read-only: the next request carries the read tools alone.
     pty.send(b"/approval read-only\r");
     pty.wait_for("approval: read-only");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("─ read-only ─ effort");
+    pty.send(CTRL_C);
     pty.send(b"look\r");
     pty.wait_for("read-only done");
     pty.wait_for("2 cached");
     // Ask again: a question shows, and the status names the mode.
     pty.send(b"/approval ask\r");
     pty.wait_for("approval: ask");
-    pty.resize(100, 29);
+    pty.resize(100, 30);
     pty.send(b"x");
     pty.wait_for("─ ask ─ effort");
     pty.send(CTRL_C);
@@ -1350,10 +1354,11 @@ async fn the_approval_command_and_shift_tab_set_the_mode_for_the_turns_that_foll
     pty.send(b"y");
     pty.wait_for("ask done");
     pty.wait_for("2 cached");
-    // Shift-Tab cycles from ask to auto, with no prompt echo.
+    // Shift-Tab cycles from ask to auto, with no prompt echo: the
+    // note shows and no `/approval auto` line precedes it.
     pty.send(SHIFT_TAB);
-    pty.wait_for("approval: auto");
-    pty.resize(100, 30);
+    pty.absent_until("❯ /approval auto", "approval: auto");
+    pty.resize(100, 29);
     pty.send(b"x");
     pty.wait_for("─ auto ─ effort");
     pty.send(CTRL_C);
@@ -1368,10 +1373,13 @@ async fn the_approval_command_and_shift_tab_set_the_mode_for_the_turns_that_foll
     assert!(tool_names(&requests[0].body).contains(&"bash".to_string()));
     assert_eq!(tool_names(&requests[2].body), ["read", "grep", "glob"]);
     assert!(tool_names(&requests[3].body).contains(&"bash".to_string()));
-    // The tool ran under auto and under ask; the switches left meta
-    // records naming each mode.
+    // The tool ran under auto and under ask. The engine test covers
+    // the meta records a switch writes.
     assert!(requests[1].body.to_string().contains("auto-ran"));
     assert!(requests[4].body.to_string().contains("asked"));
+    // The tools block is the same bytes once ask is back: the
+    // provider's cached prefix holds.
+    assert_eq!(requests[0].body["tools"], requests[3].body["tools"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
