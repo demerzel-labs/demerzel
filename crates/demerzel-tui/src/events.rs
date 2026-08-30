@@ -52,25 +52,24 @@ pub(crate) enum DisplayEvent {
     Usage(Usage),
     Notice(String),
     Error(String),
-    /// A status change: the model, the effort, the branch.
+    /// A status patch: the segments it names change.
     Status(StatusPatch),
     /// A session opened or closed; the status totals restart.
     SessionChanged,
 }
 
-/// A change to the status. Each field that is `Some` replaces the
-/// segment's text; `None` leaves it. An empty text takes the segment
-/// off the status. Start from [`StatusPatch::default`] and set the
-/// fields to change; the struct grows with the status.
+/// A change to the status. Each field that is `Some` replaces its
+/// segment; `None` leaves it. Start from [`StatusPatch::default`]
+/// and set the fields to change; the struct grows with the status.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct StatusPatch {
     /// The session model's name.
     pub model: Option<String>,
-    /// The reasoning effort's name.
+    /// The reasoning effort's name; empty shows no segment.
     pub effort: Option<String>,
-    /// The git branch, or the short hash of a detached head. Empty
-    /// shows no branch segment.
+    /// The git branch, or the short hash of a detached head; empty
+    /// shows no segment.
     pub branch: Option<String>,
 }
 

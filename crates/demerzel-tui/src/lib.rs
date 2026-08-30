@@ -22,7 +22,6 @@ pub mod bench;
 mod cards;
 mod editor;
 mod events;
-mod git;
 mod highlight;
 mod history;
 mod markdown;
@@ -41,7 +40,6 @@ use std::pin::Pin;
 pub use cards::write_duration;
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
-pub use git::git_branch;
 pub use theme::Theme;
 pub use thinking::Thinking;
 
@@ -108,8 +106,8 @@ pub struct Options {
     /// shows no segment. The interface cuts it at 64 bytes and
     /// drops control characters.
     pub project: String,
-    /// The git branch, shown on the status; see [`git_branch`].
-    /// Empty shows no segment. The driver updates it through
+    /// The git branch, shown on the status. Empty shows no segment.
+    /// The driver reads it and updates it through
     /// [`EventSender::status`] at each turn's start. The interface
     /// cuts it at 64 bytes and drops control characters.
     pub branch: String,

@@ -451,17 +451,7 @@ impl App {
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
-            DisplayEvent::Status(patch) => {
-                if let Some(model) = patch.model {
-                    self.status.model = model;
-                }
-                if let Some(effort) = patch.effort {
-                    self.status.effort = effort;
-                }
-                if let Some(branch) = patch.branch {
-                    self.status.branch = status_text(&branch);
-                }
-            }
+            DisplayEvent::Status(patch) => self.status.apply(patch),
             DisplayEvent::SessionChanged => {
                 // The totals belong to the open session; a session
                 // change restarts them.

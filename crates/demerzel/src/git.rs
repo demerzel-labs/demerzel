@@ -3,20 +3,27 @@
 //! up from a directory to the first `.git`, follows a worktree's
 //! `.git` file to its git directory, and parses `HEAD`.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// Characters of a detached head's hash the status shows.
 const SHORT_HASH: usize = 7;
+
+/// Bytes a read of `HEAD` or of a worktree's `.git` file takes at
+/// most. A real one holds one short line; the cap bounds a stray
+/// file.
+const READ_BYTES: u64 = 4096;
 
 /// The branch checked out in the repository that holds `dir`: the
 /// name after `ref: refs/heads/` in `HEAD`, or the first seven
 /// characters of a detached head's hash. `None` when no directory at
 /// or above `dir` holds a `.git`, or when the first one's `HEAD`
 /// reads as neither. The name is the file's text as is; the status
-/// cuts and sanitizes it.
+/// cuts and sanitizes it. `dir` must be absolute: the walk cannot
+/// leave a relative root. The call blocks on the file reads.
 pub fn git_branch(dir: &Path) -> Option<String> {
-    let head = fs::read_to_string(git_dir(dir)?.join("HEAD")).ok()?;
+    let head = read_line(&git_dir(dir)?.join("HEAD"))?;
     parse_head(&head).map(str::to_owned)
 }
 
@@ -34,11 +41,28 @@ fn git_dir(dir: &Path) -> Option<PathBuf> {
         if meta.is_dir() {
             return Some(dot_git);
         }
-        let file = fs::read_to_string(&dot_git).ok()?;
-        let target = file.strip_prefix("gitdir:")?.trim();
+        let line = read_line(&dot_git)?;
+        let target = line.strip_prefix("gitdir:")?.trim();
         return Some(ancestor.join(target));
     }
     None
+}
+
+/// The first line of the regular file at `path`, out of its first
+/// [`READ_BYTES`]. A FIFO or a device is no file: a read of one
+/// could block for good, so the type check comes first.
+fn read_line(path: &Path) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(READ_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    Some(text.lines().next().unwrap_or_default().to_owned())
 }
 
 /// What `HEAD` names: a branch, or a detached head's short hash.
@@ -109,5 +133,37 @@ mod tests {
         // A .git file that names no directory ends the walk at it.
         fs::write(sibling.join(".git"), "not a worktree\n").unwrap();
         assert_eq!(git_branch(&sibling), None);
+    }
+
+    #[test]
+    fn the_reads_take_one_line_and_stop_at_the_cap() {
+        // A second line in a .git file stays out of the path.
+        let main = repo("ref: refs/heads/main\n");
+        let linked = main.path().join(".git/worktrees/wt");
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(linked.join("HEAD"), "ref: refs/heads/wt-branch\r\n").unwrap();
+        let sibling = main.path().join("sibling");
+        fs::create_dir(&sibling).unwrap();
+        fs::write(
+            sibling.join(".git"),
+            "gitdir: ../.git/worktrees/wt\nsecond line\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch(&sibling).as_deref(), Some("wt-branch"));
+        // A stray file of any size costs the cap at most.
+        let long = format!("ref: refs/heads/{}", "a".repeat(100_000));
+        let dir = repo(&long);
+        let name = git_branch(dir.path()).unwrap();
+        assert!(name.len() <= READ_BYTES as usize, "{}", name.len());
+        assert!(name.bytes().all(|byte| byte == b'a'));
+    }
+
+    #[test]
+    fn a_git_entry_that_is_no_file_and_no_directory_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = std::ffi::CString::new(dir.path().join(".git").to_str().unwrap()).unwrap();
+        // A FIFO with no writer would block a read for good.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(git_branch(dir.path()), None);
     }
 }

@@ -149,6 +149,8 @@ struct Pty {
     seen: Vec<u8>,
     /// Search cursor into the stripped, space-free view of `seen`.
     cursor: usize,
+    /// The project directory the session runs in.
+    project: std::path::PathBuf,
     _dirs: tempfile::TempDir,
 }
 
@@ -194,13 +196,21 @@ impl Pty {
         user_config: Option<&str>,
         env: &[(&str, &str)],
     ) -> Self {
-        Self::spawn_full(base_url, extra_args, project_config, user_config, env, None)
+        Self::spawn_full(
+            base_url,
+            extra_args,
+            project_config,
+            user_config,
+            env,
+            "project",
+            None,
+        )
     }
 
-    /// [`Pty::spawn`] in a project that holds a `.git/HEAD` with
-    /// `head` as its text.
-    fn spawn_in_repo(base_url: &str, head: &str) -> Self {
-        Self::spawn_full(base_url, &[], None, None, &[], Some(head))
+    /// [`Pty::spawn`] in a project directory named `name` that holds
+    /// a `.git/HEAD` with `head` as its text.
+    fn spawn_in_repo(base_url: &str, name: &str, head: &str) -> Self {
+        Self::spawn_full(base_url, &[], None, None, &[], name, Some(head))
     }
 
     fn spawn_full(
@@ -209,12 +219,13 @@ impl Pty {
         project_config: Option<&str>,
         user_config: Option<&str>,
         env: &[(&str, &str)],
+        project_name: &str,
         head: Option<&str>,
     ) -> Self {
         let dirs = tempfile::tempdir().unwrap();
         let home = dirs.path().join("home");
         let data = dirs.path().join("data");
-        let project = dirs.path().join("project");
+        let project = dirs.path().join(project_name);
         for dir in [&home, &data, &project] {
             std::fs::create_dir_all(dir).unwrap();
         }
@@ -275,6 +286,7 @@ impl Pty {
             master,
             seen: Vec::new(),
             cursor: 0,
+            project,
             _dirs: dirs,
         }
     }
@@ -369,7 +381,7 @@ impl Pty {
 
     /// The project directory the session runs in.
     fn project(&self) -> std::path::PathBuf {
-        self._dirs.path().join("project")
+        self.project.clone()
     }
 
     /// The session-file stems this run created, across all projects.
@@ -1238,12 +1250,16 @@ async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
         Vec::new(),
     )
     .await;
-    let mut pty = Pty::spawn_in_repo(&mock.url(), "ref: refs/heads/feature/status\n");
+    let mut pty = Pty::spawn_in_repo(
+        &mock.url(),
+        "status-repo",
+        "ref: refs/heads/feature/status\n",
+    );
 
     // The boot read: the project directory's name and the branch,
     // between the effort and the totals.
     pty.wait_for(PROMPT);
-    pty.wait_for("─ project ─ feature/status ─ 0 in");
+    pty.wait_for("─ status-repo ─ feature/status ─ 0 in");
     // A detached head between turns shows its short hash at the next
     // turn's start; a resize repaints the edge in full.
     let git = pty.project().join(".git");
@@ -1254,17 +1270,19 @@ async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
     .unwrap();
     pty.send(b"one\r");
     pty.wait_for("one reply");
+    pty.wait_for("2 cached");
     pty.resize(100, 29);
     pty.send(b"x");
-    pty.wait_for("─ project ─ 0123456 ─");
+    pty.wait_for("─ status-repo ─ 0123456 ─");
     // No repository: the branch segment goes, the project stays.
     std::fs::remove_dir_all(&git).unwrap();
     pty.send(CTRL_C);
     pty.send(b"two\r");
     pty.wait_for("two reply");
+    pty.wait_for("2 cached");
     pty.resize(100, 30);
     pty.send(b"x");
-    pty.wait_for("─ project ─");
+    pty.wait_for("─ status-repo ─");
     pty.absent_until("0123456", "cached");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
