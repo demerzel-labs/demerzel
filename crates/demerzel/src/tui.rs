@@ -5,6 +5,8 @@
 //! registry, the previews, and the message wording. The driver builds
 //! every preview, so the interface crate needs no knowledge of tools.
 
+use std::path::PathBuf;
+
 use demerzel_core::{
     ApprovalAnswer, Approver, BoxFuture, Effort, Engine, EngineEvent, EventSink, TurnOutcome,
 };
@@ -33,12 +35,16 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.model = config.model.clone();
     options.mode = mode.to_string();
     options.effort = config.effort.to_string();
-    options.project = config
-        .project_dir
+    // The config takes any path; the name and the branch need an
+    // absolute one, so `.` names its directory and the walk up can
+    // leave it.
+    let project_dir =
+        std::path::absolute(&config.project_dir).unwrap_or_else(|_| config.project_dir.clone());
+    options.project = project_dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let branch = git_branch(&config.project_dir).unwrap_or_default();
+    let branch = git_branch(&project_dir).unwrap_or_default();
     options.branch = branch.clone();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
@@ -51,6 +57,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         model: config.model.clone(),
         effort: config.effort,
         resume: config.continue_last,
+        project_dir,
         branch,
     };
     demerzel_tui::run(&mut driver, options)
@@ -70,6 +77,9 @@ struct TuiDriver<'r> {
     /// Whether the next open resumes the latest session. `/new`
     /// clears it.
     resume: bool,
+    /// The project directory, absolute: the branch read walks up
+    /// from it.
+    project_dir: PathBuf,
     /// The branch the status shows; empty for none. Read again at
     /// each turn's start, so a checkout between turns shows at the
     /// next turn.
@@ -166,7 +176,7 @@ impl Driver for TuiDriver<'_> {
             // The branch on the status follows a checkout between
             // turns: one read at each turn's start, no polling, and
             // a patch only on a change.
-            let branch = git_branch(&self.runtime.config().project_dir).unwrap_or_default();
+            let branch = git_branch(&self.project_dir).unwrap_or_default();
             if branch != self.branch {
                 self.branch = branch;
                 let mut patch = StatusPatch::default();
