@@ -94,6 +94,9 @@ pub struct Settings {
     pub effort: Setting<Effort>,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: Setting<u32>,
+    /// The context window, in tokens, for a model the provider
+    /// catalog does not name. `None` leaves the catalog alone.
+    pub context_window: Setting<Option<u64>>,
     pub history_file: Setting<bool>,
     /// The `[tui]` table.
     pub tui: TuiSettings,
@@ -143,6 +146,7 @@ struct ProviderKeys {
     base_url: Option<String>,
     model: Option<String>,
     effort: Option<Effort>,
+    context_window: Option<u64>,
 }
 
 /// Interface keys from the `[tui]` table.
@@ -260,6 +264,9 @@ fn parse_providers(
                 "base_url" => keys.base_url = Some(expect_string(&path, value)?),
                 "model" => keys.model = Some(expect_string(&path, value)?),
                 "effort" => keys.effort = Some(expect_effort(&path, value)?),
+                "context_window" => {
+                    keys.context_window = Some(u64::from(expect_positive_u32(&path, value)?));
+                }
                 _ => warnings.push(format!("unknown key `{path}`")),
             }
         }
@@ -515,6 +522,21 @@ pub fn resolve(
         })
         .unwrap_or_else(|| Setting::new(None, Origin::Default));
 
+    // The window for a model no adapter catalog names. The catalog
+    // wins for a model it names, so the key cannot relabel a shipped
+    // model.
+    let layer_window = |layer: Option<&Layer>, origin| {
+        layer_key(layer, origin, |l| {
+            l.providers
+                .get(&provider.value)
+                .and_then(|p| p.context_window)
+        })
+    };
+    let context_window = layer_window(project, Origin::Project)
+        .or_else(|| layer_window(user, Origin::User))
+        .map(some_setting)
+        .unwrap_or_else(|| Setting::new(None, Origin::Default));
+
     // Trust rule: the project file can lower the approval mode, never
     // raise it. The baseline is the user file, or the default `ask`.
     // A flag decides the mode outright, so no warning then.
@@ -672,6 +694,7 @@ pub fn resolve(
             approval,
             effort,
             max_model_calls,
+            context_window,
             history_file,
             tui: TuiSettings {
                 mouse,
@@ -740,6 +763,37 @@ fn some_setting<T>(setting: Setting<T>) -> Setting<Option<T>> {
 mod tests {
     use super::*;
     use demerzel_providers::{anthropic, openai_codex};
+
+    #[test]
+    fn the_context_window_key_resolves_for_the_active_provider() {
+        // The key reads from the active provider's table; the
+        // project layer wins over the user layer.
+        let user = layer("[providers.openai-codex]\ncontext_window = 100000");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.context_window.value, Some(100_000));
+        assert_eq!(settings.context_window.origin, Origin::User);
+
+        let project = layer("[providers.openai-codex]\ncontext_window = 50000");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.context_window.value, Some(50_000));
+        assert_eq!(settings.context_window.origin, Origin::Project);
+
+        // Another provider's table does not reach the active one.
+        let user = layer("[providers.anthropic]\ncontext_window = 100000");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.context_window.value, None);
+        assert_eq!(settings.context_window.origin, Origin::Default);
+
+        // Zero, a negative count, and a non-integer are errors.
+        for bad in ["0", "-3", "\"big\""] {
+            let text = format!("[providers.openai-codex]\ncontext_window = {bad}");
+            let error = Layer::parse(&text).unwrap_err();
+            assert!(
+                error.contains("providers.openai-codex.context_window"),
+                "{error}"
+            );
+        }
+    }
 
     fn layer(text: &str) -> Layer {
         let (layer, warnings) = Layer::parse(text).unwrap();

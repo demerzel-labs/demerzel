@@ -38,6 +38,8 @@ impl Screen {
                 effort: "high".into(),
                 project: "bench".into(),
                 branch: "main".into(),
+                context_tokens: 34_200,
+                context_window: Some(200_000),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,

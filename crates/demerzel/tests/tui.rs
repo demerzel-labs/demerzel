@@ -92,6 +92,13 @@ fn completed() -> Value {
     })
 }
 
+fn completed_with_input(input_tokens: u64) -> Value {
+    json!({
+        "type": "response.completed",
+        "response": {"usage": {"input_tokens": input_tokens, "output_tokens": 5}},
+    })
+}
+
 fn text_turn(text: &str) -> MockResponse {
     MockResponse::stream(vec![text_delta(text), completed()])
 }
@@ -1294,6 +1301,99 @@ async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
     pty.wait_for("─ status-repo ─");
     pty.absent_until("0123456", "cached");
     pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+/// The context on the status: the last call's input tokens and the
+/// share of the model's window from the provider catalog. The next
+/// call replaces the count; a new session clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_counts_the_context_and_its_share_of_the_window() {
+    let mock = MockServer::start(
+        vec![
+            MockResponse::stream(vec![text_delta("first"), completed_with_input(46_240)]),
+            MockResponse::stream(vec![text_delta("second"), completed_with_input(101_003)]),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+    pty.wait_for(PROMPT);
+    // The default model's window is in the catalog: 46,240 of
+    // 272,000 reads 17%.
+    pty.send(b"one\r");
+    pty.wait_for("first");
+    pty.wait_for("context 46.2k · 17% ─");
+    // The context is one prompt, not a sum: the next call replaces
+    // the count.
+    pty.send(b"two\r");
+    pty.wait_for("second");
+    pty.wait_for("101003 in");
+    // A resize repaints the edge in full: the incremental redraw
+    // sends changed cells alone.
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("context 101k · 37% ─");
+    pty.send(CTRL_C);
+    // A fresh session has no context yet: no segment before the
+    // zeroed totals.
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    pty.resize(100, 30);
+    pty.send(b"x");
+    pty.absent_until("context", "0 in · 0 out · 0 cached ─");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+/// A model in no catalog shows the count alone; a switch to a
+/// cataloged model brings the share with no new call, and the
+/// `context_window` key names a window for an unlisted model.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_comes_from_the_catalog_or_the_context_window_key() {
+    let mock = MockServer::start(
+        vec![MockResponse::stream(vec![
+            text_delta("first"),
+            completed_with_input(46_240),
+        ])],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &["--model", "plain-model"]);
+    pty.wait_for(PROMPT);
+    pty.send(b"one\r");
+    pty.wait_for("first");
+    pty.wait_for("context 46.2k ─");
+    // The window follows the model: the catalog names the new one.
+    pty.send(b"/model gpt-5.6-sol\r");
+    pty.wait_for("model: gpt-5.6-sol");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("context 46.2k · 17% ─");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    let mock = MockServer::start(
+        vec![MockResponse::stream(vec![
+            text_delta("first"),
+            completed_with_input(46_240),
+        ])],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn_with_configs(
+        &mock.url(),
+        &["--model", "plain-model"],
+        None,
+        Some("[providers.openai-codex]\ncontext_window = 100000\n"),
+    );
+    pty.wait_for(PROMPT);
+    pty.send(b"one\r");
+    pty.wait_for("first");
+    pty.wait_for("context 46.2k · 46% ─");
     pty.send(CTRL_D);
     pty.wait_exit();
 }

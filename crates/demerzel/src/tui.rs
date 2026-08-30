@@ -37,6 +37,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.model = config.model.clone();
     options.mode = mode;
     options.effort = config.effort.to_string();
+    options.context_window = runtime.context_window(&config.model);
     // The config takes any path; the name and the branch need a
     // real one, so `.` and `..` name their directory and the walk
     // up visits true ancestors only. The session record's `cwd`
@@ -158,6 +159,9 @@ impl Driver for TuiDriver<'_> {
                 }
                 self.settings.model = name.clone();
                 let mut patch = StatusPatch::default();
+                // The window follows the model; zero takes the share
+                // away when the new model's window is unknown.
+                patch.context_window = Some(self.runtime.context_window(&name).unwrap_or(0));
                 patch.model = Some(name);
                 events.status(patch);
                 return Submission::Note(model_note(&self.settings.model));

@@ -29,3 +29,30 @@ pub fn default_model(provider_id: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The context window of a shipped provider's model, in tokens, from
+/// the adapter's static catalog. `None` when the provider id or the
+/// model is not in a catalog. The `context_window` config key names a
+/// window for a model no catalog names.
+pub fn context_window(provider_id: &str, model: &str) -> Option<u64> {
+    match provider_id {
+        openai_codex::PROVIDER_ID => openai_codex::context_window(model),
+        anthropic::PROVIDER_ID => anthropic::context_window(model),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_catalogs_name_the_default_models_and_nothing_unknown() {
+        for id in PROVIDER_IDS {
+            let model = default_model(id).unwrap();
+            assert!(context_window(id, model).is_some(), "{id}");
+            assert_eq!(context_window(id, "not-a-model"), None, "{id}");
+        }
+        assert_eq!(context_window("not-a-provider", "gpt-5.6-sol"), None);
+    }
+}
