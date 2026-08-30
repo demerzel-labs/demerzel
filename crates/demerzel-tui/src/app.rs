@@ -46,7 +46,7 @@ use crate::cards::{self, Outcome};
 use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
-use crate::render::{self, Status, View};
+use crate::render::{self, Status, View, status_text};
 use crate::select;
 use crate::terminal::Guard;
 use crate::theme::{Depth, Palette};
@@ -212,6 +212,8 @@ impl App {
                 model: options.model,
                 mode: options.mode,
                 effort: options.effort,
+                project: status_text(&options.project),
+                branch: status_text(&options.branch),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -449,8 +451,17 @@ impl App {
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
-            DisplayEvent::Model(name) => self.status.model = name,
-            DisplayEvent::Effort(name) => self.status.effort = name,
+            DisplayEvent::Status(patch) => {
+                if let Some(model) = patch.model {
+                    self.status.model = model;
+                }
+                if let Some(effort) = patch.effort {
+                    self.status.effort = effort;
+                }
+                if let Some(branch) = patch.branch {
+                    self.status.branch = status_text(&branch);
+                }
+            }
             DisplayEvent::SessionChanged => {
                 // The totals belong to the open session; a session
                 // change restarts them.

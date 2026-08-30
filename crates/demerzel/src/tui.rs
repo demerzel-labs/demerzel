@@ -8,7 +8,9 @@
 use demerzel_core::{
     ApprovalAnswer, Approver, BoxFuture, Effort, Engine, EngineEvent, EventSink, TurnOutcome,
 };
-use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
+use demerzel_tui::{
+    ApprovalChannel, Driver, EventSender, Options, StatusPatch, Submission, git_branch,
+};
 use serde_json::Value;
 
 use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
@@ -32,6 +34,12 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.model = config.model.clone();
     options.mode = mode.to_string();
     options.effort = config.effort.to_string();
+    options.project = config
+        .project_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    options.branch = git_branch(&config.project_dir).unwrap_or_default();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
     options.thinking = config.thinking;
@@ -130,7 +138,9 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.model = name.clone();
-                events.model(name);
+                let mut patch = StatusPatch::default();
+                patch.model = Some(name);
+                events.status(patch);
                 return Submission::Note(model_note(&self.model));
             }
             Some(Effect::SetEffort(effort)) => {
@@ -140,12 +150,19 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.effort = effort;
-                events.effort(effort.to_string());
+                let mut patch = StatusPatch::default();
+                patch.effort = Some(effort.to_string());
+                events.status(patch);
                 return Submission::Note(effort_note(effort));
             }
             None => {}
         }
         Submission::Run(Box::pin(async move {
+            // The branch on the status follows a checkout between
+            // turns: one read at each turn's start, no polling.
+            let mut patch = StatusPatch::default();
+            patch.branch = Some(git_branch(&self.runtime.config().project_dir).unwrap_or_default());
+            events.status(patch);
             if self.engine.is_none() {
                 match self
                     .runtime

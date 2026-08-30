@@ -194,6 +194,23 @@ impl Pty {
         user_config: Option<&str>,
         env: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_full(base_url, extra_args, project_config, user_config, env, None)
+    }
+
+    /// [`Pty::spawn`] in a project that holds a `.git/HEAD` with
+    /// `head` as its text.
+    fn spawn_in_repo(base_url: &str, head: &str) -> Self {
+        Self::spawn_full(base_url, &[], None, None, &[], Some(head))
+    }
+
+    fn spawn_full(
+        base_url: &str,
+        extra_args: &[&str],
+        project_config: Option<&str>,
+        user_config: Option<&str>,
+        env: &[(&str, &str)],
+        head: Option<&str>,
+    ) -> Self {
         let dirs = tempfile::tempdir().unwrap();
         let home = dirs.path().join("home");
         let data = dirs.path().join("data");
@@ -202,6 +219,11 @@ impl Pty {
             std::fs::create_dir_all(dir).unwrap();
         }
         write_auth_store(&data);
+        if let Some(head) = head {
+            let git = project.join(".git");
+            std::fs::create_dir(&git).unwrap();
+            std::fs::write(git.join("HEAD"), head).unwrap();
+        }
         if let Some(config) = project_config {
             let dir = project.join(".demerzel");
             std::fs::create_dir_all(&dir).unwrap();
@@ -1207,6 +1229,46 @@ async fn the_effort_flag_and_command_reach_the_requests() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body["reasoning"]["effort"], "low");
     assert_eq!(requests[1].body["reasoning"]["effort"], "high");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
+    let mock = MockServer::start(
+        vec![text_turn("one reply"), text_turn("two reply")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn_in_repo(&mock.url(), "ref: refs/heads/feature/status\n");
+
+    // The boot read: the project directory's name and the branch,
+    // between the effort and the totals.
+    pty.wait_for(PROMPT);
+    pty.wait_for("─ project ─ feature/status ─ 0 in");
+    // A detached head between turns shows its short hash at the next
+    // turn's start; a resize repaints the edge in full.
+    let git = pty.project().join(".git");
+    std::fs::write(
+        git.join("HEAD"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+    pty.send(b"one\r");
+    pty.wait_for("one reply");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("─ project ─ 0123456 ─");
+    // No repository: the branch segment goes, the project stays.
+    std::fs::remove_dir_all(&git).unwrap();
+    pty.send(CTRL_C);
+    pty.send(b"two\r");
+    pty.wait_for("two reply");
+    pty.resize(100, 30);
+    pty.send(b"x");
+    pty.wait_for("─ project ─");
+    pty.absent_until("0123456", "cached");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
 }
 
 #[tokio::test(flavor = "multi_thread")]

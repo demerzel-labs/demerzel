@@ -18,6 +18,7 @@ use ratatui::widgets::{Block as Bordered, BorderType, Borders, Clear, Paragraph}
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
+use crate::cards::one_line;
 use crate::editor::{CommandSpec, Editor, displayed};
 use crate::markdown::Face;
 use crate::select;
@@ -48,17 +49,34 @@ const FRAME_ROWS: u16 = 3;
 const FRAME_INSET: u16 = 1;
 
 /// What the status names: the model, the mode, the reasoning
-/// effort, and the open session's token totals, counted from this
-/// run's start. A session change restarts the totals. The session's
-/// id is a `/session` reply, not a segment.
+/// effort, the project and its branch, and the open session's token
+/// totals, counted from this run's start. A session change restarts
+/// the totals. The session's id is a `/session` reply, not a
+/// segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: String,
     /// The effort's name; empty shows no segment.
     pub effort: String,
+    /// The project directory's name; empty shows no segment.
+    pub project: String,
+    /// The git branch, or a detached head's short hash; empty shows
+    /// no segment.
+    pub branch: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+}
+
+/// Bytes a project or branch name keeps on the status. Both come
+/// from the file system, so the status treats them like a tool name:
+/// cut and with no control character.
+const STATUS_TEXT_BYTES: usize = 64;
+
+/// `raw` as the status shows it: one line, cut at
+/// [`STATUS_TEXT_BYTES`], with no control character.
+pub(crate) fn status_text(raw: &str) -> String {
+    one_line(raw, STATUS_TEXT_BYTES)
 }
 
 /// What one frame shows.
@@ -208,27 +226,37 @@ fn input_columns(width: u16) -> (u16, bool) {
     }
 }
 
+/// The separator between two bar segments.
+const BAR_SEP: &str = " · ";
+
 /// One row on the bar's ground — the theme's, or reversed when the
-/// theme sets none: model, mode, effort, token totals, cut to the
-/// width from the right. The small-screen form of the status.
+/// theme sets none: model, mode, effort, project, branch, token
+/// totals, cut to the width from the right. The small-screen form of
+/// the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let totals = format!(
-        " · {} in · {} out · {} cached",
+        "{BAR_SEP}{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let (effort_sep, effort_label) = if status.effort.is_empty() {
-        ("", "")
+    // An empty text is no segment: its separator and label go too.
+    let sep = |text: &str| if text.is_empty() { "" } else { BAR_SEP };
+    let effort_label = if status.effort.is_empty() {
+        ""
     } else {
-        (" · ", EFFORT_LABEL)
+        EFFORT_LABEL
     };
     let segments = [
         " ",
         status.model.as_str(),
-        " · ",
+        BAR_SEP,
         status.mode.as_str(),
-        effort_sep,
+        sep(&status.effort),
         effort_label,
         status.effort.as_str(),
+        sep(&status.project),
+        status.project.as_str(),
+        sep(&status.branch),
+        status.branch.as_str(),
         totals.as_str(),
     ];
 
@@ -278,8 +306,9 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
 const EFFORT_LABEL: &str = "effort ";
 
 /// The box's bottom edge with the status on it: the model, the
-/// mode, the effort, and the token totals, each between line
-/// segments, cut to the width from the right; the corners stay. The
+/// mode, the effort, the project, the branch, and the token totals,
+/// each between line segments, cut to the width from the right; the
+/// corners stay. The
 /// segments take the dim role's color, so they read apart from the
 /// typed text and follow the theme; with no color they dim like the
 /// lines.
@@ -302,12 +331,14 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         ("", status.model.as_str()),
         ("", status.mode.as_str()),
         (EFFORT_LABEL, status.effort.as_str()),
+        ("", status.project.as_str()),
+        ("", status.branch.as_str()),
         ("", totals.as_str()),
     ];
     // The caller frames a screen of sixteen columns or more, so the
     // corners and the first line always fit.
     debug_assert!(width >= usize::from(FRAMED_WIDTH));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(2 * segments.len() + 3);
     // The right corner keeps the last column.
     let budget = width.saturating_sub(1);
     spans.push(Span::styled("╰─", dim));
@@ -762,6 +793,8 @@ mod tests {
             model: "test-model".into(),
             mode: "ask".into(),
             effort: "high".into(),
+            project: String::new(),
+            branch: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
@@ -838,6 +871,85 @@ mod tests {
             "{:?}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn the_project_and_the_branch_sit_between_the_effort_and_the_totals() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            project: "demerzel".into(),
+            branch: "feature/status".into(),
+            ..status()
+        };
+        let palette = palette();
+        // On the box's edge, and on the bar.
+        let (lines, _) = render(
+            90,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[7].starts_with(
+                "╰─ test-model ─ ask ─ effort high ─ demerzel ─ feature/status ─ 0 in"
+            ),
+            "{:?}",
+            lines[7]
+        );
+        let (lines, _) = render(
+            90,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[2].contains("effort high · demerzel · feature/status · 0 in"),
+            "{:?}",
+            lines[2]
+        );
+        // No branch: the segment and its separator go.
+        let status = Status {
+            branch: String::new(),
+            ..status
+        };
+        let (lines, _) = render(
+            90,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[2].contains("effort high · demerzel · 0 in"),
+            "{:?}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn status_text_drops_control_characters_and_cuts_at_the_cap() {
+        assert_eq!(status_text("ma\x1b[31min"), "ma[31min");
+        let long = "b".repeat(100);
+        let cut = status_text(&long);
+        assert_eq!(cut, format!("{}…", "b".repeat(64)));
     }
 
     #[test]
