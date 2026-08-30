@@ -439,14 +439,39 @@ impl Block {
         !self.rendered() && !self.line_start(index)
     }
 
+    /// Whether the line of row `index` runs on into the next row: a
+    /// row of frame alone then holds nothing of its own.
+    pub(crate) fn continues(&self, index: usize) -> bool {
+        index + 1 < self.rows() && self.wrapped(index + 1)
+    }
+
+    /// Whether the block changed since the last frame laid it out:
+    /// text arrived, or a card or a thought waits for its render.
+    /// The rows on the screen no longer describe it.
+    pub(crate) fn pending(&self) -> bool {
+        self.layout.dirty
+            || match &self.body {
+                Body::Plain => false,
+                Body::Card(card) => card.stale(),
+                Body::Thought(thought) => thought.stale(),
+            }
+    }
+
     /// The columns the frame takes at the start of row `index`,
     /// which a copy leaves out: a card's indent on each of its
-    /// lines, the prompt on an echo's first row.
+    /// lines, the prompt on an echo, wherever its bytes fall when a
+    /// narrow pane wraps it.
     pub(crate) fn frame_columns(&self, index: usize) -> usize {
         match self.kind {
             Kind::Tool if self.line_start(index) => display_width(INDENT),
-            Kind::Prompt if index == 0 && self.row(0).starts_with(crate::PROMPT) => {
-                display_width(crate::PROMPT)
+            Kind::Prompt if self.buffer().starts_with(crate::PROMPT) => {
+                let (start, row) = self.row_at(index);
+                let end = (start + row.len()).min(crate::PROMPT.len());
+                if start < end {
+                    display_width(&self.buffer()[start..end])
+                } else {
+                    0
+                }
             }
             _ => 0,
         }
@@ -560,9 +585,10 @@ pub struct Transcript {
     /// The block and row on each viewport row of the last frame,
     /// top down, so a mouse position maps to a point.
     shown: Vec<(usize, usize)>,
-    /// The viewport cells something covers — the completion popup —
-    /// as `(rows, columns)`; a position there maps to no row.
-    covered: Option<(Range<usize>, Range<usize>)>,
+    /// The viewport cells something covers — the completion popup,
+    /// the browse indicator — as `(rows, columns)`; a position there
+    /// maps to no row.
+    covered: Vec<(Range<usize>, Range<usize>)>,
 }
 
 impl Transcript {
@@ -583,7 +609,7 @@ impl Transcript {
             frame_end: 0,
             selection: None,
             shown: Vec::new(),
-            covered: None,
+            covered: Vec::new(),
         }
     }
 
@@ -1002,34 +1028,49 @@ impl Transcript {
     /// drawn, top down. Nothing covers them until the frame says so.
     pub(crate) fn set_shown(&mut self, shown: Vec<(usize, usize)>) {
         self.shown = shown;
-        self.covered = None;
+        self.covered.clear();
     }
 
     /// A frame drew no transcript rows: no position maps to one.
     pub(crate) fn clear_shown(&mut self) {
         self.shown.clear();
-        self.covered = None;
+        self.covered.clear();
     }
 
-    /// The frame drew the completion popup over viewport `rows` and
-    /// `columns`: a position there maps to no row.
+    /// The frame drew something over viewport `rows` and `columns`
+    /// — the completion popup, the browse indicator: a position
+    /// there maps to no row.
     pub(crate) fn cover(&mut self, rows: Range<usize>, columns: Range<usize>) {
-        self.covered = Some((rows, columns));
+        self.covered.push((rows, columns));
     }
 
     fn is_covered(&self, x: u16, y: u16) -> bool {
-        self.covered.as_ref().is_some_and(|(rows, columns)| {
+        self.covered.iter().any(|(rows, columns)| {
             rows.contains(&usize::from(y)) && columns.contains(&usize::from(x))
         })
     }
 
+    /// Whether block `index` changed since the last frame, so the
+    /// row map no longer describes its rows. A press or a drag must
+    /// not name a row the user cannot see yet.
+    fn pending(&self, index: usize) -> bool {
+        index
+            .checked_sub(self.dropped)
+            .and_then(|offset| self.blocks.get(offset))
+            .is_none_or(Block::pending)
+    }
+
     /// The point under viewport column `x` and row `y`, when a row
-    /// is shown there.
+    /// is shown there and its block still reads as the frame drew
+    /// it.
     fn point_at(&self, x: u16, y: u16) -> Option<Point> {
         if self.is_covered(x, y) {
             return None;
         }
         let &(block, row) = self.shown.get(usize::from(y))?;
+        if self.pending(block) {
+            return None;
+        }
         Some(Point {
             block,
             row,
@@ -1050,17 +1091,16 @@ impl Transcript {
     }
 
     /// The pointer moved to viewport column `x` and row `y` with the
-    /// button down: the selection's head follows. Below the last
-    /// shown row the head is the end of that row; above the first it
-    /// is the start of that row. Returns whether the frame changes.
+    /// button down: the selection's head follows. On a blank cell
+    /// under the last shown row, inside the pane, the head is the
+    /// end of that row. Below the pane — the progress line, the
+    /// input box, the bar — on a covered cell, and on a block that
+    /// changed since the frame, the head stays. Returns whether the
+    /// frame changes.
     pub fn select_drag(&mut self, x: u16, y: u16) -> bool {
-        // A covered position: the head stays.
-        if self.is_covered(x, y) {
+        if self.is_covered(x, y) || y >= self.height {
             return false;
         }
-        let Some(selection) = &mut self.selection else {
-            return false;
-        };
         let head = match self.shown.get(usize::from(y)) {
             Some(&(block, row)) => Point {
                 block,
@@ -1077,6 +1117,12 @@ impl Transcript {
                     col: usize::MAX,
                 }
             }
+        };
+        if self.pending(head.block) {
+            return false;
+        }
+        let Some(selection) = &mut self.selection else {
+            return false;
         };
         let changed = selection.head != head;
         selection.head = head;

@@ -402,8 +402,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, p
     frame.render_widget(Paragraph::new(lines), area);
     transcript.set_shown(shown);
 
-    if scroll > 0 {
-        draw_indicator(frame, area, scroll, palette);
+    if scroll > 0
+        && let Some(corner) = draw_indicator(frame, area, scroll, palette)
+    {
+        // The indicator hides the cells under it, like the popup.
+        let y = usize::from(corner.y - area.y);
+        let x = usize::from(corner.x - area.x);
+        transcript.cover(y..y + 1, x..x + usize::from(corner.width));
     }
 }
 
@@ -443,14 +448,15 @@ fn selected_line<'a>(
 }
 
 /// Browse mode: the rows below the viewport and the key back to
-/// follow mode, on the viewport's last row at the right.
-fn draw_indicator(frame: &mut Frame, area: Rect, below: usize, palette: &Palette) {
+/// follow mode, on the viewport's last row at the right. Returns
+/// the cells it took, when it drew.
+fn draw_indicator(frame: &mut Frame, area: Rect, below: usize, palette: &Palette) -> Option<Rect> {
     let text = format!(" ↓ {below} below · End ");
     let Ok(width) = u16::try_from(display_width(&text)) else {
-        return;
+        return None;
     };
     if width > area.width {
-        return;
+        return None;
     }
     let corner = Rect {
         x: area.x + area.width - width,
@@ -460,6 +466,7 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize, palette: &Palette
     };
     let line = Line::styled(text, highlight(palette));
     frame.render_widget(Paragraph::new(line), corner);
+    Some(corner)
 }
 
 /// The style of a highlighted row — the browse indicator, the
@@ -1413,10 +1420,10 @@ line 12",
         assert!(!reversed(&buffer, 0, 0));
         assert_eq!(transcript.select_release().unwrap().text, "ne.");
 
-        // A drag past the last shown row runs to its end; a drag
-        // that starts on a fence row skips the frame.
+        // A drag onto a blank row of the pane runs to the last row's
+        // end; a drag that starts on a fence row skips the frame.
         transcript.select_press(0, 4);
-        transcript.select_drag(0, 15);
+        transcript.select_drag(0, 13);
         assert_eq!(
             transcript.select_release().unwrap().text,
             "fn main() {}\na.rs\nb.rs\nlisted\n· 10 in"
@@ -1508,6 +1515,99 @@ line 12",
     }
 
     #[test]
+    fn a_block_that_changed_since_the_frame_takes_no_press_or_drag() {
+        let mut transcript = Transcript::new(false);
+        transcript.push_line(Kind::Text, "line 0");
+        transcript.push_delta(Kind::Text, "one\ntwo");
+        frame_of(&mut transcript, 30, 6);
+        // A delta lands; the frame is still pending. The streamed
+        // block's rows on the screen are stale, the line above is
+        // not.
+        transcript.push_delta(Kind::Text, "\nthree");
+        assert!(!transcript.select_press(0, 1));
+        assert!(transcript.selection().is_none());
+        transcript.select_press(0, 0);
+        assert!(!transcript.select_drag(2, 2));
+        assert!(transcript.select_drag(2, 0));
+        assert_eq!(transcript.select_release().unwrap().text, "lin");
+        // The frame draws; the block reads as shown again.
+        frame_of(&mut transcript, 30, 6);
+        transcript.select_press(0, 1);
+        transcript.select_drag(4, 3);
+        assert_eq!(transcript.select_release().unwrap().text, "one\ntwo\nthree");
+        // A card that waits for its render is pending too.
+        transcript.tool_start("c1", "bash");
+        frame_of(&mut transcript, 30, 8);
+        transcript.tool_end(
+            "c1",
+            "bash",
+            crate::cards::Outcome {
+                summary: None,
+                is_error: false,
+                output: String::new(),
+                output_cut: false,
+                at: std::time::Instant::now(),
+            },
+        );
+        transcript.select_press(0, 4);
+        assert!(transcript.selection().is_none());
+    }
+
+    #[test]
+    fn a_drag_below_the_pane_leaves_the_head_and_a_blank_cell_inside_it_takes_the_row_end() {
+        let mut transcript = Transcript::new(false);
+        transcript.push_line(Kind::Text, "line 0");
+        transcript.push_line(Kind::Text, "line 1");
+        // An eight-row screen: six pane rows, the box, the bar.
+        frame_of(&mut transcript, 30, 8);
+        transcript.select_press(0, 0);
+        assert!(transcript.select_drag(2, 0));
+        // Rows 6 and 7 are the input box and the bar: the head stays.
+        assert!(!transcript.select_drag(9, 6));
+        assert!(!transcript.select_drag(9, 7));
+        assert_eq!(transcript.select_release().unwrap().text, "lin");
+        // Row 4 is blank inside the pane: the last row, to its end.
+        transcript.select_press(0, 0);
+        assert!(transcript.select_drag(0, 4));
+        assert_eq!(transcript.select_release().unwrap().text, "line 0\nline 1");
+    }
+
+    #[test]
+    fn the_browse_indicator_covers_its_cells() {
+        let mut transcript = Transcript::new(false);
+        for i in 0..10 {
+            transcript.push_line(Kind::Text, &format!("line {i} of the transcript"));
+        }
+        frame_of(&mut transcript, 40, 4);
+        transcript.scroll_up(3);
+        let (lines, _) = frame_of(&mut transcript, 40, 4);
+        assert!(lines[1].contains("3 below"), "{:?}", lines[1]);
+        // The indicator sits at the right of the pane's last row.
+        assert!(!transcript.select_press(38, 1));
+        assert!(transcript.selection().is_none());
+        transcript.select_press(0, 1);
+        assert!(!transcript.select_drag(38, 1));
+        assert!(transcript.select_drag(5, 1));
+        assert_eq!(transcript.select_release().unwrap().text, "line 6");
+    }
+
+    #[test]
+    fn a_narrow_pane_keeps_the_prompt_out_of_the_copy() {
+        for width in [4u16, 5, 7] {
+            let mut transcript = Transcript::new(false);
+            transcript.push_line(Kind::Prompt, "dmz> hello");
+            transcript.push_line(Kind::Text, "x");
+            frame_of(&mut transcript, width, 12);
+            transcript.select_press(0, 0);
+            transcript.select_drag(width - 1, 8);
+            let text = transcript.select_release().unwrap().text;
+            assert!(!text.contains("dmz"), "width {width}: {text:?}");
+            assert!(!text.starts_with('\n'), "width {width}: {text:?}");
+            assert_eq!(text.replace('\n', ""), "hellox", "width {width}: {text:?}");
+        }
+    }
+
+    #[test]
     fn a_press_on_the_popup_selects_nothing_under_it() {
         let commands = vec![
             CommandSpec::new("/help", "list the commands"),
@@ -1583,7 +1683,8 @@ line 12",
         transcript.tool_start("c1", "bash");
         transcript.push_line(Kind::Text, "line 2");
         transcript.tool_start("c2", "read");
-        frame_of(&mut transcript, 30, 8);
+        // A pane tall enough for every row, so no row shifts.
+        frame_of(&mut transcript, 30, 12);
         // The span covers the first card, not the second.
         transcript.select_press(0, 0);
         transcript.select_drag(3, 2);
@@ -1601,14 +1702,15 @@ line 12",
 
         // A stream into the selected block clears it.
         transcript.push_delta(Kind::Text, "open");
-        frame_of(&mut transcript, 30, 8);
+        let (lines, _) = frame_of(&mut transcript, 30, 12);
+        assert_eq!(lines[6], "open");
         transcript.select_press(0, 0);
-        transcript.select_drag(2, 7);
+        transcript.select_drag(2, 6);
         transcript.push_delta(Kind::Text, " more");
         assert!(transcript.selection().is_none());
 
         // The expand key changes every card.
-        frame_of(&mut transcript, 30, 8);
+        frame_of(&mut transcript, 30, 12);
         transcript.select_press(0, 0);
         transcript.select_drag(2, 1);
         transcript.set_expanded(true);

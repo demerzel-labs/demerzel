@@ -159,9 +159,9 @@ pub(crate) fn window(text: &str, from: usize, to: usize, col: &mut usize) -> (us
 /// trailing spaces dropped, a newline after. A card's header row and
 /// a row of whole-row structure — a fence frame line, a rule — add
 /// nothing. A row of marks that can hold text, such as a quote's
-/// bar or a card's blank output line, adds a blank line; a wrapped
-/// row of marks alone, such as a card's hint on a row of its own,
-/// adds nothing.
+/// bar or a card's blank output line, adds a blank line; a row of
+/// marks alone that wraps — a card's hint on a row of its own, a
+/// prompt that a narrow pane breaks before its line — adds nothing.
 pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out: &mut String) {
     let start = out.len();
     let skip = block.frame_columns(index);
@@ -200,7 +200,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
     } else {
         block.spans(index, push);
     }
-    if drop || (!content && col > 0 && block.wrapped(index)) {
+    if drop || (!content && col > 0 && (block.wrapped(index) || block.continues(index))) {
         out.truncate(start);
         return;
     }
