@@ -20,11 +20,8 @@ pub enum ToolAccess {
 /// The three approval modes. Non-interactive runs default to
 /// `ReadOnly`; `--auto` enables writes without prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
-    /// Files from before 2026-08-30 spell it `read_only`; readers
-    /// keep them.
-    #[serde(alias = "read_only")]
     ReadOnly,
     Ask,
     Auto,
@@ -295,17 +292,16 @@ mod tests {
     #[test]
     fn approval_types_keep_their_session_log_spelling() {
         // Approval decisions go into the session record as non-prompt
-        // events; the serialized shape is part of the session format.
-        // The mode takes its command and config name, and a file from
-        // before the change still reads.
+        // events; the serialized shape is part of the session format,
+        // and a build from either side of this change reads it. The
+        // command and config spelling `read-only` lives in `as_str`,
+        // not in serde.
         assert_eq!(
             serde_json::to_value(ApprovalMode::ReadOnly).unwrap(),
-            serde_json::json!("read-only")
+            serde_json::json!("read_only")
         );
-        for old in ["read_only", "read-only"] {
-            let mode: ApprovalMode = serde_json::from_value(serde_json::json!(old)).unwrap();
-            assert_eq!(mode, ApprovalMode::ReadOnly, "{old}");
-        }
+        let mode: ApprovalMode = serde_json::from_value(serde_json::json!("read_only")).unwrap();
+        assert_eq!(mode, ApprovalMode::ReadOnly);
         assert_eq!(
             serde_json::to_value(ToolAccess::Execute).unwrap(),
             serde_json::json!("execute")

@@ -141,9 +141,9 @@ pub struct Runtime {
     config: RunConfig,
     engine_config: EngineConfig,
     provider: Box<dyn Provider>,
-    /// The full tool set, and the read-only subset. The engine picks
-    /// one per session, so a mode change is an engine rebuild, not a
-    /// runtime rebuild.
+    /// The full tool set, and the read-only subset. `tools(mode)`
+    /// picks one; `Engine::set_approval` takes the pick when the mode
+    /// changes mid-session.
     registry: Registry,
     read_only_registry: Registry,
     store: SessionStore,

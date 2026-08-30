@@ -215,7 +215,7 @@ pub struct Engine<'a> {
     config: EngineConfig,
     session: Session,
     history: Vec<Message>,
-    /// Snapshots taken at construction and at an approval switch:
+    /// Snapshot taken at construction and at every approval switch:
     /// the tool set holds between switches, and the snapshot keeps
     /// the request tools block byte-identical across model calls.
     tool_definitions: Vec<ToolDefinition>,
@@ -439,16 +439,13 @@ impl<'a> Engine<'a> {
             mode,
         ))?;
         self.policy.mode = mode;
-        // The same host keeps its snapshot: `ask` and `auto` share
-        // one, so a switch between them rebuilds nothing. The
-        // comparison takes the address and the vtable: two zero-sized
-        // hosts share an address, and only the vtable tells them
-        // apart. A vtable duplicated across codegen units fails the
-        // test the safe way — an equal rebuild.
-        if !std::ptr::eq(self.tools, tools) {
-            self.tools = tools;
-            self.tool_definitions = tools.definitions();
-        }
+        self.tools = tools;
+        // Snapshot on every switch: a host may vary its definitions,
+        // and the advertised set must be the host's current one. The
+        // registries build the same bytes for the same set, so an
+        // equal rebuild leaves the request tools block byte-identical
+        // and the provider's cached prefix intact.
+        self.tool_definitions = tools.definitions();
         Ok(())
     }
 
