@@ -455,7 +455,14 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     engine = Some(runtime.engine(session, history, &settings));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
-                run_turn(engine, line.to_string(), &reader, &mut sigint).await;
+                run_turn(
+                    engine,
+                    line.to_string(),
+                    &reader,
+                    &mut sigint,
+                    runtime.config().max_model_calls,
+                )
+                .await;
             }
             ReadOutcome::Interrupted => continue,
             ReadOutcome::Closed => break,
@@ -466,7 +473,13 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
 
 /// One user turn. Ctrl-C drops the turn future; the engine and the
 /// session survive for the next prompt.
-async fn run_turn(engine: &mut Engine<'_>, text: String, reader: &Reader, sigint: &mut Signal) {
+async fn run_turn(
+    engine: &mut Engine<'_>,
+    text: String,
+    reader: &Reader,
+    sigint: &mut Signal,
+    call_limit: u32,
+) {
     // The listener is long-lived, so a signal from between turns may
     // still be queued; drop it instead of aborting this turn with it.
     drain(sigint).await;
@@ -493,7 +506,10 @@ async fn run_turn(engine: &mut Engine<'_>, text: String, reader: &Reader, sigint
             );
         }
         Some(Ok(TurnOutcome::CallLimit)) => {
-            eprintln!("demerzel: the turn hit the model-call limit");
+            eprintln!(
+                "demerzel: the turn hit the model-call limit ({} model calls)",
+                call_limit
+            );
         }
         Some(Ok(TurnOutcome::Refused)) => {
             eprintln!("demerzel: the model refused the request");

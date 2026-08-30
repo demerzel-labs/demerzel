@@ -51,12 +51,17 @@ pub struct EngineConfig {
     pub effort: Option<Effort>,
 }
 
+/// Model calls one user turn may make before the loop stops. A
+/// guard against a runaway tool loop, not a budget; the binary's
+/// `max_model_calls` config key overrides it.
+pub const DEFAULT_MAX_MODEL_CALLS: u32 = 128;
+
 impl EngineConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            max_model_calls: 128,
+            max_model_calls: DEFAULT_MAX_MODEL_CALLS,
             max_output_tokens: None,
             effort: None,
         }

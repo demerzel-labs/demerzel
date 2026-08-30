@@ -30,9 +30,8 @@ pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID
 pub const DEFAULT_EFFORT: Effort = Effort::High;
 
 /// Model calls one user turn may make before the engine stops the
-/// loop. A guard against a runaway tool loop, not a budget: a long
-/// review legitimately runs dozens of calls.
-pub const DEFAULT_MAX_MODEL_CALLS: u32 = 128;
+/// loop: the engine's own default, so the two cannot drift.
+pub const DEFAULT_MAX_MODEL_CALLS: u32 = demerzel_core::DEFAULT_MAX_MODEL_CALLS;
 /// Mouse capture in the full-screen interface when nothing sets it.
 /// On: the wheel scrolls and a drag selects in the interface; off,
 /// terminals turn the wheel into arrow keys on the alternate screen.
@@ -192,7 +191,7 @@ impl Layer {
                 "model" => layer.model = Some(expect_string(&key, value)?),
                 "effort" => layer.effort = Some(expect_effort(&key, value)?),
                 "max_model_calls" => {
-                    layer.max_model_calls = Some(expect_calls(&key, value)?);
+                    layer.max_model_calls = Some(expect_positive_u32(&key, value)?);
                 }
                 "approval" => {
                     layer.approval = Some(parse_approval(&expect_string(&key, value)?)?);
@@ -318,7 +317,7 @@ fn parse_themes(
 
 /// A model-call count: a positive integer that fits `u32`. Zero
 /// would stop every turn before its first call.
-fn expect_calls(key: &str, value: toml::Value) -> Result<u32, String> {
+fn expect_positive_u32(key: &str, value: toml::Value) -> Result<u32, String> {
     match value {
         toml::Value::Integer(count) if count >= 1 && count <= i64::from(u32::MAX) => {
             Ok(count as u32)
@@ -999,6 +998,14 @@ mod tests {
         assert_eq!(settings.max_model_calls.origin, Origin::User);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("max_model_calls"));
+
+        // A cloned repository on a machine with no user file cannot
+        // raise the limit above the default.
+        let project = layer("max_model_calls = 4096");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), None);
+        assert_eq!(settings.max_model_calls.value, DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(settings.max_model_calls.origin, Origin::Default);
+        assert_eq!(warnings.len(), 1);
 
         // Zero, a negative count, and a non-integer are errors.
         for bad in [

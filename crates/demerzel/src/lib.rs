@@ -112,8 +112,8 @@ impl RunConfig {
             continue_last: false,
             data_root: None,
             base_url: None,
-            max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
             effort: config::DEFAULT_EFFORT,
+            max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
             auth: None,
             history_path: None,
             mouse: config::DEFAULT_MOUSE,
@@ -165,12 +165,11 @@ impl Runtime {
 
         let provider = Self::build_provider(&config)?;
 
+        let mut engine_config = EngineConfig::new(config.model.clone());
+        engine_config.max_model_calls = config.max_model_calls;
+
         Ok(Self {
-            engine_config: {
-                let mut engine_config = EngineConfig::new(config.model.clone());
-                engine_config.max_model_calls = config.max_model_calls;
-                engine_config
-            },
+            engine_config,
             config,
             provider,
             registry,
