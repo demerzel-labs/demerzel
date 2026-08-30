@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
-    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
+    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, ToolHost, TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
@@ -30,12 +30,24 @@ pub use demerzel_tui::{Theme, Thinking};
 /// probe waits for it; the TUI prints it before the alternate screen.
 pub const READY_MARKER: &str = "demerzel ready";
 
-/// The approval mode as the interfaces name it.
-pub(crate) fn mode_name(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
+/// The session knobs the interfaces own: `/model`, `/effort`, and
+/// `/approval` switch them mid-session, so they travel apart from
+/// the boot-time [`RunConfig`].
+#[derive(Debug, Clone)]
+pub struct SessionSettings {
+    pub model: String,
+    pub effort: Effort,
+    pub approval: ApprovalMode,
+}
+
+impl SessionSettings {
+    /// The settings a run starts with.
+    pub fn from_config(config: &RunConfig) -> Self {
+        Self {
+            model: config.model.clone(),
+            effort: config.effort,
+            approval: config.approval,
+        }
     }
 }
 
@@ -129,9 +141,9 @@ pub struct Runtime {
     config: RunConfig,
     engine_config: EngineConfig,
     provider: Box<dyn Provider>,
-    /// The full tool set, and the read-only subset. The engine picks
-    /// one per session, so a mode change is an engine rebuild, not a
-    /// runtime rebuild.
+    /// The full tool set, and the read-only subset. `tools(mode)`
+    /// picks one; `Engine::set_approval` takes the pick when the mode
+    /// changes mid-session.
     registry: Registry,
     read_only_registry: Registry,
     store: SessionStore,
@@ -231,8 +243,7 @@ impl Runtime {
     pub fn open_session(
         &self,
         resume: bool,
-        model: &str,
-        effort: Effort,
+        settings: &SessionSettings,
     ) -> Result<(Session, Vec<Message>), RunError> {
         if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
             let (mut session, replay) = Session::resume(&path)?;
@@ -253,8 +264,9 @@ impl Runtime {
                 session.append_meta(&SessionMeta::now(
                     &self.config.project_dir,
                     self.provider.id(),
-                    model,
-                    Some(effort),
+                    &settings.model,
+                    Some(settings.effort),
+                    settings.approval,
                 ))?;
                 return Ok((session, replay.messages));
             }
@@ -262,34 +274,38 @@ impl Runtime {
         let session = self.store.create(
             &self.config.project_dir,
             self.provider.id(),
-            model,
-            Some(effort),
+            &settings.model,
+            Some(settings.effort),
+            settings.approval,
         )?;
         Ok((session, Vec::new()))
     }
 
-    /// Build the turn engine over an open session. A read-only run
-    /// advertises only the read tools. `model` and `effort` are the
-    /// interface's current session model and effort.
+    /// The tool set for an approval mode: `read-only` advertises the
+    /// read tools alone, the other modes the full registry.
+    pub(crate) fn tools(&self, approval: ApprovalMode) -> &dyn ToolHost {
+        if approval == ApprovalMode::ReadOnly {
+            &self.read_only_registry
+        } else {
+            &self.registry
+        }
+    }
+
+    /// Build the turn engine over an open session, with the
+    /// interface's current session settings.
     pub fn engine(
         &self,
         session: Session,
         history: Vec<Message>,
-        model: &str,
-        effort: Effort,
+        settings: &SessionSettings,
     ) -> Engine<'_> {
-        let registry = if self.config.approval == ApprovalMode::ReadOnly {
-            &self.read_only_registry
-        } else {
-            &self.registry
-        };
         let mut engine_config = self.engine_config.clone();
-        engine_config.model = model.to_string();
-        engine_config.effort = Some(effort);
+        engine_config.model = settings.model.clone();
+        engine_config.effort = Some(settings.effort);
         Engine::with_history(
             self.provider.as_ref(),
-            registry,
-            ApprovalPolicy::new(self.config.approval),
+            self.tools(settings.approval),
+            ApprovalPolicy::new(settings.approval),
             engine_config,
             session,
             history,
@@ -303,12 +319,9 @@ impl Runtime {
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
-        let (session, history) = self.open_session(
-            self.config.continue_last,
-            &self.config.model,
-            self.config.effort,
-        )?;
-        let mut engine = self.engine(session, history, &self.config.model, self.config.effort);
+        let settings = SessionSettings::from_config(&self.config);
+        let (session, history) = self.open_session(self.config.continue_last, &settings)?;
+        let mut engine = self.engine(session, history, &settings);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
 }

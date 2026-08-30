@@ -5,7 +5,9 @@
 //! runtime-built table beside this constant one; the dispatch seam
 //! stays.
 
-use demerzel_core::Effort;
+use demerzel_core::{ApprovalMode, Effort};
+
+use crate::SessionSettings;
 
 /// One command in the registry: its argument shape and the help
 /// line. The usage line starts with the command name; the `dispatch`
@@ -29,6 +31,10 @@ const COMMANDS: &[Command] = &[
     Command {
         usage: "/effort [level]",
         help: "show or set the reasoning effort: none, minimal, low, medium, high, xhigh, max, ultra",
+    },
+    Command {
+        usage: "/approval [mode]",
+        help: "show or set the approval mode: read-only, ask, auto",
     },
     Command {
         usage: "/new",
@@ -66,6 +72,12 @@ pub(crate) fn effort_note(effort: Effort) -> String {
     format!("effort: {effort}")
 }
 
+/// The note both interfaces show for the current or new approval
+/// mode.
+pub(crate) fn approval_note(mode: ApprovalMode) -> String {
+    format!("approval: {mode}")
+}
+
 /// The `/session` reply: the open session's id and file, or the
 /// word that none is open yet.
 pub(crate) fn session_note(session: Option<(&str, &std::path::Path)>) -> String {
@@ -89,6 +101,8 @@ pub(crate) enum Effect {
     SetModel(String),
     /// Set the reasoning effort for the turns that follow.
     SetEffort(Effort),
+    /// Set the approval mode for the turns that follow.
+    SetApproval(ApprovalMode),
 }
 
 /// A line is a command only when its first token after `/` is a bare
@@ -103,9 +117,9 @@ pub(crate) fn slash_command(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Turn one command line into its effect. `None` means the line is
-/// not a command and goes to the model. `current_model` and
-/// `current_effort` fill the bare `/model` and `/effort` replies.
-pub(crate) fn dispatch(line: &str, current_model: &str, current_effort: Effort) -> Option<Effect> {
+/// not a command and goes to the model. `current` fills the bare
+/// `/model`, `/effort`, and `/approval` replies.
+pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> {
     let (name, args) = slash_command(line)?;
     let effect = match name {
         "exit" | "quit" => Effect::Exit,
@@ -117,7 +131,7 @@ pub(crate) fn dispatch(line: &str, current_model: &str, current_effort: Effort) 
             // must not build a vector of itself.
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(model_note(current_model)),
+                (None, _) => Effect::Note(model_note(&current.model)),
                 (Some(model), None) => Effect::SetModel(model.to_string()),
                 _ => Effect::Note("usage: /model [name]".to_string()),
             }
@@ -125,12 +139,23 @@ pub(crate) fn dispatch(line: &str, current_model: &str, current_effort: Effort) 
         "effort" => {
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(effort_note(current_effort)),
+                (None, _) => Effect::Note(effort_note(current.effort)),
                 (Some(level), None) => match level.parse() {
                     Ok(effort) => Effect::SetEffort(effort),
                     Err(_) => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
                 },
                 _ => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
+            }
+        }
+        "approval" => {
+            let mut tokens = args.split_whitespace();
+            match (tokens.next(), tokens.next()) {
+                (None, _) => Effect::Note(approval_note(current.approval)),
+                (Some(mode), None) => match mode.parse() {
+                    Ok(mode) => Effect::SetApproval(mode),
+                    Err(_) => Effect::Note(format!("usage: /approval [{}]", ApprovalMode::NAMES)),
+                },
+                _ => Effect::Note(format!("usage: /approval [{}]", ApprovalMode::NAMES)),
             }
         }
         other => Effect::Note(unknown_command(other)),
@@ -151,7 +176,8 @@ fn help_text() -> String {
     }
     out.push_str(
         "\napproval keys: y runs the call, a grants it for the session \
-         (a command grant covers only that exact call), n declines",
+         (a command grant covers only that exact call), n declines\
+         \nShift-Tab cycles the approval mode in the full-screen interface",
     );
     out
 }
@@ -163,6 +189,14 @@ fn unknown_command(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn settings(model: &str, effort: Effort, approval: ApprovalMode) -> SessionSettings {
+        SessionSettings {
+            model: model.to_string(),
+            effort,
+            approval,
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -178,65 +212,126 @@ mod tests {
     #[test]
     fn the_registry_dispatches_every_command() {
         assert!(matches!(
-            dispatch("/exit", "m", Effort::Medium),
+            dispatch("/exit", &settings("m", Effort::Medium, ApprovalMode::Ask)),
             Some(Effect::Exit)
         ));
         assert!(matches!(
-            dispatch("/quit", "m", Effort::Medium),
+            dispatch("/quit", &settings("m", Effort::Medium, ApprovalMode::Ask)),
             Some(Effect::Exit)
         ));
         assert!(matches!(
-            dispatch("/new", "m", Effort::Medium),
+            dispatch("/new", &settings("m", Effort::Medium, ApprovalMode::Ask)),
             Some(Effect::NewSession)
         ));
         assert!(matches!(
-            dispatch("/session", "m", Effort::Medium),
+            dispatch(
+                "/session",
+                &settings("m", Effort::Medium, ApprovalMode::Ask)
+            ),
             Some(Effect::Session)
         ));
-        assert!(dispatch("not a command", "m", Effort::Medium).is_none());
+        assert!(
+            dispatch(
+                "not a command",
+                &settings("m", Effort::Medium, ApprovalMode::Ask)
+            )
+            .is_none()
+        );
 
-        let Some(Effect::SetModel(model)) = dispatch("/model gpt-x", "m", Effort::Medium) else {
+        let Some(Effect::SetModel(model)) = dispatch(
+            "/model gpt-x",
+            &settings("m", Effort::Medium, ApprovalMode::Ask),
+        ) else {
             panic!("expected a model switch");
         };
         assert_eq!(model, "gpt-x");
 
-        let Some(Effect::SetEffort(effort)) = dispatch("/effort high", "m", Effort::Medium) else {
+        let Some(Effect::SetEffort(effort)) = dispatch(
+            "/effort high",
+            &settings("m", Effort::Medium, ApprovalMode::Ask),
+        ) else {
             panic!("expected an effort change");
         };
         assert_eq!(effort, Effort::High);
-        let Some(Effect::Note(note)) = dispatch("/effort", "m", Effort::Low) else {
+        let Some(Effect::Note(note)) =
+            dispatch("/effort", &settings("m", Effort::Low, ApprovalMode::Ask))
+        else {
             panic!("expected the current effort");
         };
         assert_eq!(note, "effort: low");
-        let Some(Effect::SetEffort(effort)) = dispatch("/effort xhigh", "m", Effort::Low) else {
+        let Some(Effect::SetEffort(effort)) = dispatch(
+            "/effort xhigh",
+            &settings("m", Effort::Low, ApprovalMode::Ask),
+        ) else {
             panic!("expected an effort change");
         };
         assert_eq!(effort, Effort::XHigh);
-        let Some(Effect::Note(note)) = dispatch("/effort extreme", "m", Effort::Low) else {
+        let Some(Effect::Note(note)) = dispatch(
+            "/effort extreme",
+            &settings("m", Effort::Low, ApprovalMode::Ask),
+        ) else {
             panic!("expected usage");
         };
         assert!(note.starts_with("usage: /effort"));
-        let Some(Effect::Note(note)) = dispatch("/model", "current-model", Effort::Medium) else {
+        let Some(Effect::Note(note)) = dispatch(
+            "/model",
+            &settings("current-model", Effort::Medium, ApprovalMode::Ask),
+        ) else {
             panic!("expected the current model");
         };
         assert_eq!(note, "model: current-model");
 
-        let Some(Effect::Note(note)) = dispatch("/model a b", "m", Effort::Medium) else {
+        let Some(Effect::Note(note)) = dispatch(
+            "/model a b",
+            &settings("m", Effort::Medium, ApprovalMode::Ask),
+        ) else {
             panic!("expected the usage line");
         };
         assert!(note.starts_with("usage:"));
     }
 
     #[test]
+    fn approval_shows_sets_and_rejects_a_stranger() {
+        let Some(Effect::Note(note)) =
+            dispatch("/approval", &settings("m", Effort::Low, ApprovalMode::Auto))
+        else {
+            panic!("bare /approval is a note");
+        };
+        assert_eq!(note, "approval: auto");
+        let Some(Effect::SetApproval(mode)) = dispatch(
+            "/approval read-only",
+            &settings("m", Effort::Low, ApprovalMode::Ask),
+        ) else {
+            panic!("/approval read-only sets the mode");
+        };
+        assert_eq!(mode, ApprovalMode::ReadOnly);
+        for line in ["/approval Auto", "/approval ask now"] {
+            let Some(Effect::Note(note)) =
+                dispatch(line, &settings("m", Effort::Low, ApprovalMode::Ask))
+            else {
+                panic!("{line} is a usage note");
+            };
+            assert!(
+                note.starts_with("usage: /approval") && note.contains(ApprovalMode::NAMES),
+                "{note}"
+            );
+        }
+    }
+
+    #[test]
     fn help_names_every_command_and_unknown_points_to_it() {
-        let Some(Effect::Note(help)) = dispatch("/help", "m", Effort::Medium) else {
+        let Some(Effect::Note(help)) =
+            dispatch("/help", &settings("m", Effort::Medium, ApprovalMode::Ask))
+        else {
             panic!("expected the help text");
         };
         for command in COMMANDS {
             assert!(help.contains(command.usage), "missing {}", command.usage);
         }
 
-        let Some(Effect::Note(note)) = dispatch("/nope", "m", Effort::Medium) else {
+        let Some(Effect::Note(note)) =
+            dispatch("/nope", &settings("m", Effort::Medium, ApprovalMode::Ask))
+        else {
             panic!("expected the unknown reply");
         };
         assert!(note.contains("/help"));
@@ -249,7 +344,8 @@ mod tests {
         // "unknown command".
         for command in COMMANDS {
             let line = command.usage.split_whitespace().next().unwrap();
-            let effect = dispatch(line, "m", Effort::Medium).expect("a table row must parse");
+            let effect = dispatch(line, &settings("m", Effort::Medium, ApprovalMode::Ask))
+                .expect("a table row must parse");
             if let Effect::Note(note) = &effect {
                 assert_ne!(
                     note,

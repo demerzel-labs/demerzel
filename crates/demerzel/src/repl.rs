@@ -21,9 +21,11 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
+use crate::commands::{
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
+};
 use crate::preview::{ask_preview, run_preview};
-use crate::{READY_MARKER, RunConfig, RunError, Runtime};
+use crate::{READY_MARKER, RunConfig, RunError, Runtime, SessionSettings};
 
 /// Byte cap for one history entry. A pasted document must not grow
 /// the history file and slow every later boot.
@@ -367,7 +369,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
-    let mode = crate::mode_name(runtime.config().approval);
+    let mode = runtime.config().approval;
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
     eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
@@ -375,9 +377,9 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // Every session opens on the first submitted prompt — `-c` too —
     // so an idle boot reads and writes no session file.
     let mut engine: Option<Engine<'_>> = None;
-    // The interface owns the session model: `/model` switches it.
-    let mut model = runtime.config().model.clone();
-    let mut effort = runtime.config().effort;
+    // The interface owns the session settings: `/model`, `/effort`,
+    // and `/approval` switch them.
+    let mut settings = SessionSettings::from_config(runtime.config());
     // `/new` turns the next open into a fresh session, `-c` or not.
     let mut resume = runtime.config().continue_last;
     loop {
@@ -387,7 +389,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                match dispatch(line, &model, effort) {
+                match dispatch(line, &settings) {
                     Some(Effect::Exit) => break,
                     Some(Effect::Note(note)) => {
                         eprintln!("{note}");
@@ -413,8 +415,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             eprintln!("demerzel: {error}");
                             continue;
                         }
-                        model = name;
-                        eprintln!("{}", model_note(&model));
+                        settings.model = name;
+                        eprintln!("{}", model_note(&settings.model));
                         continue;
                     }
                     Some(Effect::SetEffort(level)) => {
@@ -424,14 +426,25 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             eprintln!("demerzel: {error}");
                             continue;
                         }
-                        effort = level;
-                        eprintln!("{}", effort_note(effort));
+                        settings.effort = level;
+                        eprintln!("{}", effort_note(settings.effort));
+                        continue;
+                    }
+                    Some(Effect::SetApproval(mode)) => {
+                        if let Some(engine) = engine.as_mut()
+                            && let Err(error) = engine.set_approval(mode, runtime.tools(mode))
+                        {
+                            eprintln!("demerzel: {error}");
+                            continue;
+                        }
+                        settings.approval = mode;
+                        eprintln!("{}", approval_note(settings.approval));
                         continue;
                     }
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session(resume, &model, effort)?;
+                    let (session, history) = runtime.open_session(resume, &settings)?;
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
@@ -439,7 +452,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             history.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, history, &model, effort));
+                    engine = Some(runtime.engine(session, history, &settings));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(engine, line.to_string(), &reader, &mut sigint).await;

@@ -9,7 +9,7 @@ use demerzel_core::{ApprovalMode, SessionStore};
 use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP};
 use demerzel_providers::{anthropic, openai_codex};
 
-use crate::config::{self, Flags, Layer, Locations, Origin, mode_name};
+use crate::config::{self, Flags, Layer, Locations, Origin};
 
 /// Run the checks and print the report to stdout. Returns the process
 /// exit code: 0 when every check passes, 1 otherwise.
@@ -49,7 +49,7 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
     )?;
     print_setting(out, "model", &settings.model.value, settings.model.origin)?;
     let approval = match settings.approval.value {
-        Some(mode) => mode_name(mode).to_string(),
+        Some(mode) => mode.to_string(),
         None => "ask in the REPL, read-only for one-shot".to_string(),
     };
     print_setting(out, "approval", &approval, settings.approval.origin)?;

@@ -19,6 +19,8 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
 use crate::editor::{CommandSpec, Editor, displayed};
+use demerzel_core::ApprovalMode;
+
 use crate::events::StatusPatch;
 use crate::markdown::Face;
 use crate::select;
@@ -55,7 +57,7 @@ const FRAME_INSET: u16 = 1;
 /// segment.
 pub(crate) struct Status {
     pub model: String,
-    pub mode: String,
+    pub mode: ApprovalMode,
     /// The effort's name; empty shows no segment.
     pub effort: String,
     /// The project directory's name; empty shows no segment.
@@ -89,6 +91,9 @@ impl Status {
     pub(crate) fn apply(&mut self, patch: StatusPatch) {
         if let Some(model) = patch.model {
             self.model = model;
+        }
+        if let Some(mode) = patch.mode {
+            self.mode = mode;
         }
         if let Some(effort) = patch.effort {
             self.effort = effort;
@@ -865,7 +870,7 @@ mod tests {
     fn status() -> Status {
         Status {
             model: "test-model".into(),
-            mode: "ask".into(),
+            mode: ApprovalMode::Ask,
             effort: "high".into(),
             project: String::new(),
             branch: String::new(),

@@ -68,7 +68,11 @@ const TICK: Duration = Duration::from_millis(100);
 /// What a handled key asks the loop to do.
 enum Action {
     None,
+    /// A typed line: it joins the history and echoes as a prompt.
     Submit(String),
+    /// A line a key stands for — Shift-Tab's `/approval` — for the
+    /// driver alone: no history entry, no echo.
+    Command(String),
     Exit,
     AbortTurn,
 }
@@ -131,12 +135,9 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         let Some(line) = app.next_submission().await? else {
             return Ok(());
         };
-        app.history.record(&line);
-        app.transcript
-            .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
-        app.dirty = true;
         // A command can send display events before it returns its
-        // note — a model or effort switch moves the status — so the
+        // note — a model, effort, or approval switch moves the
+        // status — so the
         // queue drains first and the note's frame shows both.
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
@@ -278,7 +279,14 @@ impl App {
             match action {
                 Action::None | Action::AbortTurn => {}
                 Action::Exit => return Ok(None),
-                Action::Submit(line) => return Ok(Some(line)),
+                Action::Submit(line) => {
+                    self.history.record(&line);
+                    self.transcript
+                        .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
+                    self.dirty = true;
+                    return Ok(Some(line));
+                }
+                Action::Command(line) => return Ok(Some(line)),
             }
         }
     }
@@ -636,6 +644,13 @@ impl App {
         }
         match key.code {
             KeyCode::Char('c') if ctrl => return self.ctrl_c(phase),
+            // Shift-Tab cycles the approval mode between turns; the
+            // popup owns the key while it is open (above). The note
+            // lands at the bottom; show it.
+            KeyCode::BackTab if phase == Phase::Idle => {
+                self.transcript.follow();
+                return Action::Command(format!("/approval {}", self.status.mode.next()));
+            }
             KeyCode::Char('d') if ctrl => {
                 if !self.editor.is_empty() {
                     self.editor.delete();

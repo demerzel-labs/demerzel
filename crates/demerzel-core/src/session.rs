@@ -44,9 +44,10 @@ use crate::provider::Effort;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The metadata record that opens every session file. A resume, a
-/// model switch, and an effort switch append a fresh one, so the last
-/// meta record describes the current run.
+/// model switch, an effort switch, and an approval switch append a
+/// fresh one, so the last meta record describes the current run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SessionMeta {
     pub schema: u32,
     /// Project directory the session ran in.
@@ -60,6 +61,10 @@ pub struct SessionMeta {
     /// a level it does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The approval mode in force, by its name; absent in a file from
+    /// before the field, and readers keep such a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
     /// RFC 3339 creation time.
     pub created: String,
 }
@@ -67,7 +72,13 @@ pub struct SessionMeta {
 impl SessionMeta {
     /// Metadata for a run starting now. The stored `cwd` is canonical,
     /// so one project has one spelling across resumes.
-    pub fn now(cwd: &Path, provider: &str, model: &str, effort: Option<Effort>) -> Self {
+    pub fn now(
+        cwd: &Path,
+        provider: &str,
+        model: &str,
+        effort: Option<Effort>,
+        approval: ApprovalMode,
+    ) -> Self {
         let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         Self {
             schema: SCHEMA_VERSION,
@@ -75,6 +86,7 @@ impl SessionMeta {
             provider: provider.to_string(),
             model: model.to_string(),
             effort: effort.map(|effort| effort.as_str().to_string()),
+            approval: Some(approval.as_str().to_string()),
             created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         }
     }
@@ -200,6 +212,7 @@ impl SessionStore {
         provider: &str,
         model: &str,
         effort: Option<Effort>,
+        approval: ApprovalMode,
     ) -> io::Result<Session> {
         let dir = self.sessions_dir(project);
         std::fs::create_dir_all(&dir)?;
@@ -223,7 +236,9 @@ impl SessionStore {
             cwd: project.to_path_buf(),
             buf: Vec::new(),
         };
-        session.append_meta(&SessionMeta::now(project, provider, model, effort))?;
+        session.append_meta(&SessionMeta::now(
+            project, provider, model, effort, approval,
+        ))?;
         Ok(session)
     }
 
@@ -597,7 +612,13 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
 
         let mut session = store
-            .create(&project, "openai-codex", "gpt-test", None)
+            .create(
+                &project,
+                "openai-codex",
+                "gpt-test",
+                None,
+                ApprovalMode::Ask,
+            )
             .unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
@@ -619,6 +640,7 @@ mod tests {
         assert_eq!(meta.schema, SCHEMA_VERSION);
         assert_eq!(meta.provider, "openai-codex");
         assert_eq!(meta.model, "gpt-test");
+        assert_eq!(meta.approval.as_deref(), Some("ask"));
         assert_eq!(replay.messages.len(), 2);
         assert_eq!(replay.messages[0], text_message(Role::User, "hi"));
     }
@@ -670,7 +692,9 @@ mod tests {
         // The borrowed append path serializes the identical shape.
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
+        let mut session = store
+            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         session
             .append_approval(
                 "bash",
@@ -691,7 +715,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let mut session = store.create(&project, "p", "m", None).unwrap();
+        let mut session = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "one"))
             .unwrap();
@@ -711,7 +737,9 @@ mod tests {
     fn a_torn_final_line_is_dropped_and_truncated_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
+        let mut session = store
+            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
             .unwrap();
@@ -742,7 +770,9 @@ mod tests {
     fn a_torn_tail_longer_than_one_scan_block_is_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
+        let mut session = store
+            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
             .unwrap();
@@ -770,9 +800,17 @@ mod tests {
     fn append_matches_the_owned_record_serialization_for_every_variant() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
-        let mut session = store.create(dir.path(), "p", "m", None).unwrap();
+        let mut session = store
+            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         let records = [
-            SessionRecord::Meta(SessionMeta::now(dir.path(), "p2", "m2", None)),
+            SessionRecord::Meta(SessionMeta::now(
+                dir.path(),
+                "p2",
+                "m2",
+                None,
+                ApprovalMode::Ask,
+            )),
             SessionRecord::Message(text_message(Role::Assistant, "hi")),
             SessionRecord::Approval {
                 tool: "bash".into(),
@@ -813,7 +851,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let mut session = store.create(&project, "p", "m", None).unwrap();
+        let mut session = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
             .unwrap();
@@ -866,8 +906,12 @@ mod tests {
         let project = dir.path().to_path_buf();
         assert!(store.latest(&project).unwrap().is_none());
 
-        let first = store.create(&project, "p", "m", None).unwrap();
-        let second = store.create(&project, "p", "m", None).unwrap();
+        let first = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
+        let second = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         let latest = store.latest(&project).unwrap().unwrap();
         assert_eq!(latest, second.path());
         assert_ne!(first.path(), second.path());
@@ -878,7 +922,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
-        let session = store.create(&project, "p", "m", None).unwrap();
+        let session = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
         let path = session.path().to_path_buf();
         drop(session);
 

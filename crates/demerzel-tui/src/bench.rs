@@ -6,6 +6,8 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use demerzel_core::ApprovalMode;
+
 use crate::editor::Editor;
 use crate::render::{self, Status, View};
 use crate::theme::{Depth, Palette, Theme};
@@ -32,7 +34,7 @@ impl Screen {
             editor: Editor::new(Vec::new()),
             status: Status {
                 model: "bench-model".into(),
-                mode: "auto".into(),
+                mode: ApprovalMode::Auto,
                 effort: "high".into(),
                 project: "bench".into(),
                 branch: "main".into(),

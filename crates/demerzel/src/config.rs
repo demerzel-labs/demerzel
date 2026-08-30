@@ -339,14 +339,7 @@ fn expect_string(key: &str, value: toml::Value) -> Result<String, String> {
 }
 
 fn parse_approval(text: &str) -> Result<ApprovalMode, String> {
-    match text {
-        "read-only" => Ok(ApprovalMode::ReadOnly),
-        "ask" => Ok(ApprovalMode::Ask),
-        "auto" => Ok(ApprovalMode::Auto),
-        other => Err(format!(
-            "`approval` must be `read-only`, `ask`, or `auto`, not `{other}`"
-        )),
-    }
+    text.parse().map_err(|error| format!("`approval` {error}"))
 }
 
 /// A config file the run cannot use.
@@ -507,7 +500,7 @@ pub fn resolve(
                 warnings.push(format!(
                     "ignored: the project file sets approval = {}; a project file \
                      cannot raise the approval mode; use a flag or the user file",
-                    mode_name(setting.value)
+                    setting.value
                 ));
             }
             None
@@ -676,15 +669,6 @@ fn rank(mode: ApprovalMode) -> u8 {
         ApprovalMode::ReadOnly => 0,
         ApprovalMode::Ask => 1,
         ApprovalMode::Auto => 2,
-    }
-}
-
-/// The config spelling of an approval mode.
-pub fn mode_name(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
     }
 }
 
