@@ -387,28 +387,25 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.completed" => {
             state.terminal = true;
-            let usage = &value["response"]["usage"];
             let stop = if state.saw_tool_call {
                 StopReason::ToolUse
             } else {
                 StopReason::EndTurn
             };
             vec![
-                Ok(StreamEvent::Usage(Usage {
-                    input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
-                    output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                    cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
-                        .as_u64()
-                        .unwrap_or(0),
-                    // The endpoint reports no cache-write count.
-                    cache_creation_tokens: 0,
-                })),
+                Ok(StreamEvent::Usage(usage_from(&value["response"]["usage"]))),
                 Ok(StreamEvent::Done(stop)),
             ]
         }
         "response.incomplete" => {
             state.terminal = true;
-            vec![Ok(StreamEvent::Done(StopReason::MaxTokens))]
+            // An incomplete response carries a usage block too; the
+            // call at a token limit is the one whose context reading
+            // matters most.
+            vec![
+                Ok(StreamEvent::Usage(usage_from(&value["response"]["usage"]))),
+                Ok(StreamEvent::Done(StopReason::MaxTokens)),
+            ]
         }
         "response.failed" => {
             state.terminal = true;
@@ -422,6 +419,21 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             vec![Err(failure)]
         }
         _ => Vec::new(),
+    }
+}
+
+/// The neutral usage for a response's `usage` block. The wire
+/// `input_tokens` already includes the cached prompt parts;
+/// `cached_tokens` is the subset detail. The endpoint reports no
+/// cache-write count.
+fn usage_from(usage: &Value) -> Usage {
+    Usage {
+        input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        cache_creation_tokens: 0,
     }
 }
 

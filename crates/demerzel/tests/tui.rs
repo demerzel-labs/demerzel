@@ -99,6 +99,13 @@ fn completed_with_input(input_tokens: u64) -> Value {
     })
 }
 
+fn incomplete_with_input(input_tokens: u64) -> Value {
+    json!({
+        "type": "response.incomplete",
+        "response": {"usage": {"input_tokens": input_tokens, "output_tokens": 5}},
+    })
+}
+
 fn text_turn(text: &str) -> MockResponse {
     MockResponse::stream(vec![text_delta(text), completed()])
 }
@@ -1307,13 +1314,14 @@ async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
 
 /// The context on the status: the last call's input tokens and the
 /// share of the model's window from the provider catalog. The next
-/// call replaces the count; a new session clears it.
+/// call replaces the count, a token-limited call included; a new
+/// session clears it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_status_counts_the_context_and_its_share_of_the_window() {
     let mock = MockServer::start(
         vec![
             MockResponse::stream(vec![text_delta("first"), completed_with_input(46_240)]),
-            MockResponse::stream(vec![text_delta("second"), completed_with_input(101_003)]),
+            MockResponse::stream(vec![text_delta("second"), incomplete_with_input(101_003)]),
         ],
         Vec::new(),
     )
@@ -1326,10 +1334,12 @@ async fn the_status_counts_the_context_and_its_share_of_the_window() {
     pty.wait_for("first");
     pty.wait_for("context 46.2k · 17% ─");
     // The context is one prompt, not a sum: the next call replaces
-    // the count.
+    // the count — a call the endpoint cut at a token limit included,
+    // where a stale reading misleads most.
     pty.send(b"two\r");
     pty.wait_for("second");
     pty.wait_for("101003 in");
+    pty.wait_for("hit a token limit");
     // A resize repaints the edge in full: the incremental redraw
     // sends changed cells alone.
     pty.resize(100, 29);
@@ -1342,7 +1352,9 @@ async fn the_status_counts_the_context_and_its_share_of_the_window() {
     pty.wait_for("fresh session");
     pty.resize(100, 30);
     pty.send(b"x");
-    pty.absent_until("context", "0 in · 0 out · 0 cached ─");
+    // `─ context` is the segment; the token-limit notice on the
+    // repainted transcript says "context window" and must not match.
+    pty.absent_until("─ context", "0 in · 0 out · 0 cached ─");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();

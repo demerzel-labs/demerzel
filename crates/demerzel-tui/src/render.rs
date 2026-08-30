@@ -397,16 +397,18 @@ fn compact_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
-    let (whole, unit) = if tokens < 1_000_000 {
-        (tokens as f64 / 1_000.0, "k")
+    // Integer tenths: a float conversion rounds the top of the u64
+    // range up, against the floor rule.
+    let (tenths, unit) = if tokens < 1_000_000 {
+        (tokens / 100, "k")
     } else {
-        (tokens as f64 / 1_000_000.0, "M")
+        (tokens / 100_000, "M")
     };
-    let tenths = (whole * 10.0).floor() / 10.0;
-    if tenths == tenths.trunc() {
-        format!("{}{unit}", tenths.trunc() as u64)
+    let (whole, tenth) = (tenths / 10, tenths % 10);
+    if tenth == 0 {
+        format!("{whole}{unit}")
     } else {
-        format!("{tenths:.1}{unit}")
+        format!("{whole}.{tenth}{unit}")
     }
 }
 
@@ -2359,6 +2361,8 @@ line 12",
             (1_000_000, "1M"),
             (1_150_000, "1.1M"),
             (2_599_999, "2.5M"),
+            (9_999_999_999_999_999, "9999999999.9M"),
+            (u64::MAX, "18446744073709.5M"),
         ] {
             assert_eq!(compact_count(tokens), text, "{tokens}");
         }
