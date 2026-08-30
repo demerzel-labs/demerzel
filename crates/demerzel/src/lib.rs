@@ -81,6 +81,8 @@ pub struct RunConfig {
     pub base_url: Option<String>,
     /// The reasoning effort every request carries.
     pub effort: Effort,
+    /// Model calls one user turn may make before the loop stops.
+    pub max_model_calls: u32,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
     /// Input-history file for the REPL; `None` keeps history in
@@ -111,6 +113,7 @@ impl RunConfig {
             data_root: None,
             base_url: None,
             effort: config::DEFAULT_EFFORT,
+            max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
             auth: None,
             history_path: None,
             mouse: config::DEFAULT_MOUSE,
@@ -162,8 +165,11 @@ impl Runtime {
 
         let provider = Self::build_provider(&config)?;
 
+        let mut engine_config = EngineConfig::new(config.model.clone());
+        engine_config.max_model_calls = config.max_model_calls;
+
         Ok(Self {
-            engine_config: EngineConfig::new(config.model.clone()),
+            engine_config,
             config,
             provider,
             registry,

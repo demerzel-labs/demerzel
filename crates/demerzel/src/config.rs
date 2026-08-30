@@ -28,6 +28,10 @@ pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID
 /// The reasoning effort when nothing sets one. High: the Messages
 /// API's own default, and the level a coding agent wants.
 pub const DEFAULT_EFFORT: Effort = Effort::High;
+
+/// Model calls one user turn may make before the engine stops the
+/// loop: the engine's own default, so the two cannot drift.
+pub const DEFAULT_MAX_MODEL_CALLS: u32 = demerzel_core::DEFAULT_MAX_MODEL_CALLS;
 /// Mouse capture in the full-screen interface when nothing sets it.
 /// On: the wheel scrolls and a drag selects in the interface; off,
 /// terminals turn the wheel into arrow keys on the alternate screen.
@@ -78,6 +82,7 @@ impl<T> Setting<T> {
 
 /// The resolved configuration for one run.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Settings {
     pub provider: Setting<String>,
     pub model: Setting<String>,
@@ -87,6 +92,8 @@ pub struct Settings {
     pub approval: Setting<Option<ApprovalMode>>,
     /// The reasoning effort every request carries.
     pub effort: Setting<Effort>,
+    /// Model calls one user turn may make before the loop stops.
+    pub max_model_calls: Setting<u32>,
     pub history_file: Setting<bool>,
     /// The `[tui]` table.
     pub tui: TuiSettings,
@@ -94,6 +101,7 @@ pub struct Settings {
 
 /// The resolved `[tui]` keys.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TuiSettings {
     /// Mouse capture in the full-screen interface, for wheel scroll.
     pub mouse: Setting<bool>,
@@ -157,6 +165,7 @@ pub struct Layer {
     model: Option<String>,
     approval: Option<ApprovalMode>,
     effort: Option<Effort>,
+    max_model_calls: Option<u32>,
     history_file: Option<bool>,
     providers: BTreeMap<String, ProviderKeys>,
     tui: TuiKeys,
@@ -183,6 +192,9 @@ impl Layer {
                 "provider" => layer.provider = Some(expect_string(&key, value)?),
                 "model" => layer.model = Some(expect_string(&key, value)?),
                 "effort" => layer.effort = Some(expect_effort(&key, value)?),
+                "max_model_calls" => {
+                    layer.max_model_calls = Some(expect_positive_u32(&key, value)?);
+                }
                 "approval" => {
                     layer.approval = Some(parse_approval(&expect_string(&key, value)?)?);
                 }
@@ -303,6 +315,23 @@ fn parse_themes(
         into.insert(name, keys);
     }
     Ok(())
+}
+
+/// A model-call count: a positive integer that fits `u32`. Zero
+/// would stop every turn before its first call.
+fn expect_positive_u32(key: &str, value: toml::Value) -> Result<u32, String> {
+    match value {
+        toml::Value::Integer(count) if count >= 1 && count <= i64::from(u32::MAX) => {
+            Ok(count as u32)
+        }
+        toml::Value::Integer(count) => Err(format!(
+            "`{key}` must be a positive integer that fits 32 bits, not {count}"
+        )),
+        other => Err(format!(
+            "`{key}` must be an integer, not {}",
+            other.type_str()
+        )),
+    }
 }
 
 fn expect_effort(key: &str, value: toml::Value) -> Result<Effort, String> {
@@ -564,6 +593,28 @@ pub fn resolve(
         .or(user_effort)
         .unwrap_or_else(|| Setting::new(DEFAULT_EFFORT, Origin::Default));
 
+    // Trust rule: the project file can lower the call limit, never
+    // raise it above the user file's value or the default: the limit
+    // caps spend, and a project file travels with the repository.
+    let user_calls = layer_key(user, Origin::User, |l| l.max_model_calls);
+    let calls_baseline = user_calls
+        .as_ref()
+        .map_or(DEFAULT_MAX_MODEL_CALLS, |setting| setting.value);
+    let project_calls = match layer_key(project, Origin::Project, |l| l.max_model_calls) {
+        Some(setting) if setting.value > calls_baseline => {
+            warnings.push(format!(
+                "ignored: the project file sets max_model_calls = {}; a project \
+                 file cannot raise the call limit; use the user file",
+                setting.value
+            ));
+            None
+        }
+        other => other,
+    };
+    let max_model_calls = project_calls
+        .or(user_calls)
+        .unwrap_or_else(|| Setting::new(DEFAULT_MAX_MODEL_CALLS, Origin::Default));
+
     // Trust rule: the project file can turn the history file off,
     // never on against a user who turned it off.
     let user_history = layer_key(user, Origin::User, |l| l.history_file);
@@ -620,6 +671,7 @@ pub fn resolve(
             base_url,
             approval,
             effort,
+            max_model_calls,
             history_file,
             tui: TuiSettings {
                 mouse,
@@ -923,6 +975,47 @@ mod tests {
                 docs.contains(&format!("`{name}`")),
                 "config.md lacks {name}"
             );
+        }
+    }
+
+    #[test]
+    fn max_model_calls_resolves_and_the_project_file_cannot_raise_it() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.max_model_calls.value, DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(settings.max_model_calls.origin, Origin::Default);
+
+        let user = layer("max_model_calls = 256");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.max_model_calls.value, 256);
+        assert_eq!(settings.max_model_calls.origin, Origin::User);
+
+        // The project file lowers, never raises.
+        let project = layer("max_model_calls = 16");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.max_model_calls.value, 16);
+        assert_eq!(settings.max_model_calls.origin, Origin::Project);
+        let project = layer("max_model_calls = 512");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.max_model_calls.value, 256);
+        assert_eq!(settings.max_model_calls.origin, Origin::User);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("max_model_calls"));
+
+        // A cloned repository on a machine with no user file cannot
+        // raise the limit above the default.
+        let project = layer("max_model_calls = 4096");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), None);
+        assert_eq!(settings.max_model_calls.value, DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(settings.max_model_calls.origin, Origin::Default);
+        assert_eq!(warnings.len(), 1);
+
+        // Zero, a negative count, and a non-integer are errors.
+        for bad in [
+            "max_model_calls = 0",
+            "max_model_calls = -3",
+            "max_model_calls = \"many\"",
+        ] {
+            assert!(Layer::parse(bad).is_err(), "{bad}");
         }
     }
 

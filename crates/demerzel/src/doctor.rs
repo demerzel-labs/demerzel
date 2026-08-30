@@ -61,6 +61,12 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
     )?;
     print_setting(
         out,
+        "max_model_calls",
+        &settings.max_model_calls.value.to_string(),
+        settings.max_model_calls.origin,
+    )?;
+    print_setting(
+        out,
         "history_file",
         on_off(settings.history_file.value),
         settings.history_file.origin,

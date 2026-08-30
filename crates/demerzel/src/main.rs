@@ -133,6 +133,7 @@ fn main() {
     }
 
     let prompt = cli.prompt.expect("checked above");
+    let max_model_calls = config.max_model_calls;
     let outcome = runtime.block_on(async {
         let harness = match Runtime::new(config) {
             Ok(harness) => harness,
@@ -164,7 +165,9 @@ fn main() {
             std::process::exit(1);
         }
         Some(Ok(TurnOutcome::CallLimit)) => {
-            eprintln!("demerzel: the turn hit the model-call limit");
+            eprintln!(
+                "demerzel: the turn hit the model-call limit ({max_model_calls} model calls)"
+            );
             std::process::exit(1);
         }
         Some(Ok(TurnOutcome::Refused)) => {
@@ -297,6 +300,7 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.model = settings.model.value;
     config.base_url = settings.base_url.value;
     config.effort = settings.effort.value;
+    config.max_model_calls = settings.max_model_calls.value;
     config.continue_last = cli.continue_last;
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;

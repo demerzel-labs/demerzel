@@ -229,9 +229,10 @@ impl Driver for TuiDriver<'_> {
                 Ok(TurnOutcome::MaxTokens) => events.error(
                     "demerzel: the model hit a token limit — the output cap or the context window",
                 ),
-                Ok(TurnOutcome::CallLimit) => {
-                    events.error("demerzel: the turn hit the model-call limit")
-                }
+                Ok(TurnOutcome::CallLimit) => events.error(format!(
+                    "demerzel: the turn hit the model-call limit ({} model calls)",
+                    self.runtime.config().max_model_calls
+                )),
                 Ok(TurnOutcome::Refused) => events.error("demerzel: the model refused the request"),
                 Ok(_) => {}
                 Err(error) => events.error(format!("demerzel: {error}")),

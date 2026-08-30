@@ -155,6 +155,7 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("tui.markdown = on (default)"), "{out}");
     assert!(out.contains("tui.theme = terminal (default)"), "{out}");
     assert!(out.contains("effort = high (default)"), "{out}");
+    assert!(out.contains("max_model_calls = 128 (default)"), "{out}");
 
     bed.write_user_config(
         "model = \"user-model\"\nhistory_file = false\neffort = \"low\"\n\

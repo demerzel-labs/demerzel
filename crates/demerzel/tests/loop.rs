@@ -137,6 +137,28 @@ fn auth_store(data_dir: &Path) -> AuthStore {
     AuthStore::open(path, None).unwrap()
 }
 
+#[tokio::test]
+async fn the_configured_call_limit_reaches_the_engine() {
+    let bed = Bed::start(vec![tool_turn(0, "read", json!({"path": "a.txt"}))]).await;
+    bed.write_file("a.txt", "alpha\n");
+    let mut config = RunConfig::new(bed.project.path().to_path_buf());
+    config.model = "test-model".into();
+    config.data_root = Some(bed.data.path().to_path_buf());
+    config.base_url = Some(bed.mock.url());
+    config.auth = Some(AuthPaths {
+        store: auth_path(bed.data.path()),
+        codex_cli: None,
+    });
+    config.max_model_calls = 1;
+
+    let outcome = run_one_shot(&config, "go".into(), &noop).await.unwrap();
+
+    // The key crossed both wiring hops: one model call ran, and the
+    // second — the tool round's follow-up — was stopped by the limit.
+    assert_eq!(outcome, TurnOutcome::CallLimit);
+    assert_eq!(bed.mock.received().len(), 1);
+}
+
 fn auth_path(data_dir: &Path) -> PathBuf {
     data_dir.join("auth.json")
 }
