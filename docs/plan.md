@@ -152,7 +152,7 @@ not go stale when a model or a vendor ships:
   id an adapter carries is its default. One narrow exception, from
   M2.5 step 8e: an adapter carries a static table of known model ids
   and their context windows. A window is a budget number, not a
-  capability. An unknown id degrades to a count with no share, and
+  capability. An unknown id shows the count with no share, and
   the `context_window` config key overrides a stale row.
 - `openai-compat` lands in M3, first step, not post-M5. Until it
   lands, the harness is neutral in shape but has two doors; after it,

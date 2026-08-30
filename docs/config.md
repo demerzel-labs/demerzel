@@ -135,9 +135,10 @@ When the model's context window is known, the segment adds the
 share: `context 34.2k · 17%`. Each provider adapter has a catalog
 of known models and their windows. The `context_window` key under
 `[providers.<id>]` names the window, in tokens: an integer from 1
-to the 32-bit maximum. A set key wins over the catalog, so a stale
+to the 32-bit maximum. The key wins over the catalog, so a stale
 catalog row has an override. The key applies to every model of its
-provider. A model with no window shows the count alone. A `/model`
+provider. A model with no window shows the count alone. A window
+smaller than the prompt shows a share over 100%. A `/model`
 switch moves the window with the model, with no new call.
 
 ## Thinking blocks

@@ -156,6 +156,7 @@ fn doctor_shows_the_layer_that_set_each_key() {
     assert!(out.contains("tui.theme = terminal (default)"), "{out}");
     assert!(out.contains("effort = high (default)"), "{out}");
     assert!(out.contains("max_model_calls = 128 (default)"), "{out}");
+    assert!(out.contains("context_window = 272000 (default)"), "{out}");
 
     bed.write_user_config(
         "model = \"user-model\"\nhistory_file = false\neffort = \"low\"\n\
@@ -164,6 +165,7 @@ fn doctor_shows_the_layer_that_set_each_key() {
     let (out, _) = bed.doctor(&[]);
     assert!(out.contains("model = user-model (user file)"), "{out}");
     assert!(out.contains("effort = low (user file)"), "{out}");
+    assert!(out.contains("context_window = unknown (default)"), "{out}");
     assert!(out.contains("history_file = off (user file)"), "{out}");
     assert!(out.contains("tui.mouse = off (user file)"), "{out}");
     assert!(out.contains("tui.markdown = off (user file)"), "{out}");

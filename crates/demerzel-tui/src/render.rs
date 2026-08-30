@@ -2386,7 +2386,7 @@ line 12",
     }
 
     #[test]
-    fn the_patch_takes_the_window_and_zero_takes_it_away() {
+    fn the_patch_takes_the_window_and_an_unknown_takes_it_away() {
         let mut status = status();
         let patch = StatusPatch {
             context_window: Some(Some(272_000)),
