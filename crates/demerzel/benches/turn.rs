@@ -100,22 +100,12 @@ impl Bed {
     /// outside the timed span; assert the workload really ran.
     async fn timed_turn(&self, expected_history: usize) -> Duration {
         let config = self.runtime.config();
+        let settings = demerzel::SessionSettings::from_config(config);
         let (session, history) = self
             .runtime
-            .open_session(
-                config.continue_last,
-                &config.model,
-                config.effort,
-                config.approval,
-            )
+            .open_session(config.continue_last, &settings)
             .unwrap();
-        let mut engine = self.runtime.engine(
-            session,
-            history,
-            &config.model,
-            config.effort,
-            config.approval,
-        );
+        let mut engine = self.runtime.engine(session, history, &settings);
         let start = Instant::now();
         let outcome = engine
             .user_turn("bench".into(), &noop, &mut NoPrompt)

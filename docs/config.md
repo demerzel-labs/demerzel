@@ -92,7 +92,7 @@ the full-screen interface cycles the mode: `ask`, `auto`,
 `read-only`, and back. The completion popup owns Shift-Tab while it
 is open. The key does nothing while a turn runs. The full-screen
 interface names the mode on its status. The user makes the switch
-at the keyboard, so the trust rules for a project file do not limit
+at the keyboard. The trust rules for a project file do not limit
 it: the user can set any mode. A switch swaps the tool set:
 
 - `read-only` drops the write and execute tools.

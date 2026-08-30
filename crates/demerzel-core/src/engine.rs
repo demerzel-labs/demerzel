@@ -440,8 +440,12 @@ impl<'a> Engine<'a> {
         ))?;
         self.policy.mode = mode;
         // The same host keeps its snapshot: `ask` and `auto` share
-        // one, so a switch between them rebuilds nothing.
-        if !std::ptr::addr_eq(self.tools, tools) {
+        // one, so a switch between them rebuilds nothing. The
+        // comparison takes the address and the vtable: two zero-sized
+        // hosts share an address, and only the vtable tells them
+        // apart. A vtable duplicated across codegen units fails the
+        // test the safe way — an equal rebuild.
+        if !std::ptr::eq(self.tools, tools) {
             self.tools = tools;
             self.tool_definitions = tools.definitions();
         }

@@ -8,8 +8,7 @@
 use std::path::PathBuf;
 
 use demerzel_core::{
-    ApprovalAnswer, ApprovalMode, Approver, BoxFuture, Effort, Engine, EngineEvent, EventSink,
-    TurnOutcome,
+    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
 };
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, Submission};
 use serde_json::Value;
@@ -19,7 +18,7 @@ use crate::commands::{
 };
 use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
-use crate::{READY_MARKER, RunConfig, RunError, Runtime};
+use crate::{READY_MARKER, RunConfig, RunError, Runtime, SessionSettings};
 
 /// Run the full-screen interface to completion. The caller owns the
 /// tokio runtime.
@@ -61,9 +60,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,
-        model: config.model.clone(),
-        effort: config.effort,
-        approval: config.approval,
+        settings: SessionSettings::from_config(config),
         resume: config.continue_last,
         project_dir,
         branch,
@@ -78,12 +75,9 @@ struct TuiDriver<'r> {
     /// Opens on the first submitted prompt, so an idle boot reads and
     /// writes no session file — the REPL rule.
     engine: Option<Engine<'r>>,
-    /// The session model. `/model` switches it.
-    model: String,
-    /// The session effort; `/effort` sets it.
-    effort: Effort,
-    /// The approval mode; `/approval` and Shift-Tab set it.
-    approval: ApprovalMode,
+    /// The session settings: `/model`, `/effort`, and `/approval`
+    /// (with Shift-Tab) switch them.
+    settings: SessionSettings,
     /// Whether the next open resumes the latest session. `/new`
     /// clears it.
     resume: bool,
@@ -140,7 +134,7 @@ impl Driver for TuiDriver<'_> {
         events: EventSender,
         approvals: ApprovalChannel,
     ) -> Submission<'_> {
-        match dispatch(&line, &self.model, self.effort, self.approval) {
+        match dispatch(&line, &self.settings) {
             Some(Effect::Exit) => return Submission::Exit,
             Some(Effect::Note(note)) => return Submission::Note(note),
             Some(Effect::NewSession) => {
@@ -162,11 +156,11 @@ impl Driver for TuiDriver<'_> {
                 {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
-                self.model = name.clone();
+                self.settings.model = name.clone();
                 let mut patch = StatusPatch::default();
                 patch.model = Some(name);
                 events.status(patch);
-                return Submission::Note(model_note(&self.model));
+                return Submission::Note(model_note(&self.settings.model));
             }
             Some(Effect::SetEffort(effort)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -174,7 +168,7 @@ impl Driver for TuiDriver<'_> {
                 {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
-                self.effort = effort;
+                self.settings.effort = effort;
                 let mut patch = StatusPatch::default();
                 patch.effort = Some(effort.to_string());
                 events.status(patch);
@@ -186,7 +180,7 @@ impl Driver for TuiDriver<'_> {
                 {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
-                self.approval = mode;
+                self.settings.approval = mode;
                 let mut patch = StatusPatch::default();
                 patch.mode = Some(mode);
                 events.status(patch);
@@ -206,12 +200,7 @@ impl Driver for TuiDriver<'_> {
                 events.status(patch);
             }
             if self.engine.is_none() {
-                match self.runtime.open_session(
-                    self.resume,
-                    &self.model,
-                    self.effort,
-                    self.approval,
-                ) {
+                match self.runtime.open_session(self.resume, &self.settings) {
                     Ok((session, history)) => {
                         events.session_changed();
                         if !history.is_empty() {
@@ -221,13 +210,7 @@ impl Driver for TuiDriver<'_> {
                                 history.len()
                             ));
                         }
-                        self.engine = Some(self.runtime.engine(
-                            session,
-                            history,
-                            &self.model,
-                            self.effort,
-                            self.approval,
-                        ));
+                        self.engine = Some(self.runtime.engine(session, history, &self.settings));
                     }
                     Err(error) => {
                         events.error(format!("demerzel: {error}"));

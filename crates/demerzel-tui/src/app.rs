@@ -136,8 +136,8 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
             return Ok(());
         };
         // A command can send display events before it returns its
-        // note — a model, effort, or approval switch moves the status
-        // — so the
+        // note — a model, effort, or approval switch moves the
+        // status — so the
         // queue drains first and the note's frame shows both.
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
