@@ -216,7 +216,7 @@ impl App {
                 project: status_text(&options.project),
                 branch: status_text(&options.branch),
                 context_tokens: 0,
-                context_window: options.context_window,
+                context_window: options.context_window.filter(|window| *window > 0),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,

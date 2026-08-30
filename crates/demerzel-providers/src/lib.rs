@@ -32,14 +32,16 @@ pub fn default_model(provider_id: &str) -> Option<&'static str> {
 
 /// The context window of a shipped provider's model, in tokens, from
 /// the adapter's static catalog. `None` when the provider id or the
-/// model is not in a catalog. The `context_window` config key names a
-/// window for a model no catalog names.
+/// model is not in a catalog. The `context_window` config key
+/// overrides the catalog and covers the models no catalog names.
 pub fn context_window(provider_id: &str, model: &str) -> Option<u64> {
-    match provider_id {
-        openai_codex::PROVIDER_ID => openai_codex::context_window(model),
-        anthropic::PROVIDER_ID => anthropic::context_window(model),
-        _ => None,
-    }
+    let table = match provider_id {
+        openai_codex::PROVIDER_ID => openai_codex::CONTEXT_WINDOWS,
+        anthropic::PROVIDER_ID => anthropic::CONTEXT_WINDOWS,
+        _ => return None,
+    };
+    let row = table.iter().find(|(name, _)| *name == model);
+    row.map(|(_, window)| *window)
 }
 
 #[cfg(test)]

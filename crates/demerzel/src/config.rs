@@ -94,8 +94,8 @@ pub struct Settings {
     pub effort: Setting<Effort>,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: Setting<u32>,
-    /// The context window, in tokens, for a model the provider
-    /// catalog does not name. `None` leaves the catalog alone.
+    /// The context window, in tokens. Set, it wins over the provider
+    /// catalog. `None` leaves the catalog in charge.
     pub context_window: Setting<Option<u64>>,
     pub history_file: Setting<bool>,
     /// The `[tui]` table.
@@ -522,9 +522,9 @@ pub fn resolve(
         })
         .unwrap_or_else(|| Setting::new(None, Origin::Default));
 
-    // The window for a model no adapter catalog names. The catalog
-    // wins for a model it names, so the key cannot relabel a shipped
-    // model.
+    // The context window. A set key wins over the adapter catalog,
+    // like every other key: a stale catalog row needs a user-side
+    // override.
     let layer_window = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
             l.providers

@@ -29,15 +29,9 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 /// The numbers are the standard-session budgets from the Codex
 /// client's model catalog (2026-08). The model card advertises a
 /// larger window for `gpt-5.6-sol`; the endpoint grants it only to
-/// sessions that opt in, which this adapter does not send.
-const CONTEXT_WINDOWS: &[(&str, u64)] = &[("gpt-5.6-sol", 272_000)];
-
-/// The context window of `model`, in tokens; `None` for a model the
-/// catalog does not name.
-pub(crate) fn context_window(model: &str) -> Option<u64> {
-    let row = CONTEXT_WINDOWS.iter().find(|(name, _)| *name == model);
-    row.map(|(_, window)| *window)
-}
+/// sessions that opt in, which this adapter does not send. The
+/// `context_window` config key overrides a stale row.
+pub(crate) const CONTEXT_WINDOWS: &[(&str, u64)] = &[("gpt-5.6-sol", 272_000)];
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {

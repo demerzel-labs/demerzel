@@ -51,10 +51,10 @@ const FRAME_ROWS: u16 = 3;
 const FRAME_INSET: u16 = 1;
 
 /// What the status names: the model, the mode, the reasoning
-/// effort, the project and its branch, and the open session's token
-/// totals, counted from this run's start. A session change restarts
-/// the totals. The session's id is a `/session` reply, not a
-/// segment.
+/// effort, the project and its branch, the context in use, and the
+/// open session's token totals, counted from this run's start. A
+/// session change restarts the totals and the context. The
+/// session's id is a `/session` reply, not a segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: ApprovalMode,
@@ -104,7 +104,9 @@ impl Status {
         let count = compact_count(self.context_tokens);
         match self.context_window {
             Some(window) if window > 0 => {
-                let percent = (self.context_tokens * 100 + window / 2) / window;
+                // Floor, like the count: the share never reads bigger
+                // than it is. Wide math: the count is wire data.
+                let percent = u128::from(self.context_tokens) * 100 / u128::from(window);
                 format!("{count} · {percent}%")
             }
             _ => count,
@@ -126,7 +128,7 @@ impl Status {
             self.branch = status_text(&branch);
         }
         if let Some(window) = patch.context_window {
-            self.context_window = (window > 0).then_some(window);
+            self.context_window = window.filter(|window| *window > 0);
         }
     }
 }
@@ -307,8 +309,8 @@ fn input_columns(width: u16) -> (u16, bool) {
 const BAR_SEP: &str = " · ";
 
 /// One row on the bar's ground — the theme's, or reversed when the
-/// theme sets none: model, mode, effort, project, branch, token
-/// totals, cut to the width from the right one whole segment at a
+/// theme sets none: model, mode, effort, project, branch, context,
+/// token totals, cut to the width from the right one whole segment at a
 /// time; the model alone cuts with a mark. The small-screen form of
 /// the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
@@ -388,9 +390,9 @@ const EFFORT_LABEL: &str = "effort ";
 /// apart from the session totals beside it.
 const CONTEXT_LABEL: &str = "context ";
 
-/// A token count in at most five characters: the plain number below
-/// one thousand, then `34.2k`, then `1.1M`, each rounded down so the
-/// count never reads bigger than it is.
+/// A compact token count: the plain number below one thousand, then
+/// `34.2k`, then `1.1M`, each rounded down so the count never reads
+/// bigger than it is.
 fn compact_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
@@ -409,7 +411,8 @@ fn compact_count(tokens: u64) -> String {
 }
 
 /// The box's bottom edge with the status on it: the model, the
-/// mode, the effort, the project, the branch, and the token totals,
+/// mode, the effort, the project, the branch, the context, and the
+/// token totals,
 /// each between line segments, cut to the width from the right one
 /// whole segment at a time, the model alone with a mark; the corners
 /// stay. The segments take the
@@ -2369,9 +2372,11 @@ line 12",
             ..status()
         };
         assert_eq!(status.context(), "34.2k · 17%");
-        // Half a percent rounds up.
+        // The share floors, like the count: almost full is not full.
+        status.context_tokens = 199_999;
+        assert_eq!(status.context(), "199.9k · 99%");
         status.context_tokens = 35_000;
-        assert_eq!(status.context(), "35k · 18%");
+        assert_eq!(status.context(), "35k · 17%");
         // No window: the count alone.
         status.context_window = None;
         assert_eq!(status.context(), "35k");
@@ -2384,7 +2389,7 @@ line 12",
     fn the_patch_takes_the_window_and_zero_takes_it_away() {
         let mut status = status();
         let patch = StatusPatch {
-            context_window: Some(272_000),
+            context_window: Some(Some(272_000)),
             ..Default::default()
         };
         status.apply(patch);
@@ -2393,7 +2398,7 @@ line 12",
         status.apply(StatusPatch::default());
         assert_eq!(status.context_window, Some(272_000));
         let patch = StatusPatch {
-            context_window: Some(0),
+            context_window: Some(None),
             ..Default::default()
         };
         status.apply(patch);

@@ -1349,8 +1349,9 @@ async fn the_status_counts_the_context_and_its_share_of_the_window() {
 }
 
 /// A model in no catalog shows the count alone; a switch to a
-/// cataloged model brings the share with no new call, and the
-/// `context_window` key names a window for an unlisted model.
+/// cataloged model brings the share with no new call, a switch back
+/// takes it away, and a set `context_window` key wins over the
+/// catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_window_comes_from_the_catalog_or_the_context_window_key() {
     let mock = MockServer::start(
@@ -1373,6 +1374,13 @@ async fn a_window_comes_from_the_catalog_or_the_context_window_key() {
     pty.send(b"x");
     pty.wait_for("context 46.2k · 17% ─");
     pty.send(CTRL_C);
+    // Back to the unlisted model: the share goes, the count stays.
+    pty.send(b"/model plain-model\r");
+    pty.wait_for("model: plain-model");
+    pty.resize(100, 30);
+    pty.send(b"x");
+    pty.wait_for("context 46.2k ─");
+    pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
 
@@ -1384,9 +1392,11 @@ async fn a_window_comes_from_the_catalog_or_the_context_window_key() {
         Vec::new(),
     )
     .await;
+    // The key wins over the catalog: the default model's row says
+    // 272,000, the key says 100,000, and 46,240 reads 46%.
     let mut pty = Pty::spawn_with_configs(
         &mock.url(),
-        &["--model", "plain-model"],
+        &[],
         None,
         Some("[providers.openai-codex]\ncontext_window = 100000\n"),
     );

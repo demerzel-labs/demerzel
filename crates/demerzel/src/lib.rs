@@ -83,8 +83,8 @@ pub struct RunConfig {
     pub effort: Effort,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: u32,
-    /// The context window, in tokens, for a model the provider
-    /// catalog does not name; `None` leaves the catalog alone.
+    /// The context window, in tokens. Set, it wins over the provider
+    /// catalog; `None` leaves the catalog in charge.
     pub context_window: Option<u64>,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
@@ -291,12 +291,14 @@ impl Runtime {
         Ok((session, Vec::new()))
     }
 
-    /// The context window of `model`, in tokens: the provider
-    /// catalog's number, or the `context_window` key for a model the
-    /// catalog does not name.
+    /// The context window of `model`, in tokens: the
+    /// `context_window` key when set — the config wins, so a stale
+    /// catalog row has an override — or the provider catalog's
+    /// number.
     pub(crate) fn context_window(&self, model: &str) -> Option<u64> {
-        demerzel_providers::context_window(&self.config.provider, model)
-            .or(self.config.context_window)
+        self.config
+            .context_window
+            .or_else(|| demerzel_providers::context_window(self.provider.id(), model))
     }
 
     /// The tool set for an approval mode: `read-only` advertises the

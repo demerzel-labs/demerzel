@@ -36,7 +36,7 @@ effort = "medium"                # per-provider override
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
-context_window = 200000          # for a model the catalog does not name
+context_window = 200000          # in tokens; wins over the model catalog
 
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
@@ -134,9 +134,11 @@ session clears the count.
 When the model's context window is known, the segment adds the
 share: `context 34.2k · 17%`. Each provider adapter has a catalog
 of known models and their windows. The `context_window` key under
-`[providers.<id>]` names the window, in tokens, for a model the
-catalog does not name. The catalog wins for a model it names. A
-model with no window shows the count alone.
+`[providers.<id>]` names the window, in tokens: an integer from 1
+to the 32-bit maximum. A set key wins over the catalog, so a stale
+catalog row has an override. The key applies to every model of its
+provider. A model with no window shows the count alone. A `/model`
+switch moves the window with the model, with no new call.
 
 ## Thinking blocks
 

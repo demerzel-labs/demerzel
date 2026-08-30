@@ -159,9 +159,9 @@ impl Driver for TuiDriver<'_> {
                 }
                 self.settings.model = name.clone();
                 let mut patch = StatusPatch::default();
-                // The window follows the model; zero takes the share
-                // away when the new model's window is unknown.
-                patch.context_window = Some(self.runtime.context_window(&name).unwrap_or(0));
+                // The window follows the model; an unknown window
+                // takes the share away.
+                patch.context_window = Some(self.runtime.context_window(&name));
                 patch.model = Some(name);
                 events.status(patch);
                 return Submission::Note(model_note(&self.settings.model));

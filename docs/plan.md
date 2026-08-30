@@ -149,7 +149,11 @@ not go stale when a model or a vendor ships:
 - No model catalog in code. A model id is a string the config names
   and the adapter sends; the server refuses an id it does not know.
   Capability lives on the adapter, never on a model id. The only model
-  id an adapter carries is its default.
+  id an adapter carries is its default. One narrow exception, from
+  M2.5 step 8e: an adapter carries a static table of known model ids
+  and their context windows. A window is a budget number, not a
+  capability. An unknown id degrades to a count with no share, and
+  the `context_window` config key overrides a stale row.
 - `openai-compat` lands in M3, first step, not post-M5. Until it
   lands, the harness is neutral in shape but has two doors; after it,
   a vendor with a compatible endpoint needs no code.
