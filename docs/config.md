@@ -100,9 +100,11 @@ it: the user can set any mode. A switch swaps the tool set:
 - `ask` asks again.
 
 A grant from an `always` answer survives a switch.
-Each `meta` record in the session file names the mode in force. A
-resumed session takes its mode from the flags and the config, not
-from the file. A one-shot run has no command and no key, so its
+Each `meta` record in the session file names the mode in force. The
+`meta` record spells the mode `read-only`, the command name. An
+`approval` record spells it `read_only`, the record's own older
+spelling. A reader of the file must accept both. A resumed session
+takes its mode from the flags and the config, not from the file. A one-shot run has no command and no key, so its
 mode is the one the flags and the config set.
 
 ## Thinking blocks
