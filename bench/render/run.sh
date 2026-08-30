@@ -27,6 +27,8 @@ report["note"] = (
     "work the live interface does before the terminal write; the "
     "size query, the escape encoding, and the write stay outside. "
     "frame is one redraw with no new content, the floor of a frame; "
+    "frame-selected is the same redraw with a drag selection over "
+    "every transcript row; "
     "ingest pushes the stream with no frames; stream pushes it with "
     "a frame every 64 deltas and is frame-bound, so its throughput "
     "is frames per second."

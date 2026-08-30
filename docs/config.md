@@ -37,7 +37,7 @@ base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 
 [tui]
-mouse = false                    # on: the wheel scrolls, no terminal selection
+mouse = true                     # off: the terminal's own selection, no wheel
 markdown = true                  # render model replies as markdown
 thinking = "closed"              # closed | open | hidden
 theme = "terminal"               # terminal | dark | light | a [theme.<name>] table
@@ -55,7 +55,7 @@ error = "bright-red"
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `history_file` | — | — | `true` |
-| `tui.mouse` | — | — | `false` |
+| `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 | `tui.theme` | — | — | `terminal` |
@@ -155,8 +155,11 @@ The interface fits the theme to the terminal:
 
 ## Keyboard keys
 
-Mouse capture sends the wheel and the buttons to Demerzel. It takes
-the terminal's own text selection, so it is off by default.
+Mouse capture sends the wheel and the buttons to Demerzel. It is on
+by default. The terminal's own text selection then needs the
+terminal's override key, Shift-drag in most terminals. Without
+capture, most terminals turn the wheel into arrow keys on the
+alternate screen, which browse the history.
 
 The full-screen interface has these keys:
 
@@ -178,6 +181,11 @@ The full-screen interface has these keys:
   line. The next Enter submits the line. Esc closes the popup.
 - PageUp and PageDown scroll the transcript. With `tui.mouse` on, the
   mouse wheel scrolls it too.
+- With `tui.mouse` on, a drag over the transcript selects text. The
+  release copies the text to the clipboard through the terminal, as
+  an OSC 52 write. The copy leaves out the marks the frame adds: a
+  fence gives its code, a card gives its output. The copy stops at
+  64 KiB, and a notice says so. A click clears the selection.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
@@ -194,8 +202,9 @@ privilege, move credentials, or raise cost:
 - It cannot set `base_url`.
 - It cannot turn `history_file` on against a user file that turned
   it off.
-- It cannot turn `tui.mouse` on. A repository must not take the
-  terminal's own text selection from a user who set no key.
+- It cannot turn `tui.mouse` on against a user file that turned it
+  off. A repository must not take the terminal's own text selection
+  from a user who gave it up.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
 - It cannot define a theme's colors. It can pick `tui.theme`. A color
@@ -212,6 +221,7 @@ added the `[tui]` table. `effort` landed on 2026-08-24, between
 M2.5 steps 3 and 4. Cache-hit receipts before that date ran at the
 Codex adapter's fixed `low` effort and the Anthropic default.
 `tui.mouse` changed its default to `false` on 2026-08-29, after the
-M2.5 step-7 dogfood. Capture takes the terminal's own text
-selection. `tui.theme` and the `[theme.<name>]` tables landed with
-M2.5 step 8.
+M2.5 step-7 dogfood, because capture took the terminal's own text
+selection. M2.5 step 8b brought selection and copy into the
+interface and set the default back to `true` on the same day.
+`tui.theme` and the `[theme.<name>]` tables landed with M2.5 step 8.

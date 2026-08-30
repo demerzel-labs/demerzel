@@ -154,6 +154,14 @@ impl Editor {
         self.edited();
     }
 
+    /// Show a history entry: [`Editor::set`] with the popup closed,
+    /// so a recalled command does not take the arrows from the
+    /// history. The next edit opens the popup again.
+    pub(crate) fn recall(&mut self, text: &str) {
+        self.set(text);
+        self.dismissed = true;
+    }
+
     pub(crate) fn insert_char(&mut self, ch: char) {
         self.buffer.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
@@ -844,6 +852,17 @@ mod tests {
         e.insert_str("plain");
         assert_eq!(e.complete(), Completion::NoMatch);
         assert_eq!(e.text(), "plain");
+    }
+
+    #[test]
+    fn a_recalled_entry_opens_no_popup_until_the_next_edit() {
+        let mut e = Editor::new(commands());
+        e.recall("/help");
+        assert_eq!(e.text(), "/help");
+        assert!(!e.popup_open());
+        e.insert_char(' ');
+        e.backspace();
+        assert!(e.popup_open());
     }
 
     #[test]

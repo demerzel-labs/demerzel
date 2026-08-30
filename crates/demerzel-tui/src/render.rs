@@ -18,8 +18,9 @@ use unicode_width::UnicodeWidthChar as _;
 use crate::PROMPT;
 use crate::editor::{CommandSpec, Editor, displayed};
 use crate::markdown::Face;
+use crate::select;
 use crate::theme::{Palette, Role};
-use crate::transcript::{Kind, Transcript};
+use crate::transcript::{Block, Kind, Transcript};
 use crate::wrap::display_width;
 
 /// Rows the input box grows to before it scrolls inside itself.
@@ -348,20 +349,32 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, p
     transcript.clamp_scroll(avail.saturating_sub(height));
     let scroll = transcript.scroll();
 
-    // Rows from the bottom: past the offset, then one viewport.
+    // Rows from the bottom: past the offset, then one viewport. The
+    // row map records the block and row on each viewport row, for
+    // the mouse.
+    let mut shown = transcript.take_shown();
+    shown.clear();
+    let selection = transcript.selection();
+    let selected = highlight(palette);
     let mut lines: Vec<Line<'_>> = Vec::with_capacity(height.min(avail));
     let mut skip = scroll;
-    'collect: for block in transcript.blocks().rev().take(visited) {
+    let dropped = transcript.dropped();
+    'collect: for (offset, block) in transcript.blocks().enumerate().rev().take(visited) {
         let rows = block.rows();
         if rows <= skip {
             skip -= rows;
             continue;
         }
+        let absolute = dropped + offset;
         for index in (0..rows - skip).rev() {
             if lines.len() >= height {
                 break 'collect;
             }
-            if block.plain() {
+            shown.push((absolute, index));
+            let columns = selection.and_then(|selection| selection.columns(absolute, index));
+            if let Some((from, to)) = columns {
+                lines.push(selected_line(block, index, from, to, selected, palette));
+            } else if block.plain() {
                 lines.push(Line::styled(block.row(index), style(block.kind, palette)));
             } else {
                 let mut spans = Vec::new();
@@ -374,11 +387,48 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, p
         skip = 0;
     }
     lines.reverse();
+    shown.reverse();
     frame.render_widget(Paragraph::new(lines), area);
+    transcript.set_shown(shown);
 
     if scroll > 0 {
         draw_indicator(frame, area, scroll, palette);
     }
+}
+
+/// One row with the selection over columns `from..to`: the row's
+/// spans, split at the window's edges, the part inside in the
+/// highlight style. A selected row costs a column split and up to
+/// two spans more than a plain one.
+fn selected_line<'a>(
+    block: &'a Block,
+    index: usize,
+    from: usize,
+    to: usize,
+    selected: Style,
+    palette: &Palette,
+) -> Line<'a> {
+    let mut spans = Vec::with_capacity(3);
+    let mut col = 0usize;
+    let mut push = |face: Face, text: &'a str| {
+        let style = face_style(block.kind, face, palette);
+        let (start, end) = select::window(text, from, to, &mut col);
+        if start > 0 {
+            spans.push(Span::styled(&text[..start], style));
+        }
+        if end > start {
+            spans.push(Span::styled(&text[start..end], selected));
+        }
+        if end < text.len() {
+            spans.push(Span::styled(&text[end..], style));
+        }
+    };
+    if block.plain() {
+        push(Face::PLAIN, block.row(index));
+    } else {
+        block.spans(index, push);
+    }
+    Line::from(spans)
 }
 
 /// Browse mode: the rows below the viewport and the key back to
@@ -402,8 +452,8 @@ fn draw_indicator(frame: &mut Frame, area: Rect, below: usize, palette: &Palette
 }
 
 /// The style of a highlighted row — the browse indicator, the
-/// selected completion: reversed, on the accent when the theme has
-/// one.
+/// selected completion, the drag selection: reversed, on the accent
+/// when the theme has one.
 fn highlight(palette: &Palette) -> Style {
     paint(
         Style::default().add_modifier(Modifier::REVERSED),
@@ -1218,5 +1268,234 @@ line 12",
         // The tool name is model-controlled: no escape reaches the
         // row.
         assert_eq!(lines[1].trim_end(), "approve bash? [y]es / [a]lways / [N]o");
+    }
+
+    /// Draw one frame of `transcript` at `width` by `height` with an
+    /// empty editor and return the rows and the buffer.
+    fn frame_of(
+        transcript: &mut Transcript,
+        width: u16,
+        height: u16,
+    ) -> (Vec<String>, ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut editor = Editor::new(Vec::new());
+        let status = status();
+        let palette = palette();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    View {
+                        transcript,
+                        editor: &mut editor,
+                        status: &status,
+                        palette: &palette,
+                        approval: None,
+                        progress: None,
+                    },
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (lines, buffer)
+    }
+
+    fn reversed(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
+        buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED)
+    }
+
+    /// A transcript with one of each block the copy rules touch: a
+    /// prompt echo, a formatted reply with a fence, a card with
+    /// output, and a notice.
+    fn copy_fixture() -> Transcript {
+        let mut transcript = Transcript::new(true);
+        transcript.push_line(Kind::Prompt, "dmz> hello");
+        transcript.push_delta(Kind::Text, "Done.\n\n```rust\nfn main() {}\n```\n");
+        transcript.tool_start("c1", "bash");
+        transcript.tool_preview("c1", "bash $ ls");
+        transcript.tool_end(
+            "c1",
+            "bash",
+            crate::cards::Outcome {
+                summary: Some("listed"),
+                is_error: false,
+                output: "a.rs\nb.rs".to_string(),
+                output_cut: false,
+                at: std::time::Instant::now(),
+            },
+        );
+        transcript.push_line(Kind::Notice, "· 10 in");
+        transcript
+    }
+
+    #[test]
+    fn a_drag_reverses_the_span_and_the_release_copies_it_without_the_marks() {
+        let mut transcript = copy_fixture();
+        let (lines, _) = frame_of(&mut transcript, 40, 16);
+        assert_eq!(
+            &lines[..11],
+            &[
+                "dmz> hello",
+                "Done.",
+                "",
+                "╭─ rust",
+                "│ fn main() {}",
+                "╰─",
+                "✓ bash $ ls",
+                "  a.rs",
+                "  b.rs",
+                "  listed",
+                "· 10 in",
+            ]
+        );
+        // The press starts on the echo, the pointer ends on the
+        // notice's fourth column.
+        assert!(!transcript.select_press(0, 0));
+        assert!(transcript.select_drag(3, 10));
+        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        assert!(reversed(&buffer, 0, 0));
+        assert!(reversed(&buffer, 2, 4));
+        assert!(reversed(&buffer, 3, 10));
+        assert!(!reversed(&buffer, 4, 10));
+        assert!(!reversed(&buffer, 0, 11));
+        // The copy: no prompt, no fence frame, no card header or
+        // indent, the last row through the pointer.
+        let copied = transcript.select_release().unwrap();
+        assert!(!copied.cut);
+        assert_eq!(
+            copied.text,
+            "hello\nDone.\n\nfn main() {}\na.rs\nb.rs\nlisted\n· 10"
+        );
+        // The selection stays on the screen after the release.
+        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        assert!(reversed(&buffer, 0, 1));
+
+        // A span inside one row: the columns under the drag, both
+        // ends inclusive, whichever way the drag went.
+        assert!(transcript.select_press(4, 1));
+        assert!(transcript.select_drag(2, 1));
+        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        assert!(!reversed(&buffer, 1, 1));
+        assert!(reversed(&buffer, 2, 1));
+        assert!(reversed(&buffer, 4, 1));
+        assert!(!reversed(&buffer, 5, 1));
+        assert!(!reversed(&buffer, 0, 0));
+        assert_eq!(transcript.select_release().unwrap().text, "ne.");
+
+        // A drag past the last shown row runs to its end; a drag
+        // that starts on a fence row skips the frame.
+        transcript.select_press(0, 4);
+        transcript.select_drag(0, 15);
+        assert_eq!(
+            transcript.select_release().unwrap().text,
+            "fn main() {}\na.rs\nb.rs\nlisted\n· 10 in"
+        );
+
+        // A click selects nothing and clears the highlight.
+        assert!(transcript.select_press(3, 1));
+        assert!(transcript.select_release().is_none());
+        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        assert!(!reversed(&buffer, 3, 1));
+        // A press off the rows clears too.
+        transcript.select_press(0, 2);
+        transcript.select_drag(0, 3);
+        assert!(transcript.select_press(0, 14));
+        assert!(transcript.select_release().is_none());
+    }
+
+    #[test]
+    fn the_selection_maps_through_the_browsed_window() {
+        let mut transcript = Transcript::new(false);
+        for i in 0..10 {
+            transcript.push_line(Kind::Text, &format!("line {i}"));
+        }
+        frame_of(&mut transcript, 30, 4);
+        transcript.scroll_up(3);
+        let (lines, _) = frame_of(&mut transcript, 30, 4);
+        assert_eq!(lines[0], "line 5");
+        transcript.select_press(0, 0);
+        transcript.select_drag(5, 1);
+        assert_eq!(transcript.select_release().unwrap().text, "line 5\nline 6");
+        // Rows that arrive below leave the selection in place.
+        transcript.push_line(Kind::Text, "line 10");
+        transcript.push_delta(Kind::Text, "streamed");
+        let (_, buffer) = frame_of(&mut transcript, 30, 4);
+        assert!(reversed(&buffer, 0, 0));
+        assert!(transcript.selection().is_some());
+        // A width change takes the rows away, and the selection.
+        frame_of(&mut transcript, 31, 4);
+        assert!(transcript.selection().is_none());
+    }
+
+    #[test]
+    fn a_change_under_the_selection_clears_it() {
+        let mut transcript = Transcript::new(false);
+        transcript.push_line(Kind::Text, "line 0");
+        transcript.tool_start("c1", "bash");
+        transcript.push_line(Kind::Text, "line 2");
+        transcript.tool_start("c2", "read");
+        frame_of(&mut transcript, 30, 8);
+        // The span covers the first card, not the second.
+        transcript.select_press(0, 0);
+        transcript.select_drag(3, 2);
+        let outcome = || crate::cards::Outcome {
+            summary: None,
+            is_error: false,
+            output: String::new(),
+            output_cut: false,
+            at: std::time::Instant::now(),
+        };
+        transcript.tool_end("c2", "read", outcome());
+        assert!(transcript.selection().is_some());
+        transcript.tool_end("c1", "bash", outcome());
+        assert!(transcript.selection().is_none());
+
+        // A stream into the selected block clears it.
+        transcript.push_delta(Kind::Text, "open");
+        frame_of(&mut transcript, 30, 8);
+        transcript.select_press(0, 0);
+        transcript.select_drag(2, 7);
+        transcript.push_delta(Kind::Text, " more");
+        assert!(transcript.selection().is_none());
+
+        // The expand key changes every card.
+        frame_of(&mut transcript, 30, 8);
+        transcript.select_press(0, 0);
+        transcript.select_drag(2, 1);
+        transcript.set_expanded(true);
+        assert!(transcript.selection().is_none());
+    }
+
+    #[test]
+    fn the_copy_stops_at_the_cap_and_says_so() {
+        let mut transcript = Transcript::new(false);
+        let line = "x".repeat(99);
+        let mut text = String::new();
+        for _ in 0..800 {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        transcript.push_line(Kind::Text, &text);
+        frame_of(&mut transcript, 100, 10);
+        transcript.select_press(0, 5);
+        transcript.scroll_up(usize::MAX);
+        frame_of(&mut transcript, 100, 10);
+        transcript.select_drag(0, 0);
+        let copied = transcript.select_release().unwrap();
+        assert!(copied.cut);
+        assert!(copied.text.len() <= crate::select::COPY_CAP);
+        assert!(copied.text.starts_with(&line));
     }
 }

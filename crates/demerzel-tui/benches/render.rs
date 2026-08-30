@@ -15,6 +15,10 @@
 //!   throughput is in frames per second; the bytes ride along. A
 //!   real stream arrives slower than the renderer draws, so arrival,
 //!   not the frame cap, sets the batch in use.
+//! - `frame-selected`: `frame` with a drag selection over every
+//!   transcript row, from the fifth column to the sixtieth. Each row
+//!   pays the column split and the extra spans; the buffer diff
+//!   still finds nothing to change.
 //!
 //! Each bench runs twice. The prose run keeps the M2 workloads on a
 //! plain-text transcript, so its numbers compare with the M2
@@ -192,6 +196,13 @@ fn bench_render(c: &mut Criterion) {
             screen.draw();
         }
         group.bench_function(format!("frame{suffix}"), |b| b.iter(|| screen.draw()));
+        // The selection spans the whole transcript pane: the rows
+        // above the input box and the bar.
+        screen.select((4, 0), (60, HEIGHT - 3));
+        screen.draw();
+        group.bench_function(format!("frame-selected{suffix}"), |b| {
+            b.iter(|| screen.draw())
+        });
     }
 
     for (suffix, markdown, text) in workloads {

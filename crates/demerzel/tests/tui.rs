@@ -35,10 +35,46 @@ const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
-/// Mouse reporting mode 1000, the first sequence capture turns on.
+/// Mouse reporting mode 1002 — buttons, the wheel, and the pointer
+/// while a button is down — the first sequence capture turns on.
 /// The mode is the only sign of capture a PTY can observe, so the
 /// test pins it; the interface owns the sequence, not a dependency.
-const MOUSE_CAPTURE: &str = "\x1b[?1000h";
+const MOUSE_CAPTURE: &str = "\x1b[?1002h";
+/// A left-button press, drag, and release at 1-based `(col, row)`,
+/// as a terminal reports them with SGR mouse mode.
+fn mouse_press(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<0;{col};{row}M").into_bytes()
+}
+fn mouse_drag(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<32;{col};{row}M").into_bytes()
+}
+fn mouse_release(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<0;{col};{row}m").into_bytes()
+}
+
+/// The standard base64 form of `text`, for the OSC 52 payload.
+fn base64(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        out.push(ALPHABET[(bits >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(bits >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(bits >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(bits & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 
 fn text_delta(text: &str) -> Value {
     json!({"type": "response.output_text.delta", "delta": text})
@@ -911,8 +947,8 @@ fn long_reply() -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let mock = MockServer::start(vec![text_turn(&long_reply())], Vec::new()).await;
-    // Capture is off by default; the user file turns it on.
-    let mut pty = Pty::spawn_with_configs(&mock.url(), &[], None, Some("[tui]\nmouse = true\n"));
+    // Capture is on by default.
+    let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"long\r");
@@ -943,16 +979,18 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let raw = pty.wait_exit();
 
     let text = String::from_utf8_lossy(&raw);
-    assert!(
-        text.contains(MOUSE_CAPTURE),
-        "the mouse key turns capture on"
-    );
+    assert!(text.contains(MOUSE_CAPTURE), "capture is on by default");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_project_file_cannot_turn_mouse_capture_on() {
+async fn the_mouse_key_turns_capture_off_and_a_project_file_cannot_turn_it_on() {
     let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
-    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = true\n"));
+    let mut pty = Pty::spawn_with_configs(
+        &mock.url(),
+        &[],
+        Some("[tui]\nmouse = true\n"),
+        Some("[tui]\nmouse = false\n"),
+    );
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
@@ -965,18 +1003,42 @@ async fn a_project_file_cannot_turn_mouse_capture_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mouse_capture_is_off_by_default() {
-    let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
+async fn a_drag_selects_transcript_text_and_the_release_copies_it() {
+    let mock = MockServer::start(
+        vec![text_turn("Done.\n\n```rust\nfn main() {}\n```\n")],
+        Vec::new(),
+    )
+    .await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
-    pty.wait_for("no mouse");
+    pty.wait_for("fn main() {}");
+    // The usage notice is the last thing the turn draws.
+    pty.wait_for("2 cached");
+    // The screen, 1-based rows: the banner, the echo, then the reply
+    // on rows 3 to 7 — "Done.", a gap, the fence frame, the code, the
+    // frame's end. The press lands on "Done." and the drag runs to
+    // the frame's end. The frame repaints the selected cells, so
+    // the selected text reaches the stream again.
+    pty.send(&mouse_press(1, 3));
+    pty.send(&mouse_drag(6, 7));
+    pty.wait_for("fn main() {}");
+    pty.send(&mouse_release(6, 7));
+    // The copy: the rows between the points, without the fence
+    // frame, as one OSC 52 write.
+    let expected = format!("\x1b]52;c;{}\x07", base64("Done.\n\nfn main() {}"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !String::from_utf8_lossy(&pty.seen).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "no OSC 52 write; raw: {:?}",
+            String::from_utf8_lossy(&pty.seen)
+        );
+        pty.poll_read();
+    }
     pty.send(CTRL_D);
-    let raw = pty.wait_exit();
-
-    let text = String::from_utf8_lossy(&raw);
-    assert!(!text.contains(MOUSE_CAPTURE), "capture must stay off");
+    pty.wait_exit();
 }
 
 /// A reply with one of each markdown element the renderer formats.
@@ -1156,6 +1218,17 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.send(b"\r");
     pty.send(b"\r");
     pty.wait_for("effort: high");
+    // Up recalls the submitted /effort without the popup, so the
+    // next Up keeps browsing: the four-row prompt comes back. The
+    // resize lands a repaint between the two keys, so the check
+    // covers the whole screen.
+    pty.send(b"\x1b[A");
+    pty.resize(100, 29);
+    pty.absent_until("show or set the reasoning effort", "· ask ·");
+    pty.send(b"\x1b[A");
+    pty.wait_for("fourth-row");
+    pty.send(CTRL_C);
+    pty.resize(100, 30);
     // Shift-Enter with the popup open stays a newline: the line
     // submits as typed, not as the completed /effort.
     pty.send(b"/e");

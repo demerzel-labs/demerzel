@@ -80,6 +80,14 @@ impl Screen {
             .expect("headless draw");
     }
 
+    /// Select the rows between two viewport positions, `(column,
+    /// row)` each, the way a drag does. Needs a frame drawn first:
+    /// the positions map through the last frame's rows.
+    pub fn select(&mut self, from: (u16, u16), to: (u16, u16)) {
+        self.transcript.select_press(from.0, from.1);
+        self.transcript.select_drag(to.0, to.1);
+    }
+
     /// Blocks the transcript holds.
     pub fn blocks(&self) -> usize {
         self.transcript.blocks().len()

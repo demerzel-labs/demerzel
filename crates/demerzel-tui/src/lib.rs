@@ -26,6 +26,7 @@ mod highlight;
 mod history;
 mod markdown;
 mod render;
+mod select;
 mod terminal;
 pub mod theme;
 mod thinking;
@@ -93,8 +94,10 @@ pub struct Options {
     pub model: String,
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
-    /// Capture the mouse, so the wheel scrolls the transcript. Off by
-    /// default; on, the terminal loses its own text selection. The
+    /// Capture the mouse: the wheel scrolls the transcript, and a
+    /// drag selects text that the release copies to the clipboard
+    /// through the terminal. On by default; the terminal's own text
+    /// selection needs its override key while capture is on. The
     /// binary sets it from the `tui.mouse` config key.
     pub mouse: bool,
     /// Render model replies as markdown. On by default; off shows the
@@ -120,7 +123,7 @@ impl Default for Options {
             banner: None,
             model: String::new(),
             mode: String::new(),
-            mouse: false,
+            mouse: true,
             markdown: true,
             thinking: Thinking::default(),
             theme: Theme::default(),
