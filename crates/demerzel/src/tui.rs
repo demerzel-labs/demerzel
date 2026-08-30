@@ -35,11 +35,15 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.model = config.model.clone();
     options.mode = mode.to_string();
     options.effort = config.effort.to_string();
-    // The config takes any path; the name and the branch need an
-    // absolute one, so `.` names its directory and the walk up can
-    // leave it.
-    let project_dir =
-        std::path::absolute(&config.project_dir).unwrap_or_else(|_| config.project_dir.clone());
+    // The config takes any path; the name and the branch need a
+    // real one, so `.` and `..` name their directory and the walk
+    // up visits true ancestors only. The session record's `cwd`
+    // resolves the same way.
+    let project_dir = config
+        .project_dir
+        .canonicalize()
+        .or_else(|_| std::path::absolute(&config.project_dir))
+        .unwrap_or_else(|_| config.project_dir.clone());
     options.project = project_dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -77,7 +81,7 @@ struct TuiDriver<'r> {
     /// Whether the next open resumes the latest session. `/new`
     /// clears it.
     resume: bool,
-    /// The project directory, absolute: the branch read walks up
+    /// The project directory, resolved: the branch read walks up
     /// from it.
     project_dir: PathBuf,
     /// The branch the status shows; empty for none. Read again at

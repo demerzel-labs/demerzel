@@ -33,7 +33,9 @@ pub fn git_branch(dir: &Path) -> Option<String> {
 /// `.git` file names after `gitdir: `, taken relative to the file's
 /// directory. The path is the line's text as is, the way git reads
 /// it: a trailing space is part of it. The first `.git` decides: a
-/// file that names no directory ends the walk.
+/// file that names no git directory ends the walk, the way git
+/// refuses it — a worktree's holds `commondir`, a plain one holds
+/// `objects`.
 fn git_dir(dir: &Path) -> Option<PathBuf> {
     for ancestor in dir.ancestors() {
         let dot_git = ancestor.join(".git");
@@ -48,7 +50,9 @@ fn git_dir(dir: &Path) -> Option<PathBuf> {
         if target.is_empty() {
             return None;
         }
-        return Some(ancestor.join(target));
+        let dir = ancestor.join(target);
+        let is_git_dir = dir.join("commondir").is_file() || dir.join("objects").is_dir();
+        return is_git_dir.then_some(dir);
     }
     None
 }
@@ -70,7 +74,9 @@ fn read_line(path: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     file.take(READ_BYTES).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    Some(text.lines().next().unwrap_or_default().to_owned())
+    // git strips a trailing CR with or without a newline after it.
+    let line = text.lines().next().unwrap_or_default();
+    Some(line.trim_end_matches('\r').to_owned())
 }
 
 /// What `HEAD` names: a branch, or a detached head's short hash.
@@ -126,6 +132,7 @@ mod tests {
         let linked = main.path().join(".git/worktrees/wt");
         fs::create_dir_all(&linked).unwrap();
         fs::write(linked.join("HEAD"), "ref: refs/heads/wt-branch\n").unwrap();
+        fs::write(linked.join("commondir"), "../..\n").unwrap();
         // An absolute gitdir, and a relative one against the file's
         // directory.
         let worktree = tempfile::tempdir().unwrap();
@@ -139,19 +146,29 @@ mod tests {
         fs::create_dir(&sibling).unwrap();
         fs::write(sibling.join(".git"), "gitdir: ../.git/worktrees/wt\n").unwrap();
         assert_eq!(git_branch(&sibling).as_deref(), Some("wt-branch"));
-        // A .git file that names no directory ends the walk at it,
-        // and an empty gitdir names none: the project's own HEAD
-        // file is no branch.
+        // A .git file that names no git directory ends the walk at
+        // it: no prefix, an empty target, or a target with neither
+        // `commondir` nor `objects`. The project's own HEAD file is
+        // no branch, whichever way the file points at it.
         fs::write(sibling.join("HEAD"), "ref: refs/heads/decoy\n").unwrap();
         for text in [
             "not a worktree\n",
             "gitdir:\n",
             "gitdir: \n",
             "gitdir:../.git\n",
+            "gitdir: .\n",
+            "gitdir: ./\n",
+            "gitdir: ../sibling\n",
         ] {
             fs::write(sibling.join(".git"), text).unwrap();
             assert_eq!(git_branch(&sibling), None, "{text:?}");
         }
+        // A plain git directory, not a worktree's, holds `objects`.
+        let bare = main.path().join("plain.git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/plain\n").unwrap();
+        fs::write(sibling.join(".git"), "gitdir: ../plain.git\n").unwrap();
+        assert_eq!(git_branch(&sibling).as_deref(), Some("plain"));
     }
 
     #[test]
@@ -162,6 +179,7 @@ mod tests {
         let linked = main.path().join(".git/worktrees/wt ");
         fs::create_dir_all(&linked).unwrap();
         fs::write(linked.join("HEAD"), "ref: refs/heads/wt\u{a0}\n").unwrap();
+        fs::write(linked.join("commondir"), "../..\n").unwrap();
         let sibling = main.path().join("sibling");
         fs::create_dir(&sibling).unwrap();
         fs::write(sibling.join(".git"), "gitdir: ../.git/worktrees/wt \n").unwrap();
@@ -175,6 +193,7 @@ mod tests {
         let linked = main.path().join(".git/worktrees/wt");
         fs::create_dir_all(&linked).unwrap();
         fs::write(linked.join("HEAD"), "ref: refs/heads/wt-branch\r\n").unwrap();
+        fs::write(linked.join("commondir"), "../..\n").unwrap();
         let sibling = main.path().join("sibling");
         fs::create_dir(&sibling).unwrap();
         fs::write(
@@ -182,6 +201,9 @@ mod tests {
             "gitdir: ../.git/worktrees/wt\nsecond line\n",
         )
         .unwrap();
+        assert_eq!(git_branch(&sibling).as_deref(), Some("wt-branch"));
+        // A trailing CR with no newline after it goes too, as in git.
+        fs::write(sibling.join(".git"), "gitdir: ../.git/worktrees/wt\r").unwrap();
         assert_eq!(git_branch(&sibling).as_deref(), Some("wt-branch"));
         // A stray file of any size costs the cap at most.
         let long = format!("ref: refs/heads/{}", "a".repeat(100_000));
