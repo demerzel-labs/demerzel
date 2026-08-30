@@ -68,9 +68,24 @@ const TICK: Duration = Duration::from_millis(100);
 /// What a handled key asks the loop to do.
 enum Action {
     None,
+    /// A typed line: it joins the history and echoes as a prompt.
     Submit(String),
+    /// A line a key stands for — Shift-Tab's `/approval` — for the
+    /// driver alone: no history entry, no echo.
+    Command(String),
     Exit,
     AbortTurn,
+}
+
+/// The approval modes in the order Shift-Tab cycles them, by the
+/// names the driver's `/approval` command takes.
+const APPROVAL_CYCLE: [&str; 3] = ["ask", "auto", "read-only"];
+
+/// The mode after `current` in [`APPROVAL_CYCLE`]; a name outside
+/// the cycle starts it.
+fn next_approval(current: &str) -> &'static str {
+    let at = APPROVAL_CYCLE.iter().position(|mode| *mode == current);
+    APPROVAL_CYCLE[at.map_or(0, |at| (at + 1) % APPROVAL_CYCLE.len())]
 }
 
 /// Whether a turn is running when a key arrives.
@@ -131,10 +146,6 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         let Some(line) = app.next_submission().await? else {
             return Ok(());
         };
-        app.history.record(&line);
-        app.transcript
-            .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
-        app.dirty = true;
         // A command can send display events before it returns its
         // note — a model or effort switch moves the status — so the
         // queue drains first and the note's frame shows both.
@@ -278,7 +289,14 @@ impl App {
             match action {
                 Action::None | Action::AbortTurn => {}
                 Action::Exit => return Ok(None),
-                Action::Submit(line) => return Ok(Some(line)),
+                Action::Submit(line) => {
+                    self.history.record(&line);
+                    self.transcript
+                        .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
+                    self.dirty = true;
+                    return Ok(Some(line));
+                }
+                Action::Command(line) => return Ok(Some(line)),
             }
         }
     }
@@ -636,6 +654,12 @@ impl App {
         }
         match key.code {
             KeyCode::Char('c') if ctrl => return self.ctrl_c(phase),
+            // Shift-Tab cycles the approval mode between turns; the
+            // popup owns the key while it is open (above).
+            KeyCode::BackTab if phase == Phase::Idle => {
+                let next = next_approval(&self.status.mode);
+                return Action::Command(format!("/approval {next}"));
+            }
             KeyCode::Char('d') if ctrl => {
                 if !self.editor.is_empty() {
                     self.editor.delete();
@@ -893,5 +917,13 @@ mod tests {
         ] {
             assert_eq!(thinking_clock(&event, now), Some(now));
         }
+    }
+
+    #[test]
+    fn shift_tab_cycles_the_approval_modes_and_a_stranger_starts_the_cycle() {
+        assert_eq!(next_approval("ask"), "auto");
+        assert_eq!(next_approval("auto"), "read-only");
+        assert_eq!(next_approval("read-only"), "ask");
+        assert_eq!(next_approval(""), "ask");
     }
 }

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
-    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, TurnOutcome,
+    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, ToolHost, TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
@@ -29,15 +29,6 @@ pub use demerzel_tui::{Theme, Thinking};
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
 pub const READY_MARKER: &str = "demerzel ready";
-
-/// The approval mode as the interfaces name it.
-pub(crate) fn mode_name(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::ReadOnly => "read-only",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Auto => "auto",
-    }
-}
 
 /// Auth store locations for one run.
 #[derive(Debug, Clone)]
@@ -233,6 +224,7 @@ impl Runtime {
         resume: bool,
         model: &str,
         effort: Effort,
+        approval: ApprovalMode,
     ) -> Result<(Session, Vec<Message>), RunError> {
         if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
             let (mut session, replay) = Session::resume(&path)?;
@@ -255,6 +247,7 @@ impl Runtime {
                     self.provider.id(),
                     model,
                     Some(effort),
+                    Some(approval),
                 ))?;
                 return Ok((session, replay.messages));
             }
@@ -264,32 +257,38 @@ impl Runtime {
             self.provider.id(),
             model,
             Some(effort),
+            Some(approval),
         )?;
         Ok((session, Vec::new()))
     }
 
-    /// Build the turn engine over an open session. A read-only run
-    /// advertises only the read tools. `model` and `effort` are the
-    /// interface's current session model and effort.
+    /// The tool set for an approval mode: `read-only` advertises the
+    /// read tools alone, the other modes the full registry.
+    pub fn tools(&self, approval: ApprovalMode) -> &dyn ToolHost {
+        if approval == ApprovalMode::ReadOnly {
+            &self.read_only_registry
+        } else {
+            &self.registry
+        }
+    }
+
+    /// Build the turn engine over an open session. `model`, `effort`,
+    /// and `approval` are the interface's current session settings.
     pub fn engine(
         &self,
         session: Session,
         history: Vec<Message>,
         model: &str,
         effort: Effort,
+        approval: ApprovalMode,
     ) -> Engine<'_> {
-        let registry = if self.config.approval == ApprovalMode::ReadOnly {
-            &self.read_only_registry
-        } else {
-            &self.registry
-        };
         let mut engine_config = self.engine_config.clone();
         engine_config.model = model.to_string();
         engine_config.effort = Some(effort);
         Engine::with_history(
             self.provider.as_ref(),
-            registry,
-            ApprovalPolicy::new(self.config.approval),
+            self.tools(approval),
+            ApprovalPolicy::new(approval),
             engine_config,
             session,
             history,
@@ -303,12 +302,20 @@ impl Runtime {
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
+        let approval = self.config.approval;
         let (session, history) = self.open_session(
             self.config.continue_last,
             &self.config.model,
             self.config.effort,
+            approval,
         )?;
-        let mut engine = self.engine(session, history, &self.config.model, self.config.effort);
+        let mut engine = self.engine(
+            session,
+            history,
+            &self.config.model,
+            self.config.effort,
+            approval,
+        );
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
 }

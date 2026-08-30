@@ -90,6 +90,9 @@ impl Status {
         if let Some(model) = patch.model {
             self.model = model;
         }
+        if let Some(mode) = patch.mode {
+            self.mode = mode;
+        }
         if let Some(effort) = patch.effort {
             self.effort = effort;
         }

@@ -84,6 +84,21 @@ Each `meta` record in the session file names the effort in force, so
 a reader can tell what a run used. A resumed session takes its level
 from config, not from the file.
 
+## The approval mode at runtime
+
+`/approval` shows the approval mode. `/approval read-only|ask|auto`
+sets it for the turns that follow, in both interfaces. Shift-Tab in
+the full-screen interface cycles the mode: `ask`, `auto`,
+`read-only`, and back. The completion popup owns Shift-Tab while it
+is open. The key does nothing while a turn runs. The switch is
+yours at the keyboard, so the project-file rule does not limit it:
+you can set any mode. A switch swaps the tool set: `read-only`
+drops the write and execute tools, `auto` asks nothing, `ask` asks
+again. The session grants from `always` answers survive a switch.
+Each `meta` record in the session file names the mode in force. A
+resumed session takes its mode from the flags and the config, not
+from the file. A one-shot run has no command and no key.
+
 ## Thinking blocks
 
 `tui.thinking` sets how a thinking block starts in the full-screen

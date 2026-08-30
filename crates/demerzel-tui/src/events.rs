@@ -66,6 +66,8 @@ pub(crate) enum DisplayEvent {
 pub struct StatusPatch {
     /// The session model's name.
     pub model: Option<String>,
+    /// The approval mode's name.
+    pub mode: Option<String>,
     /// The reasoning effort's name; empty shows no segment.
     pub effort: Option<String>,
     /// The git branch, or the short hash of a detached head; empty

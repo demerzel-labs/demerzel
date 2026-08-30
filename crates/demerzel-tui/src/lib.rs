@@ -97,7 +97,10 @@ pub struct Options {
     /// The session model, shown on the status. The driver updates
     /// it through [`EventSender::status`].
     pub model: String,
-    /// The approval mode's display name, shown on the status.
+    /// The approval mode's name, shown on the status. The driver
+    /// updates it through [`EventSender::status`]; Shift-Tab submits
+    /// `/approval <next>` to the driver, cycling `ask`, `auto`,
+    /// `read-only`.
     pub mode: String,
     /// The reasoning effort's name, shown on the status. The driver
     /// updates it through [`EventSender::status`].

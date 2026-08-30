@@ -89,9 +89,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut sessions = Vec::new();
     for run in 1..=args.runs {
-        let (session, history) = runtime.open_session(false, &model, runtime.config().effort)?;
+        let (session, history) = runtime.open_session(
+            false,
+            &model,
+            runtime.config().effort,
+            runtime.config().approval,
+        )?;
         let session_id = session.id().to_string();
-        let mut engine = runtime.engine(session, history, &model, runtime.config().effort);
+        let mut engine = runtime.engine(
+            session,
+            history,
+            &model,
+            runtime.config().effort,
+            runtime.config().approval,
+        );
         let mut turns: Vec<Value> = Vec::with_capacity(args.prompts.len());
         for (index, prompt) in args.prompts.iter().enumerate() {
             let trace = Trace::default();

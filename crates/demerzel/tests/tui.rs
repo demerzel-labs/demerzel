@@ -25,6 +25,7 @@ const END: &[u8] = b"\x1b[F";
 const CTRL_O: &[u8] = b"\x0f";
 const CTRL_T: &[u8] = b"\x14";
 const PAGE_UP: &[u8] = b"\x1b[5~";
+const SHIFT_TAB: &[u8] = b"\x1b[Z";
 /// Alt-Enter as a legacy terminal reports it.
 const ALT_ENTER: &[u8] = b"\x1b\r";
 /// Shift-Enter as a terminal with the keyboard-enhancement flags
@@ -947,12 +948,18 @@ async fn the_plain_interface_shares_the_command_registry() {
     pty.send(b"/effort low\r");
     pty.wait_for("effort: low");
     pty.wait_for(PROMPT);
+    pty.send(b"/approval read-only\r");
+    pty.wait_for("approval: read-only");
+    pty.wait_for(PROMPT);
     pty.send(b"hello\r");
     pty.wait_for("plain reply");
     pty.wait_for(PROMPT);
-    // With the engine open, the switch reaches it in place.
+    // With the engine open, the switches reach it in place.
     pty.send(b"/effort high\r");
     pty.wait_for("effort: high");
+    pty.wait_for(PROMPT);
+    pty.send(b"/approval ask\r");
+    pty.wait_for("approval: ask");
     pty.wait_for(PROMPT);
     pty.send(b"/new\r");
     pty.wait_for("fresh session");
@@ -970,6 +977,8 @@ async fn the_plain_interface_shares_the_command_registry() {
     let second = requests[1].body.to_string();
     assert!(first.contains("gpt-test"), "{first}");
     assert_eq!(requests[0].body["reasoning"]["effort"], "low");
+    assert_eq!(tool_names(&requests[0].body), ["read", "grep", "glob"]);
+    assert!(tool_names(&requests[1].body).contains(&"bash".to_string()));
     assert_eq!(requests[1].body["reasoning"]["effort"], "high");
     assert!(second.contains("again"), "{second}");
     assert!(!second.contains("hello"), "{second}");
@@ -1287,6 +1296,82 @@ async fn the_status_names_the_project_and_follows_the_branch_between_turns() {
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
+}
+
+/// The tool names one request advertised.
+fn tool_names(request: &serde_json::Value) -> Vec<String> {
+    request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_approval_command_and_shift_tab_set_the_mode_for_the_turns_that_follow() {
+    let mock = MockServer::start(
+        vec![
+            tool_turn("bash", json!({"command": "echo auto-ran"})),
+            text_turn("auto done"),
+            text_turn("read-only done"),
+            tool_turn("bash", json!({"command": "echo asked"})),
+            text_turn("ask done"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"/approval\r");
+    pty.wait_for("approval: ask");
+    // Auto: the bash call runs with no question.
+    pty.send(b"/approval auto\r");
+    pty.wait_for("approval: auto");
+    pty.send(b"run it\r");
+    pty.absent_until("approve bash?", "auto done");
+    pty.wait_for("2 cached");
+    // Read-only: the next request carries the read tools alone.
+    pty.send(b"/approval read-only\r");
+    pty.wait_for("approval: read-only");
+    pty.send(b"look\r");
+    pty.wait_for("read-only done");
+    pty.wait_for("2 cached");
+    // Ask again: a question shows, and the status names the mode.
+    pty.send(b"/approval ask\r");
+    pty.wait_for("approval: ask");
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("─ ask ─ effort");
+    pty.send(CTRL_C);
+    pty.send(b"run again\r");
+    pty.wait_for("approve bash? [y]es / [a]lways / [N]o");
+    pty.send(b"y");
+    pty.wait_for("ask done");
+    pty.wait_for("2 cached");
+    // Shift-Tab cycles from ask to auto, with no prompt echo.
+    pty.send(SHIFT_TAB);
+    pty.wait_for("approval: auto");
+    pty.resize(100, 30);
+    pty.send(b"x");
+    pty.wait_for("─ auto ─ effort");
+    pty.send(CTRL_C);
+    let sessions = pty.session_files();
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    // One session took every switch in place.
+    assert_eq!(sessions.len(), 1);
+    let requests = mock.received();
+    assert_eq!(requests.len(), 5);
+    assert!(tool_names(&requests[0].body).contains(&"bash".to_string()));
+    assert_eq!(tool_names(&requests[2].body), ["read", "grep", "glob"]);
+    assert!(tool_names(&requests[3].body).contains(&"bash".to_string()));
+    // The tool ran under auto and under ask; the switches left meta
+    // records naming each mode.
+    assert!(requests[1].body.to_string().contains("auto-ran"));
+    assert!(requests[4].body.to_string().contains("asked"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

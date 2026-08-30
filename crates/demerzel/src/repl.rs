@@ -21,7 +21,9 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
+use crate::commands::{
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
+};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
@@ -367,7 +369,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let reader = Reader::spawn(runtime.config().history_path.clone())?;
 
-    let mode = crate::mode_name(runtime.config().approval);
+    let mode = runtime.config().approval;
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
     eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
@@ -378,6 +380,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // The interface owns the session model: `/model` switches it.
     let mut model = runtime.config().model.clone();
     let mut effort = runtime.config().effort;
+    // `/approval` sets the mode for the turns that follow.
+    let mut approval = runtime.config().approval;
     // `/new` turns the next open into a fresh session, `-c` or not.
     let mut resume = runtime.config().continue_last;
     loop {
@@ -387,7 +391,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                match dispatch(line, &model, effort) {
+                match dispatch(line, &model, effort, approval) {
                     Some(Effect::Exit) => break,
                     Some(Effect::Note(note)) => {
                         eprintln!("{note}");
@@ -428,10 +432,22 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         eprintln!("{}", effort_note(effort));
                         continue;
                     }
+                    Some(Effect::SetApproval(mode)) => {
+                        if let Some(engine) = engine.as_mut()
+                            && let Err(error) = engine.set_approval(mode, runtime.tools(mode))
+                        {
+                            eprintln!("demerzel: {error}");
+                            continue;
+                        }
+                        approval = mode;
+                        eprintln!("{}", approval_note(approval));
+                        continue;
+                    }
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session(resume, &model, effort)?;
+                    let (session, history) =
+                        runtime.open_session(resume, &model, effort, approval)?;
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
@@ -439,7 +455,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             history.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, history, &model, effort));
+                    engine = Some(runtime.engine(session, history, &model, effort, approval));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(engine, line.to_string(), &reader, &mut sigint).await;

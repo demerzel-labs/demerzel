@@ -27,6 +27,42 @@ pub enum ApprovalMode {
     Auto,
 }
 
+impl ApprovalMode {
+    /// The mode names, for a usage line.
+    pub const NAMES: &'static str = "read-only, ask, auto";
+
+    /// The mode's config and command name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalMode::ReadOnly => "read-only",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Auto => "auto",
+        }
+    }
+}
+
+impl std::str::FromStr for ApprovalMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read-only" => Ok(ApprovalMode::ReadOnly),
+            "ask" => Ok(ApprovalMode::Ask),
+            "auto" => Ok(ApprovalMode::Auto),
+            other => Err(format!(
+                "unknown approval mode `{other}`; the modes are {}",
+                ApprovalMode::NAMES
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ApprovalMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What the harness does with one tool call before dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,7 +142,7 @@ impl ApprovalPolicy {
         decision
     }
 
-    fn granted(&self, request: &ApprovalRequest<'_>) -> bool {
+    pub(crate) fn granted(&self, request: &ApprovalRequest<'_>) -> bool {
         match request.access {
             ToolAccess::Execute => self
                 .input_grants
@@ -252,5 +288,19 @@ mod tests {
             serde_json::to_value(ApprovalDecision::AskUser).unwrap(),
             serde_json::json!("ask_user")
         );
+    }
+
+    #[test]
+    fn a_mode_name_round_trips_and_a_stranger_names_the_modes() {
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::Ask,
+            ApprovalMode::Auto,
+        ] {
+            assert_eq!(mode.as_str().parse::<ApprovalMode>(), Ok(mode));
+            assert_eq!(mode.to_string(), mode.as_str());
+        }
+        let error = "Auto".parse::<ApprovalMode>().unwrap_err();
+        assert!(error.contains(ApprovalMode::NAMES), "{error}");
     }
 }
