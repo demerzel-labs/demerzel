@@ -159,7 +159,7 @@ impl Editor {
     /// history. The next edit opens the popup again.
     pub(crate) fn recall(&mut self, text: &str) {
         self.set(text);
-        self.dismissed = true;
+        self.dismiss();
     }
 
     pub(crate) fn insert_char(&mut self, ch: char) {

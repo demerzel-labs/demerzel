@@ -61,6 +61,7 @@ pub(crate) struct View<'a> {
 pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     let area = frame.area();
     if area.height == 0 || area.width == 0 {
+        view.transcript.clear_shown();
         return 0;
     }
     // The status bar takes the bottom row when the screen has room
@@ -127,7 +128,13 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
                 height: input_area.y - area.y,
                 ..area
             };
-            draw_popup(frame, above, view.editor, prefix, palette);
+            if let Some(popup) = draw_popup(frame, above, view.editor, prefix, palette) {
+                // The popup hides the rows under it: a press there
+                // must not select what it covers.
+                let from = usize::from(popup.y - area.y);
+                view.transcript
+                    .cover_rows(from, from + usize::from(popup.height));
+            }
         }
     }
     transcript_area.height
@@ -328,6 +335,7 @@ fn face_style(kind: Kind, face: Face, palette: &Palette) -> Style {
 /// window, not its history.
 fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, palette: &Palette) {
     if area.height == 0 {
+        transcript.clear_shown();
         return;
     }
     let height = usize::from(area.height);
@@ -370,7 +378,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, p
             if lines.len() >= height {
                 break 'collect;
             }
-            shown.push((absolute, index));
+            shown.push(Some((absolute, index)));
             let columns = selection.and_then(|selection| selection.columns(absolute, index));
             if let Some((from, to)) = columns {
                 lines.push(selected_line(block, index, from, to, selected, palette));
@@ -515,15 +523,22 @@ fn draw_input(
 /// The completion popup, over the rows above the input box: one row
 /// per matching command, the usage and the help, the selected one
 /// reversed. It sits at the prompt's text column. A popup taller
-/// than its cap scrolls to keep the selection in view.
-fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool, palette: &Palette) {
+/// than its cap scrolls to keep the selection in view. Returns the
+/// area the popup took, when it drew.
+fn draw_popup(
+    frame: &mut Frame,
+    above: Rect,
+    editor: &Editor,
+    prefix: bool,
+    palette: &Palette,
+) -> Option<Rect> {
     let matches: Vec<&CommandSpec> = editor.matches().collect();
     let rows = matches
         .len()
         .min(MAX_POPUP_ROWS)
         .min(usize::from(above.height));
     if rows == 0 {
-        return;
+        return None;
     }
     let selected = editor.selected().min(matches.len() - 1);
     let first = selected.saturating_sub(rows - 1);
@@ -546,7 +561,7 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool, pal
         .unwrap_or(u16::MAX)
         .min(above.width.saturating_sub(x));
     if width == 0 {
-        return;
+        return None;
     }
     let area = Rect {
         x: above.x + x,
@@ -579,6 +594,7 @@ fn draw_popup(frame: &mut Frame, above: Rect, editor: &Editor, prefix: bool, pal
     }
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines), area);
+    Some(area)
 }
 
 #[cfg(test)]
@@ -1402,6 +1418,11 @@ line 12",
             transcript.select_release().unwrap().text,
             "fn main() {}\na.rs\nb.rs\nlisted\n· 10 in"
         );
+        // A span over marks alone — the card's header — yields no
+        // text, so nothing reaches the clipboard.
+        transcript.select_press(0, 6);
+        transcript.select_drag(9, 6);
+        assert_eq!(transcript.select_release().unwrap().text, "");
 
         // A click selects nothing and clears the highlight.
         assert!(transcript.select_press(3, 1));
@@ -1413,6 +1434,87 @@ line 12",
         transcript.select_drag(0, 3);
         assert!(transcript.select_press(0, 14));
         assert!(transcript.select_release().is_none());
+    }
+
+    #[test]
+    fn blank_rows_inside_a_fence_a_quote_and_a_card_copy_as_blank_lines() {
+        let mut transcript = Transcript::new(true);
+        transcript.push_delta(
+            Kind::Text,
+            "```rust\nfn a() {}\n\nfn b() {}\n```\n\n> one\n>\n> two\n\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        );
+        let outcome = |output: &str| crate::cards::Outcome {
+            summary: Some("listed"),
+            is_error: false,
+            output: output.to_string(),
+            output_cut: false,
+            at: std::time::Instant::now(),
+        };
+        transcript.tool_start("c1", "bash");
+        transcript.tool_end("c1", "bash", outcome("a\n\nb\nc"));
+        transcript.tool_start("c2", "bash");
+        transcript.tool_end("c2", "bash", outcome("a\nb\nc\nd\ne\nf\ng\nh"));
+        let (lines, _) = frame_of(&mut transcript, 40, 30);
+        // The pane is the rows above the input box and the bar.
+        let last = lines[..28]
+            .iter()
+            .rposition(|line| !line.is_empty())
+            .unwrap();
+        assert!(lines[last].contains("Ctrl-O"), "{:?}", lines[last]);
+        transcript.select_press(0, 0);
+        transcript.select_drag(39, last as u16);
+        let text = transcript.select_release().unwrap().text;
+        // The fence keeps its blank line; the quote keeps its bar's
+        // blank line; the rule adds no line and leaves its two gap
+        // rows; the table keeps its cells apart and drops its head
+        // rule; the first card keeps its blank output line; the
+        // second card's tail keeps its result line and drops the
+        // hint.
+        assert_eq!(
+            text,
+            "fn a() {}\n\nfn b() {}\n\none\n\ntwo\n\n\na  b\n1  2\n\
+             a\n\nb\nc\nlisted\nd\ne\nf\ng\nh\nlisted"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_popup_selects_nothing_under_it() {
+        let commands = vec![
+            CommandSpec::new("/help", "list the commands"),
+            CommandSpec::new("/model [name]", "show or switch the session model"),
+        ];
+        let mut transcript = Transcript::new(false);
+        for i in 0..5 {
+            transcript.push_line(Kind::Text, &format!("line {i}"));
+        }
+        let mut editor = Editor::new(commands);
+        editor.set("/");
+        let mut terminal = Terminal::new(TestBackend::new(60, 7)).unwrap();
+        let status = status();
+        let palette = palette();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    View {
+                        transcript: &mut transcript,
+                        editor: &mut editor,
+                        status: &status,
+                        palette: &palette,
+                        approval: None,
+                        progress: None,
+                    },
+                );
+            })
+            .unwrap();
+        // Rows 3 and 4 hold the popup; row 2 is transcript.
+        assert!(!transcript.select_press(0, 3));
+        assert!(transcript.select_release().is_none());
+        transcript.select_press(0, 2);
+        // A drag onto a covered row leaves the head where it is.
+        assert!(!transcript.select_drag(5, 3));
+        assert!(transcript.select_drag(5, 2));
+        assert_eq!(transcript.select_release().unwrap().text, "line 2");
     }
 
     #[test]

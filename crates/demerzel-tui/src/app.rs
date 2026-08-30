@@ -537,17 +537,24 @@ impl App {
 
     /// The button came up: a selection with a span goes to the
     /// clipboard through the terminal. A terminal that refuses the
-    /// write loses the copy in silence; the loop cannot tell. Returns
-    /// whether the frame changes: a notice names a copy cut at the
-    /// cap.
+    /// write loses the copy in silence; the loop cannot tell. A span
+    /// over marks alone — a card's header, a fence frame — yields no
+    /// text and writes nothing, so it cannot empty the clipboard.
+    /// Returns whether the frame changes: a notice names a copy cut
+    /// at the cap.
     fn copy_selection(&mut self) -> bool {
         let Some(copied) = self.transcript.select_release() else {
             return false;
         };
+        if copied.text.is_empty() {
+            return false;
+        }
         let _ = select::write_clipboard(&copied.text);
         if copied.cut {
-            self.transcript
-                .push_line(Kind::Notice, "copy cut at 64 KiB");
+            self.transcript.push_line(
+                Kind::Notice,
+                &format!("copy cut at {} KiB", select::COPY_CAP / 1024),
+            );
         }
         copied.cut
     }

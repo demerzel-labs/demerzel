@@ -15,10 +15,11 @@
 //!   throughput is in frames per second; the bytes ride along. A
 //!   real stream arrives slower than the renderer draws, so arrival,
 //!   not the frame cap, sets the batch in use.
-//! - `frame-selected`: `frame` with a drag selection over every
-//!   transcript row, from the fifth column to the sixtieth. Each row
-//!   pays the column split and the extra spans; the buffer diff
-//!   still finds nothing to change.
+//! - `frame-selected`: `frame` with a drag selection from the first
+//!   transcript row to the last, so every row is in the span. The
+//!   two end rows pay the column split and the extra spans; the rows
+//!   between take the whole-row path. The number pins that a
+//!   selection left on the screen costs a frame about nothing.
 //!
 //! Each bench runs twice. The prose run keeps the M2 workloads on a
 //! plain-text transcript, so its numbers compare with the M2

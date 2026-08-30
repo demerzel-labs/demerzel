@@ -61,6 +61,10 @@ const FOOTER_RESERVE: usize = LINE_BYTES + 64;
 /// The key that expands and collapses the cards, named in the hint.
 const EXPAND_KEY: &str = "Ctrl-O";
 
+/// The indent of every card line under the header. The copy rules
+/// read it as the frame's columns, through `Block::frame_columns`.
+pub(crate) const INDENT: &str = "  ";
+
 /// The spinner frames, one per tick of the progress line.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -149,9 +153,10 @@ pub struct Card {
     /// The text needs a render before the next layout.
     stale: bool,
     /// Byte offsets from the last render, for the faces: the header
-    /// end and the output span.
+    /// end, the output span, and the start of the footer's hint.
     header_end: usize,
     output_span: (usize, usize),
+    hint_start: usize,
 }
 
 impl Card {
@@ -171,6 +176,7 @@ impl Card {
             stale: true,
             header_end: 0,
             output_span: (0, 0),
+            hint_start: 0,
         }
     }
 
@@ -292,8 +298,7 @@ impl Card {
         self.header_end = out.len();
         if let Some(body) = &self.body {
             for line in body.lines() {
-                out.push_str("\n  ");
-                out.push_str(line);
+                push_indented(out, line);
             }
         }
 
@@ -302,16 +307,15 @@ impl Card {
         if !self.output.is_empty() && matches!(self.state, State::Done | State::Error) {
             if self.expanded {
                 if self.output_cut {
-                    out.push_str("\n  … earlier output not kept");
+                    push_indented(out, "… earlier output not kept");
                 }
                 let budget = cap.saturating_sub(FOOTER_RESERVE);
                 for line in self.output.lines() {
-                    if out.len() + line.len() + 3 > budget {
-                        out.push_str("\n  … rows cut at the block cap");
+                    if out.len() + line.len() + 1 + INDENT.len() > budget {
+                        push_indented(out, "… rows cut at the block cap");
                         break;
                     }
-                    out.push_str("\n  ");
-                    out.push_str(line);
+                    push_indented(out, line);
                 }
             } else {
                 // The tail starts after the newline that ends the
@@ -329,7 +333,7 @@ impl Card {
                     .nth(separators)
                     .map_or(self.output.as_str(), |(at, _)| &self.output[at + 1..]);
                 for line in tail.lines() {
-                    out.push_str("\n  ");
+                    push_indented(out, "");
                     let cut = line_cut(line, TAIL_LINE_BYTES);
                     out.push_str(&line[..cut]);
                     if cut < line.len() {
@@ -339,11 +343,12 @@ impl Card {
             }
         }
         self.output_span = (output_start, out.len());
+        self.hint_start = out.len();
 
         let Some(word) = self.state.word() else {
             return;
         };
-        out.push_str("\n  ");
+        push_indented(out, "");
         if let Some(duration) = self.duration
             && self.state != State::Declined
         {
@@ -355,7 +360,10 @@ impl Card {
             _ => out.push_str(word),
         }
         // The hint names what the expanded view adds: the hidden
-        // lines, and the cut when the kept output is a tail.
+        // lines, and the cut when the kept output is a tail. It is
+        // the frame's, not the call's: a mark, so a copy leaves it
+        // out.
+        self.hint_start = out.len();
         let cut = self.output_cut && !self.expanded;
         if hidden > 0 {
             let plural = if hidden == 1 { "line" } else { "lines" };
@@ -384,11 +392,12 @@ impl Card {
             out.push((header_end as u32, Face::PLAIN));
         }
         if let Some(body) = &self.body {
-            // The body renders as `\n  ` plus each line, from the
-            // header's end; the offsets follow that layout.
+            // The body renders as a newline, the indent, and each
+            // line, from the header's end; the offsets follow that
+            // layout.
             let mut at = self.header_end;
             for line in body.lines() {
-                let start = at + 3;
+                let start = at + 1 + INDENT.len();
                 at = start + line.len();
                 let face = match line.as_bytes() {
                     [b'+', b' ', ..] => Face::DIFF_ADD,
@@ -412,7 +421,17 @@ impl Card {
             out.push((start as u32, Face::MUTED));
             out.push((end as u32, Face::PLAIN));
         }
+        if self.hint_start < len {
+            out.push((self.hint_start as u32, Face::MARKER));
+        }
     }
+}
+
+/// Append a newline, the indent, and `line`.
+fn push_indented(out: &mut String, line: &str) {
+    out.push('\n');
+    out.push_str(INDENT);
+    out.push_str(line);
 }
 
 /// The largest byte count at or under `cap` that ends `line` at a char

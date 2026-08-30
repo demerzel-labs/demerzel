@@ -5,31 +5,33 @@
 //! press and the pointer. A point names a block by its absolute
 //! index, a row of that block's layout, and a screen column, so it
 //! holds still while content arrives below it and moves with nothing
-//! else. The transcript owns the points and clears them when a block
-//! under them changes; this module holds the geometry, the copy
-//! rules, and the OSC 52 sequence.
+//! else. The transcript owns the points and the row map that maps a
+//! mouse position to them, and it clears the points when a block
+//! under them changes; this module holds the geometry, the copy,
+//! and the OSC 52 sequence.
 //!
 //! The copy holds the shown rows between the points, without the
 //! marks the frame adds: a fence gives its code without the frame, a
-//! card gives its output without its header and indent, a prompt
-//! echo gives the line without the prompt. A newline joins each row,
-//! trailing spaces drop, and the text is capped at [`COPY_CAP`]
-//! bytes. The copy goes to the terminal as one OSC 52 write, which
-//! reaches the clipboard over SSH and through a multiplexer that
-//! forwards the sequence. The base64 encoder lives here, so the
-//! write adds no dependency.
+//! card gives its output and its result line without the header, the
+//! indent, and the hint, a prompt echo gives the line without the
+//! prompt. A newline joins each row, trailing spaces drop, and the
+//! text is capped at [`COPY_CAP`] bytes. The copy goes to the
+//! terminal as one OSC 52 write, which reaches the clipboard over
+//! SSH and through a multiplexer that forwards the sequence. The
+//! base64 encoder lives here, so the write adds no dependency.
 
+use std::collections::VecDeque;
 use std::io::Write as _;
 
 use unicode_width::UnicodeWidthChar as _;
 
-use crate::PROMPT;
 use crate::markdown::Face;
-use crate::transcript::{Block, Kind};
-use crate::wrap::display_width;
+use crate::transcript::Block;
 
 /// Bytes of text one copy holds at most. The write blocks the loop,
-/// and terminals cap the sequence near this size.
+/// and terminals cap the sequence near this size. The walk that
+/// builds the copy stops at as many rows, too: a row that adds
+/// nothing still counts one.
 pub(crate) const COPY_CAP: usize = 64 * 1024;
 
 /// One end of a selection.
@@ -39,7 +41,8 @@ pub(crate) struct Point {
     pub block: usize,
     /// The row of the block's layout.
     pub row: usize,
-    /// The screen column.
+    /// The screen column. `usize::MAX` names the end of the row: a
+    /// pointer below the last shown row lands there.
     pub col: usize,
 }
 
@@ -107,19 +110,31 @@ pub(crate) struct Copied {
 }
 
 /// Whether a char at column `col` with width `width` lies inside
-/// `from..to`. A zero-width char joins the char before it.
+/// `from..to`. A zero-width char joins the char before it, or the
+/// row's start when it opens the row.
 fn inside(col: usize, width: usize, from: usize, to: usize) -> bool {
     if width == 0 {
-        col > from && col <= to
+        (col > from || col == 0 && from == 0) && col <= to
     } else {
         col < to && col + width > from
     }
+}
+
+/// Whether `from..to` covers a whole row: the rows strictly between
+/// the two ends, the common case of a drag.
+fn whole(from: usize, to: usize) -> bool {
+    from == 0 && to == usize::MAX
 }
 
 /// The byte range of `text` inside columns `from..to`, with `col`
 /// the column `text` starts at; `col` advances past the text. The
 /// range is contiguous: the chars inside a column window are.
 pub(crate) fn window(text: &str, from: usize, to: usize, col: &mut usize) -> (usize, usize) {
+    if whole(from, to) {
+        // Every span of the row takes this path, so the column
+        // count is not needed.
+        return (0, text.len());
+    }
     let mut start = None;
     let mut end = 0usize;
     for (at, ch) in text.char_indices() {
@@ -139,25 +154,27 @@ pub(crate) fn window(text: &str, from: usize, to: usize, col: &mut usize) -> (us
 /// Append row `index` of `block`, cut to columns `from..to`, as one
 /// line of the copy: the chars inside the window that are no mark,
 /// trailing spaces dropped, a newline after. A card's header row and
-/// a row of marks alone — a fence frame, a rule — add nothing.
+/// a row of whole-row structure — a fence frame line, a rule — add
+/// nothing. A row of marks that can hold text, such as a quote's
+/// bar or a card's blank output line, adds a blank line.
 pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out: &mut String) {
     let start = out.len();
-    // The columns the block's own frame takes at the row's start: a
-    // card's indent on each of its lines, the prompt on an echo.
-    let skip = match block.kind {
-        Kind::Tool if block.line_start(index) => 2,
-        Kind::Prompt if index == 0 && block.row(0).starts_with(PROMPT) => display_width(PROMPT),
-        _ => 0,
-    };
+    let skip = block.frame_columns(index);
+    let whole = whole(from, to);
     let mut col = 0usize;
-    let mut header = false;
+    let mut drop = false;
     let mut first = true;
-    let mut content = false;
     let mut push = |face: Face, text: &str| {
+        // An empty row shares its offset with the next row's first
+        // face; its span carries no face of its own.
+        if text.is_empty() {
+            return;
+        }
         if first {
             first = false;
-            header = face.has(Face::TITLE);
+            drop = face.has(Face::TITLE);
         }
+        drop |= face.has(Face::FRAME);
         let mark = face.has(Face::MARKER);
         for ch in text.chars() {
             let width = ch.width().unwrap_or(0);
@@ -166,8 +183,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
             if mark || at < skip {
                 continue;
             }
-            content = true;
-            if inside(at, width, from, to) {
+            if whole || inside(at, width, from, to) {
                 out.push(ch);
             }
         }
@@ -177,7 +193,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
     } else {
         block.spans(index, push);
     }
-    if header || (!content && col > 0) {
+    if drop {
         out.truncate(start);
         return;
     }
@@ -185,6 +201,62 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
         out.pop();
     }
     out.push('\n');
+}
+
+/// The copy of `selection` over `blocks`, whose first block has the
+/// absolute index `dropped`, at `width`: the rows between the points
+/// through [`copy_row`], joined by newlines, the trailing newline
+/// dropped. The walk stops at [`COPY_CAP`] bytes or rows, and the
+/// copy says when it did.
+pub(crate) fn copy(
+    selection: Selection,
+    blocks: &mut VecDeque<Block>,
+    dropped: usize,
+    width: u16,
+) -> Copied {
+    let (start, end) = selection.span();
+    let mut text = String::new();
+    let mut walked = 0usize;
+    let mut cut = false;
+    'blocks: for index in start.block..=end.block {
+        let Some(offset) = index.checked_sub(dropped) else {
+            continue;
+        };
+        let Some(block) = blocks.get_mut(offset) else {
+            break;
+        };
+        // The frame laid every block of the span out at this width
+        // already; a block that changed since cleared the selection.
+        block.sync(width);
+        let rows = block.rows();
+        if rows == 0 {
+            continue;
+        }
+        let first = if index == start.block { start.row } else { 0 };
+        let last = if index == end.block {
+            end.row.min(rows - 1)
+        } else {
+            rows - 1
+        };
+        for row in first..=last {
+            let Some((from, to)) = selection.columns(index, row) else {
+                continue;
+            };
+            copy_row(block, row, from, to, &mut text);
+            walked += 1;
+            if text.len() > COPY_CAP || walked > COPY_CAP {
+                let mut at = text.len().min(COPY_CAP);
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                text.truncate(at);
+                cut = true;
+                break 'blocks;
+            }
+        }
+    }
+    text.truncate(text.trim_end_matches('\n').len());
+    Copied { text, cut }
 }
 
 /// The OSC 52 sequence that puts `text` on the clipboard.
@@ -290,6 +362,12 @@ mod tests {
         assert_eq!(window("e\u{301}x", 0, 1, &mut col), (0, 3));
         let mut col = 0;
         assert_eq!(window("e\u{301}x", 1, 2, &mut col), (3, 4));
+        // A zero-width char that opens the row is inside from
+        // column zero, and a whole row is whole.
+        let mut col = 0;
+        assert_eq!(window("\u{200b}ab", 0, 1, &mut col), (0, 4));
+        let mut col = 0;
+        assert_eq!(window("\u{200b}ab", 0, usize::MAX, &mut col), (0, 5));
     }
 
     #[test]

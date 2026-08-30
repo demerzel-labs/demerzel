@@ -37,11 +37,11 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crate::cards::{Card, Outcome, push_sanitized};
+use crate::cards::{Card, INDENT, Outcome, push_sanitized};
 use crate::markdown::{self, Face, Seam, Target};
-use crate::select::{self, COPY_CAP, Copied, Point, Selection};
+use crate::select::{self, Copied, Point, Selection};
 use crate::thinking::{SUMMARY_RESERVE, Thinking, Thought};
-use crate::wrap::row_starts;
+use crate::wrap::{display_width, row_starts};
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
 const MAX_BLOCKS: usize = 2_000;
@@ -426,9 +426,22 @@ impl Block {
 
     /// Whether row `index` starts a line of the text, rather than
     /// continuing a wrapped one.
-    pub(crate) fn line_start(&self, index: usize) -> bool {
+    fn line_start(&self, index: usize) -> bool {
         let start = self.layout.rows[index] as usize;
         start == 0 || self.buffer().as_bytes()[start - 1] == b'\n'
+    }
+
+    /// The columns the frame takes at the start of row `index`,
+    /// which a copy leaves out: a card's indent on each of its
+    /// lines, the prompt on an echo's first row.
+    pub(crate) fn frame_columns(&self, index: usize) -> usize {
+        match self.kind {
+            Kind::Tool if self.line_start(index) => display_width(INDENT),
+            Kind::Prompt if index == 0 && self.row(0).starts_with(crate::PROMPT) => {
+                display_width(crate::PROMPT)
+            }
+            _ => 0,
+        }
     }
 
     /// Whether every row is one span in the block's own style.
@@ -537,8 +550,9 @@ pub struct Transcript {
     /// its first block drops off the cap.
     selection: Option<Selection>,
     /// The block and row on each viewport row of the last frame,
-    /// top down, so a mouse position maps to a point.
-    shown: Vec<(usize, usize)>,
+    /// top down, so a mouse position maps to a point. `None` on a
+    /// row something covers, such as the completion popup.
+    shown: Vec<Option<(usize, usize)>>,
 }
 
 impl Transcript {
@@ -969,20 +983,33 @@ impl Transcript {
 
     /// The row map, taken for the frame to fill; see
     /// [`Transcript::set_shown`].
-    pub(crate) fn take_shown(&mut self) -> Vec<(usize, usize)> {
+    pub(crate) fn take_shown(&mut self) -> Vec<Option<(usize, usize)>> {
         std::mem::take(&mut self.shown)
     }
 
     /// The block and row on each viewport row of the frame just
     /// drawn, top down.
-    pub(crate) fn set_shown(&mut self, shown: Vec<(usize, usize)>) {
+    pub(crate) fn set_shown(&mut self, shown: Vec<Option<(usize, usize)>>) {
         self.shown = shown;
+    }
+
+    /// A frame drew no transcript rows: no position maps to one.
+    pub(crate) fn clear_shown(&mut self) {
+        self.shown.clear();
+    }
+
+    /// Viewport rows `from..to` are covered — the completion popup
+    /// sits on them — so a position there maps to no row.
+    pub(crate) fn cover_rows(&mut self, from: usize, to: usize) {
+        for row in self.shown.iter_mut().take(to).skip(from) {
+            *row = None;
+        }
     }
 
     /// The point under viewport column `x` and row `y`, when a row
     /// is shown there.
     fn point_at(&self, x: u16, y: u16) -> Option<Point> {
-        let &(block, row) = self.shown.get(usize::from(y))?;
+        let (block, row) = (*self.shown.get(usize::from(y))?)?;
         Some(Point {
             block,
             row,
@@ -1010,20 +1037,24 @@ impl Transcript {
         let Some(selection) = &mut self.selection else {
             return false;
         };
-        let Some(&(block, row)) = self.shown.get(usize::from(y)).or(self.shown.last()) else {
-            return false;
-        };
-        let head = if usize::from(y) < self.shown.len() {
-            Point {
+        let head = match self.shown.get(usize::from(y)) {
+            Some(&Some((block, row))) => Point {
                 block,
                 row,
                 col: usize::from(x),
-            }
-        } else {
-            Point {
-                block,
-                row,
-                col: usize::MAX,
+            },
+            // A covered row: the head stays.
+            Some(None) => return false,
+            None => {
+                let Some(&Some((block, row))) = self.shown.iter().rev().find(|row| row.is_some())
+                else {
+                    return false;
+                };
+                Point {
+                    block,
+                    row,
+                    col: usize::MAX,
+                }
             }
         };
         let changed = selection.head != head;
@@ -1039,52 +1070,15 @@ impl Transcript {
             self.selection = None;
             return None;
         }
-        let (start, end) = selection.span();
-        let width = self.width;
-        if width == 0 {
+        if self.width == 0 {
             return None;
         }
-        let mut text = String::new();
-        let mut cut = false;
-        'blocks: for index in start.block..=end.block {
-            let Some(offset) = index.checked_sub(self.dropped) else {
-                continue;
-            };
-            let Some(block) = self.blocks.get_mut(offset) else {
-                break;
-            };
-            block.sync(width);
-            let rows = block.rows();
-            if rows == 0 {
-                continue;
-            }
-            let first = if index == start.block { start.row } else { 0 };
-            let last = if index == end.block {
-                end.row.min(rows - 1)
-            } else {
-                rows - 1
-            };
-            for row in first..=last {
-                let Some((from, to)) = selection.columns(index, row) else {
-                    continue;
-                };
-                select::copy_row(block, row, from, to, &mut text);
-                if text.len() > COPY_CAP {
-                    let mut at = COPY_CAP;
-                    while !text.is_char_boundary(at) {
-                        at -= 1;
-                    }
-                    text.truncate(at);
-                    cut = true;
-                    break 'blocks;
-                }
-            }
-        }
-        let trimmed = text.trim_matches('\n');
-        if trimmed.len() < text.len() {
-            text = trimmed.to_string();
-        }
-        Some(Copied { text, cut })
+        Some(select::copy(
+            selection,
+            &mut self.blocks,
+            self.dropped,
+            self.width,
+        ))
     }
 }
 

@@ -156,10 +156,11 @@ The interface fits the theme to the terminal:
 ## Keyboard keys
 
 Mouse capture sends the wheel and the buttons to Demerzel. It is on
-by default. The terminal's own text selection then needs the
-terminal's override key, Shift-drag in most terminals. Without
-capture, most terminals turn the wheel into arrow keys on the
-alternate screen, which browse the history.
+by default. `tui.mouse = false` gives the terminal its own text
+selection back. Some terminals also select with Shift-drag while
+capture is on; that depends on the terminal. Without capture, most
+terminals turn the wheel into arrow keys on the alternate screen,
+which browse the history.
 
 The full-screen interface has these keys:
 
@@ -178,14 +179,16 @@ The full-screen interface has these keys:
   of the line, Ctrl-W joins the previous line.
 - A line that starts with `/` opens the completion popup. Tab and
   the arrow keys select a command. Enter puts the command on the
-  line. The next Enter submits the line. Esc closes the popup.
+  line. The next Enter submits the line. Esc closes the popup. A
+  recalled history entry opens no popup; the next edit opens it.
 - PageUp and PageDown scroll the transcript. With `tui.mouse` on, the
   mouse wheel scrolls it too.
 - With `tui.mouse` on, a drag over the transcript selects text. The
   release copies the text to the clipboard through the terminal, as
   an OSC 52 write. The copy leaves out the marks the frame adds: a
-  fence gives its code, a card gives its output. The copy stops at
-  64 KiB, and a notice says so. A click clears the selection.
+  fence gives its code, a card gives its output and its result line.
+  The copy is cut at 64 KiB, and a notice says so. A click clears
+  the selection.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
@@ -204,7 +207,7 @@ privilege, move credentials, or raise cost:
   it off.
 - It cannot turn `tui.mouse` on against a user file that turned it
   off. A repository must not take the terminal's own text selection
-  from a user who gave it up.
+  from a user who turned capture off to keep it.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
 - It cannot define a theme's colors. It can pick `tui.theme`. A color
