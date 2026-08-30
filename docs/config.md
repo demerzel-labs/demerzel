@@ -24,8 +24,8 @@ All keys are optional.
 provider = "openai-codex"        # or "anthropic"
 model = "gpt-5.6-sol"
 approval = "ask"                 # read-only | ask | auto
-max_model_calls = 128            # model calls one turn may make
 effort = "high"                  # none … ultra, see Reasoning effort
+max_model_calls = 128            # model calls one turn may make
 history_file = true              # file-backed input history
 
 [providers.openai-codex]
@@ -113,7 +113,7 @@ mode is the one the flags and the config set.
 
 `max_model_calls` limits the model calls in one user turn. Each
 tool round is one more call, so a long code review uses many calls.
-A value is an integer of 1 or more. When a turn hits the limit, the
+A value is an integer from 1 to the 32-bit maximum. When a turn hits the limit, the
 engine stops the turn, and the interface reports the limit and its
 value. The session keeps every result up to the stop, and the next
 prompt continues from those results. The limit guards against a
@@ -270,6 +270,6 @@ M2.5 step-7 dogfood, because capture took the terminal's own text
 selection. M2.5 step 8b brought selection and copy into the
 interface and set the default back to `true` on the same day.
 `tui.theme` and the `[theme.<name>]` tables landed with M2.5 step 8.
-`max_model_calls` landed on 2026-08-30, after a code review in the
-step-8d dogfood hit the fixed limit; the default rose from 32 to
-128 on the same day.
+`max_model_calls` landed on 2026-08-30, after a code-review
+dogfood hit the fixed limit; the default rose from 32 to 128 on
+the same day.

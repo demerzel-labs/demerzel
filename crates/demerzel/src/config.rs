@@ -82,6 +82,7 @@ impl<T> Setting<T> {
 
 /// The resolved configuration for one run.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Settings {
     pub provider: Setting<String>,
     pub model: Setting<String>,
@@ -100,6 +101,7 @@ pub struct Settings {
 
 /// The resolved `[tui]` keys.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TuiSettings {
     /// Mouse capture in the full-screen interface, for wheel scroll.
     pub mouse: Setting<bool>,
