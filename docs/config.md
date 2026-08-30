@@ -107,8 +107,8 @@ built-in name edits that theme. A table with a new name starts from
 
 | Role | What it colors |
 |---|---|
-| `text` | replies, cards, the input box, the status on the box's edge, the status bar's text |
-| `dim` | thinking blocks, notices, a card's output tail and hint, markdown marks, link destinations, the completions not selected |
+| `text` | replies, cards, the input box, the status bar's text |
+| `dim` | thinking blocks, notices, a card's output tail and hint, markdown marks, link destinations, the completions not selected, the box's edge and the status on it |
 | `accent` | card headers, the selected completion, the browse indicator |
 | `error` | failure messages, a failed call's mark |
 | `success` | a finished call's mark |

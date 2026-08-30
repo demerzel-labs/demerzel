@@ -38,8 +38,9 @@ const MAX_POPUP_ROWS: usize = 8;
 const FRAMED_HEIGHT: u16 = 8;
 const FRAMED_WIDTH: u16 = 16;
 
-/// Rows the frame takes: the box's top and bottom edges.
-const FRAME_ROWS: u16 = 2;
+/// Rows the frame takes: the box's top edge, a blank row under the
+/// input, and the bottom edge with the status.
+const FRAME_ROWS: u16 = 3;
 
 /// Columns the frame takes at each side: the box's edge.
 const FRAME_INSET: u16 = 1;
@@ -108,8 +109,8 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             .unwrap_or(u16::MAX)
             .clamp(1, box_cap),
     };
-    // From the bottom: the bar, or the box's bottom edge when
-    // framed, then the input rows.
+    // From the bottom: the bar, or the box's bottom edge and the
+    // blank row above it when framed, then the input rows.
     let input_area = Rect {
         x: area.x + inset,
         y: area.y + area.height - bar_rows - frame_rows.saturating_sub(1) - input_rows,
@@ -126,7 +127,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     if framed {
         let frame_area = Rect {
             y: input_area.y - 1,
-            height: input_rows + 2,
+            height: input_rows + FRAME_ROWS,
             ..area
         };
         draw_frame(frame, frame_area, view.status, palette);
@@ -275,13 +276,18 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
 
 /// The box's bottom edge with the status on it: the model, the
 /// mode, and the token totals, each between line segments, cut to
-/// the width from the right; the corners stay.
+/// the width from the right; the corners stay. The segments take
+/// the dim role's color, so they read apart from the typed text and
+/// follow the theme; with no color they dim like the lines.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
     let dim = paint(
         Style::default().add_modifier(Modifier::DIM),
         palette.color(Role::Dim),
     );
-    let text = paint(Style::default(), palette.color(Role::Text));
+    let text = match palette.color(Role::Dim) {
+        Some(color) => Style::default().fg(color),
+        None => dim,
+    };
     let totals = format!(
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
@@ -1165,13 +1171,13 @@ line 12",
         top_line(&mut transcript, &mut editor);
         transcript.scroll_up(5);
         let before = top_line(&mut transcript, &mut editor);
-        assert_eq!(before.trim_end(), "line 10");
+        assert_eq!(before.trim_end(), "line 11");
         // Two more editor rows take two transcript rows; the top row
         // stays.
         editor.set("one\ntwo\nthree");
         // The pane is one row now, so the indicator shares it.
         let after = top_line(&mut transcript, &mut editor);
-        assert!(after.starts_with("line 10"), "{after:?}");
+        assert!(after.starts_with("line 11"), "{after:?}");
         assert_eq!(transcript.scroll(), 7);
     }
 
@@ -1586,7 +1592,7 @@ line 12",
         transcript.tool_end("c2", "bash", outcome("a\nb\nc\nd\ne\nf\ng\nh"));
         let (lines, _) = frame_of(&mut transcript, 40, 40);
         // The pane is the rows above the frame, the box, and the bar.
-        let last = lines[..37]
+        let last = lines[..36]
             .iter()
             .rposition(|line| !line.is_empty())
             .unwrap();
@@ -1678,13 +1684,13 @@ line 12",
         let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "line 0");
         transcript.push_line(Kind::Text, "line 1");
-        // An eight-row screen: five pane rows, then the box with
+        // An eight-row screen: four pane rows, then the box with
         // its frame.
         frame_of(&mut transcript, 30, 8);
         transcript.select_press(0, 0);
         assert!(transcript.select_drag(2, 0));
-        // Rows 5 to 7 are the box and its frame: the head stays.
-        for y in 5..8 {
+        // Rows 4 to 7 are the box and its frame: the head stays.
+        for y in 4..8 {
             assert!(!transcript.select_drag(9, y));
         }
         assert_eq!(transcript.select_release().unwrap().text, "lin");
@@ -1739,14 +1745,15 @@ line 12",
             },
         );
         // The pane, a blank row, the progress line, the box's top,
-        // the input row inside the box, the box's bottom edge with
-        // the status.
-        assert_eq!(rows, 3);
+        // the input row, a blank row, the box's bottom edge with the
+        // status.
+        assert_eq!(rows, 2);
         assert_eq!(lines[0].trim_end(), "line 0");
-        assert_eq!(lines[3].trim(), "");
-        assert_eq!(lines[4].trim_end(), "⠋ 3s · bash");
-        assert_eq!(lines[5], "╭──────────────────╮");
-        assert_eq!(lines[6], format!("│❯{}│", " ".repeat(17)));
+        assert_eq!(lines[2].trim(), "");
+        assert_eq!(lines[3].trim_end(), "⠋ 3s · bash");
+        assert_eq!(lines[4], "╭──────────────────╮");
+        assert_eq!(lines[5], format!("│❯{}│", " ".repeat(17)));
+        assert_eq!(lines[6], format!("│{}│", " ".repeat(18)));
         assert!(lines[7].starts_with("╰─ test-model ─"), "{:?}", lines[7]);
         assert!(lines[7].ends_with('╯'), "{:?}", lines[7]);
         assert_eq!(lines[7].chars().count(), 20);

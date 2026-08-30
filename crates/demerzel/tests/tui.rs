@@ -967,17 +967,17 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     // Two notches of three rows: the window moved up six rows past
     // the usage notice and the last five reply rows. The resize
     // lands in the same frame: the pane loses one row and the top
-    // row holds, so the scroll deepens to seven. A 26-row pane —
-    // 29 rows less the box and its frame — opens on row 28; the
+    // row holds, so the scroll deepens to seven. A 25-row pane —
+    // 29 rows less the box and its frame — opens on row 29; the
     // indicator counts the seven below.
-    pty.wait_for("row 28 of the long reply");
+    pty.wait_for("row 29 of the long reply");
     pty.wait_for("7 below");
     // A click on the indicator, at the right of the pane's last
     // row, returns to the bottom. The frame diff rewrites only the
     // digits that changed, so a resize forces the full repaint the
     // assertion reads.
-    pty.send(&mouse_press(95, 26));
-    pty.send(&mouse_release(95, 26));
+    pty.send(&mouse_press(95, 25));
+    pty.send(&mouse_release(95, 25));
     pty.resize(100, 30);
     pty.wait_for("row 59 of the long reply");
     // Up again; End returns to the bottom of the transcript.
