@@ -277,7 +277,8 @@ const BAR_SEP: &str = " · ";
 /// One row on the bar's ground — the theme's, or reversed when the
 /// theme sets none: model, mode, effort, project, branch, token
 /// totals, cut to the width from the right one whole segment at a
-/// time. The small-screen form of the status.
+/// time; the model alone cuts with a mark. The small-screen form of
+/// the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let totals = format!(
         "{} in · {} out · {} cached",
@@ -292,7 +293,15 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
         if segment.is_empty() {
             continue;
         }
-        let Some((piece, cols)) = fit_whole([sep, label, segment], width - used) else {
+        // The first segment, the model, cuts with a mark: see
+        // `status_edge`.
+        let parts = [sep, label, segment];
+        let fit = if used == 0 {
+            fit_marked(parts, width)
+        } else {
+            fit_whole(parts, width - used)
+        };
+        let Some((piece, cols)) = fit else {
             break;
         };
         shown.push_str(&piece);
@@ -345,7 +354,8 @@ const EFFORT_LABEL: &str = "effort ";
 /// The box's bottom edge with the status on it: the model, the
 /// mode, the effort, the project, the branch, and the token totals,
 /// each between line segments, cut to the width from the right one
-/// whole segment at a time; the corners stay. The segments take the
+/// whole segment at a time, the model alone with a mark; the corners
+/// stay. The segments take the
 /// dim role's color, so they read apart from the typed text and
 /// follow the theme; with no color they dim like the lines.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
@@ -374,9 +384,18 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         if segment.is_empty() {
             continue;
         }
-        // One column stays for the line after the segment.
+        // One column stays for the line after the segment. The
+        // first segment, the model, is never a count: a box too
+        // narrow for it shows what fits and a cut mark, so the
+        // status never goes blank.
         let room = budget.saturating_sub(used + 1);
-        let Some((piece, cols)) = fit_whole([" ", label, segment, " "], room) else {
+        let parts = [" ", label, segment, " "];
+        let fit = if used == 2 {
+            fit_marked(parts, room)
+        } else {
+            fit_whole(parts, room)
+        };
+        let Some((piece, cols)) = fit else {
             break;
         };
         spans.push(Span::styled(piece, text));
@@ -414,6 +433,21 @@ fn fit_row<const N: usize>(parts: [&str; N], width: usize) -> (String, usize) {
 fn fit_whole<const N: usize>(parts: [&str; N], width: usize) -> Option<(String, usize)> {
     let (shown, used, whole) = fit_parts(parts, width);
     whole.then_some((shown, used))
+}
+
+/// `parts` whole when they fit in `width`, else cut with a cut mark
+/// in the last column; `None` when the row holds no more than the
+/// mark. For a segment that is never a count.
+fn fit_marked<const N: usize>(parts: [&str; N], width: usize) -> Option<(String, usize)> {
+    if let Some(fit) = fit_whole(parts, width) {
+        return Some(fit);
+    }
+    if width < 2 {
+        return None;
+    }
+    let (mut shown, used) = fit_row(parts, width - 1);
+    shown.push('…');
+    Some((shown, used + 1))
 }
 
 /// The row behind [`fit_row`] and [`fit_whole`]: the parts joined
@@ -1067,6 +1101,38 @@ mod tests {
             );
             assert_eq!(lines[2].trim_end(), row, "width {width}");
         }
+        // The model is never a count: too narrow for it whole, the
+        // status shows what fits and a cut mark, on both forms.
+        let status = Status {
+            model: "a-long-model-name".into(),
+            ..status
+        };
+        let (lines, _) = render(
+            16,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert_eq!(lines[7], "╰─ a-long-mod…─╯");
+        let (lines, _) = render(
+            8,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert_eq!(lines[2], " a-long…");
     }
 
     #[test]
