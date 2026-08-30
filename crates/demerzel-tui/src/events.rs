@@ -52,12 +52,25 @@ pub(crate) enum DisplayEvent {
     Usage(Usage),
     Notice(String),
     Error(String),
-    /// The session model changed; the status follows.
-    Model(String),
-    /// The reasoning effort changed; the status follows.
-    Effort(String),
+    /// A status patch: the segments it names change.
+    Status(StatusPatch),
     /// A session opened or closed; the status totals restart.
     SessionChanged,
+}
+
+/// A change to the status. Each field that is `Some` replaces its
+/// segment; `None` leaves it. Start from [`StatusPatch::default`]
+/// and set the fields to change; the struct grows with the status.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct StatusPatch {
+    /// The session model's name.
+    pub model: Option<String>,
+    /// The reasoning effort's name; empty shows no segment.
+    pub effort: Option<String>,
+    /// The git branch, or the short hash of a detached head; empty
+    /// shows no segment.
+    pub branch: Option<String>,
 }
 
 /// Sends display events into the interface loop. The driver hands it
@@ -83,14 +96,10 @@ impl EventSender {
         let _ = self.tx.send(DisplayEvent::Error(text.into()));
     }
 
-    /// Name the session model on the status.
-    pub fn model(&self, name: impl Into<String>) {
-        let _ = self.tx.send(DisplayEvent::Model(name.into()));
-    }
-
-    /// Name the reasoning effort on the status.
-    pub fn effort(&self, name: impl Into<String>) {
-        let _ = self.tx.send(DisplayEvent::Effort(name.into()));
+    /// Change the status: the fields of `patch` that are `Some`
+    /// replace their segments.
+    pub fn status(&self, patch: StatusPatch) {
+        let _ = self.tx.send(DisplayEvent::Status(patch));
     }
 
     /// A session opened or closed: the status totals restart.

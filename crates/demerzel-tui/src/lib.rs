@@ -39,7 +39,7 @@ use std::pin::Pin;
 
 pub use cards::write_duration;
 pub use editor::CommandSpec;
-pub use events::{ApprovalChannel, EventSender};
+pub use events::{ApprovalChannel, EventSender, StatusPatch};
 pub use theme::Theme;
 pub use thinking::Thinking;
 
@@ -74,8 +74,8 @@ pub enum Submission<'a> {
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
     /// Display events the driver sends through `events` before this
-    /// call returns — a model or effort switch — show on the same
-    /// frame as the note the call returns.
+    /// call returns — a status patch for a model or effort switch —
+    /// show on the same frame as the note the call returns.
     fn submit(
         &mut self,
         line: String,
@@ -95,13 +95,22 @@ pub struct Options {
     /// A dim line shown before the first prompt.
     pub banner: Option<String>,
     /// The session model, shown on the status. The driver updates
-    /// it through [`EventSender::model`].
+    /// it through [`EventSender::status`].
     pub model: String,
     /// The approval mode's display name, shown on the status.
     pub mode: String,
     /// The reasoning effort's name, shown on the status. The driver
-    /// updates it through [`EventSender::effort`].
+    /// updates it through [`EventSender::status`].
     pub effort: String,
+    /// The project directory's name, shown on the status. Empty
+    /// shows no segment. The interface cuts it at 64 bytes and
+    /// drops control characters.
+    pub project: String,
+    /// The git branch, shown on the status. Empty shows no segment.
+    /// The driver reads it and updates it through
+    /// [`EventSender::status`] at each turn's start. The interface
+    /// cuts it at 64 bytes and drops control characters.
+    pub branch: String,
     /// Capture the mouse: the wheel scrolls the transcript, and a
     /// drag selects text that the release copies to the clipboard
     /// through the terminal. On by default; off gives the terminal
@@ -132,6 +141,8 @@ impl Default for Options {
             model: String::new(),
             mode: String::new(),
             effort: String::new(),
+            project: String::new(),
+            branch: String::new(),
             mouse: true,
             markdown: true,
             thinking: Thinking::default(),

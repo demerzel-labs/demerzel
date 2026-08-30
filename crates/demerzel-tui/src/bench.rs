@@ -34,6 +34,8 @@ impl Screen {
                 model: "bench-model".into(),
                 mode: "auto".into(),
                 effort: "high".into(),
+                project: "bench".into(),
+                branch: "main".into(),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,

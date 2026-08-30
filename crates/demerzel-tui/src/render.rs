@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
 use crate::editor::{CommandSpec, Editor, displayed};
+use crate::events::StatusPatch;
 use crate::markdown::Face;
 use crate::select;
 use crate::theme::{Palette, Role};
@@ -48,17 +49,79 @@ const FRAME_ROWS: u16 = 3;
 const FRAME_INSET: u16 = 1;
 
 /// What the status names: the model, the mode, the reasoning
-/// effort, and the open session's token totals, counted from this
-/// run's start. A session change restarts the totals. The session's
-/// id is a `/session` reply, not a segment.
+/// effort, the project and its branch, and the open session's token
+/// totals, counted from this run's start. A session change restarts
+/// the totals. The session's id is a `/session` reply, not a
+/// segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: String,
     /// The effort's name; empty shows no segment.
     pub effort: String,
+    /// The project directory's name; empty shows no segment.
+    pub project: String,
+    /// The git branch, or a detached head's short hash; empty shows
+    /// no segment.
+    pub branch: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+}
+
+/// Segments the status shows at most.
+const SEGMENTS: usize = 6;
+
+impl Status {
+    /// The segments in order, each a label and its text. An empty
+    /// text is no segment.
+    fn segments<'a>(&'a self, totals: &'a str) -> [(&'a str, &'a str); SEGMENTS] {
+        [
+            ("", self.model.as_str()),
+            ("", self.mode.as_str()),
+            (EFFORT_LABEL, self.effort.as_str()),
+            ("", self.project.as_str()),
+            ("", self.branch.as_str()),
+            ("", totals),
+        ]
+    }
+
+    /// Take the segments `patch` names.
+    pub(crate) fn apply(&mut self, patch: StatusPatch) {
+        if let Some(model) = patch.model {
+            self.model = model;
+        }
+        if let Some(effort) = patch.effort {
+            self.effort = effort;
+        }
+        if let Some(branch) = patch.branch {
+            self.branch = status_text(&branch);
+        }
+    }
+}
+
+/// Bytes a project or branch name keeps on the status. Both come
+/// from the file system, so the status treats them like a tool name:
+/// cut and with no control character.
+const STATUS_TEXT_BYTES: usize = 64;
+
+/// `raw` as the status shows it: one line of at most
+/// [`STATUS_TEXT_BYTES`] plus a cut mark, with no control character.
+/// A char lands whole or not at all.
+pub(crate) fn status_text(raw: &str) -> String {
+    let mut text = String::with_capacity(raw.len().min(STATUS_TEXT_BYTES + 3));
+    for ch in raw.chars() {
+        let ch = match ch {
+            '\n' | '\t' => ' ',
+            ch if ch.is_control() => continue,
+            ch => ch,
+        };
+        if text.len() + ch.len_utf8() > STATUS_TEXT_BYTES {
+            text.push('…');
+            break;
+        }
+        text.push(ch);
+    }
+    text
 }
 
 /// What one frame shows.
@@ -208,32 +271,43 @@ fn input_columns(width: u16) -> (u16, bool) {
     }
 }
 
+/// The separator between two bar segments.
+const BAR_SEP: &str = " · ";
+
 /// One row on the bar's ground — the theme's, or reversed when the
-/// theme sets none: model, mode, effort, token totals, cut to the
-/// width from the right. The small-screen form of the status.
+/// theme sets none: model, mode, effort, project, branch, token
+/// totals, cut to the width from the right one whole segment at a
+/// time; the model alone cuts with a mark. The small-screen form of
+/// the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let totals = format!(
-        " · {} in · {} out · {} cached",
+        "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let (effort_sep, effort_label) = if status.effort.is_empty() {
-        ("", "")
-    } else {
-        (" · ", EFFORT_LABEL)
-    };
-    let segments = [
-        " ",
-        status.model.as_str(),
-        " · ",
-        status.mode.as_str(),
-        effort_sep,
-        effort_label,
-        status.effort.as_str(),
-        totals.as_str(),
-    ];
-
     let width = usize::from(area.width);
-    let (mut shown, used) = fit_row(segments, width);
+    let mut shown = String::with_capacity(width.min(256));
+    let mut used = 0usize;
+    let mut sep = " ";
+    // An empty text is no segment: its separator and label go too.
+    for (label, segment) in status.segments(&totals) {
+        if segment.is_empty() {
+            continue;
+        }
+        // The first segment, the model, cuts with a mark: see
+        // `status_edge`.
+        let parts = [sep, label, segment];
+        let fit = if used == 0 {
+            fit_marked(parts, width)
+        } else {
+            fit_whole(parts, width - used)
+        };
+        let Some((piece, cols)) = fit else {
+            break;
+        };
+        shown.push_str(&piece);
+        used += cols;
+        sep = BAR_SEP;
+    }
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));
     // With one of the two colors the row reverses onto it: the
@@ -278,11 +352,12 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
 const EFFORT_LABEL: &str = "effort ";
 
 /// The box's bottom edge with the status on it: the model, the
-/// mode, the effort, and the token totals, each between line
-/// segments, cut to the width from the right; the corners stay. The
-/// segments take the dim role's color, so they read apart from the
-/// typed text and follow the theme; with no color they dim like the
-/// lines.
+/// mode, the effort, the project, the branch, and the token totals,
+/// each between line segments, cut to the width from the right one
+/// whole segment at a time, the model alone with a mark; the corners
+/// stay. The segments take the
+/// dim role's color, so they read apart from the typed text and
+/// follow the theme; with no color they dim like the lines.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
     let dim = paint(
         Style::default().add_modifier(Modifier::DIM),
@@ -296,34 +371,33 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    // Each segment is a label and its text; an empty text is no
-    // segment.
-    let segments = [
-        ("", status.model.as_str()),
-        ("", status.mode.as_str()),
-        (EFFORT_LABEL, status.effort.as_str()),
-        ("", totals.as_str()),
-    ];
     // The caller frames a screen of sixteen columns or more, so the
     // corners and the first line always fit.
     debug_assert!(width >= usize::from(FRAMED_WIDTH));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(2 * SEGMENTS + 3);
     // The right corner keeps the last column.
     let budget = width.saturating_sub(1);
     spans.push(Span::styled("╰─", dim));
     let mut used = 2usize;
-    for (label, segment) in segments {
+    // An empty text is no segment.
+    for (label, segment) in status.segments(&totals) {
         if segment.is_empty() {
             continue;
         }
-        // One column stays for the line after the segment.
+        // One column stays for the line after the segment. The
+        // first segment, the model, is never a count: a box too
+        // narrow for it shows what fits and a cut mark, so the
+        // status never goes blank.
         let room = budget.saturating_sub(used + 1);
-        let (piece, cols) = fit_row([" ", label, segment, " "], room);
-        // The leading space always fits: a piece of one column
-        // holds none of the segment, and the line fills the rest.
-        if cols <= 1 {
+        let parts = [" ", label, segment, " "];
+        let fit = if used == 2 {
+            fit_marked(parts, room)
+        } else {
+            fit_whole(parts, room)
+        };
+        let Some((piece, cols)) = fit else {
             break;
-        }
+        };
         spans.push(Span::styled(piece, text));
         spans.push(Span::styled("─", dim));
         used += cols + 1;
@@ -349,23 +423,54 @@ fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
 /// drop: a name from config, from `/model`, or from the model must
 /// never put an escape byte in the frame, the transcript's rule.
 fn fit_row<const N: usize>(parts: [&str; N], width: usize) -> (String, usize) {
+    let (shown, used, _) = fit_parts(parts, width);
+    (shown, used)
+}
+
+/// `parts` as one row when the whole of it fits in `width`, with its
+/// columns; `None` when it does not. A status segment shows whole or
+/// not at all, so a cut count never reads as a number.
+fn fit_whole<const N: usize>(parts: [&str; N], width: usize) -> Option<(String, usize)> {
+    let (shown, used, whole) = fit_parts(parts, width);
+    whole.then_some((shown, used))
+}
+
+/// `parts` whole when they fit in `width`, else cut with a cut mark
+/// in the last column; `None` when the row holds no more than the
+/// mark. For a segment that is never a count.
+fn fit_marked<const N: usize>(parts: [&str; N], width: usize) -> Option<(String, usize)> {
+    if let Some(fit) = fit_whole(parts, width) {
+        return Some(fit);
+    }
+    if width < 2 {
+        return None;
+    }
+    let (mut shown, used) = fit_row(parts, width - 1);
+    shown.push('…');
+    Some((shown, used + 1))
+}
+
+/// The row behind [`fit_row`] and [`fit_whole`]: the parts joined
+/// and cut to `width`, the columns used, and whether every part
+/// landed.
+fn fit_parts<const N: usize>(parts: [&str; N], width: usize) -> (String, usize, bool) {
     let bytes: usize = parts.iter().map(|part| part.len()).sum();
     let mut shown = String::with_capacity(bytes.min(width.saturating_mul(4)));
     let mut used = 0usize;
-    'parts: for part in parts {
+    for part in parts {
         for ch in part.chars() {
             if ch.is_control() {
                 continue;
             }
             let cols = ch.width().unwrap_or(0);
             if used + cols > width {
-                break 'parts;
+                return (shown, used, false);
             }
             shown.push(ch);
             used += cols;
         }
     }
-    (shown, used)
+    (shown, used, true)
 }
 
 /// `style` with `color` as its foreground. A role with no color
@@ -762,6 +867,8 @@ mod tests {
             model: "test-model".into(),
             mode: "ask".into(),
             effort: "high".into(),
+            project: String::new(),
+            branch: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
@@ -838,6 +945,194 @@ mod tests {
             "{:?}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn the_project_and_the_branch_sit_between_the_effort_and_the_totals() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            project: "demerzel".into(),
+            branch: "feature/status".into(),
+            ..status()
+        };
+        let palette = palette();
+        // On the box's edge, and on the bar.
+        let (lines, _) = render(
+            90,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[7].starts_with(
+                "╰─ test-model ─ ask ─ effort high ─ demerzel ─ feature/status ─ 0 in"
+            ),
+            "{:?}",
+            lines[7]
+        );
+        let (lines, _) = render(
+            90,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[2].contains("effort high · demerzel · feature/status · 0 in"),
+            "{:?}",
+            lines[2]
+        );
+        // No branch: the segment and its separator go.
+        let status = Status {
+            branch: String::new(),
+            ..status
+        };
+        let (lines, _) = render(
+            90,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[2].contains("effort high · demerzel · 0 in"),
+            "{:?}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn status_text_drops_control_characters_and_cuts_at_the_cap() {
+        assert_eq!(status_text("ma\x1b[31min"), "ma[31min");
+        assert_eq!(status_text("a\tb\nc"), "a b c");
+        let long = "b".repeat(100);
+        assert_eq!(status_text(&long), format!("{}…", "b".repeat(64)));
+        // A char lands whole or not at all: the cut stays at the cap.
+        let mixed = format!("{}€€", "b".repeat(62));
+        assert_eq!(status_text(&mixed), format!("{}…", "b".repeat(62)));
+        assert_eq!(status_text(&"b".repeat(64)), "b".repeat(64));
+    }
+
+    #[test]
+    fn a_status_segment_shows_whole_or_not_at_all() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            project: "demerzel".into(),
+            branch: "main".into(),
+            input_tokens: 48219,
+            output_tokens: 3104,
+            cached_tokens: 41890,
+            ..status()
+        };
+        let palette = palette();
+        // The edge needs 91 columns whole. The totals need 36; a
+        // box one column short of them shows none, so no cut count
+        // reads as a number. The branch goes next, then the project.
+        let full = "╰─ test-model ─ ask ─ effort high ─ demerzel ─ main ─";
+        for (width, head) in [
+            (
+                91,
+                "╰─ test-model ─ ask ─ effort high ─ demerzel ─ main ─ 48219 in · 3104 out · 41890 cached ─",
+            ),
+            (90, full),
+            (47, "╰─ test-model ─ ask ─ effort high ─ demerzel ─"),
+            (46, "╰─ test-model ─ ask ─ effort high ─"),
+        ] {
+            let (lines, _) = render(
+                width,
+                8,
+                View {
+                    transcript: &mut transcript,
+                    editor: &mut editor,
+                    status: &status,
+                    palette: &palette,
+                    approval: None,
+                    progress: None,
+                },
+            );
+            let edge = &lines[7];
+            assert!(edge.starts_with(head), "width {width}: {edge:?}");
+            assert!(
+                edge[head.len()..]
+                    .trim_end_matches('╯')
+                    .chars()
+                    .all(|ch| ch == '─'),
+                "width {width}: {edge:?}"
+            );
+        }
+        // The bar follows the same rule; it needs 86 columns whole.
+        for (width, row) in [
+            (
+                86,
+                " test-model · ask · effort high · demerzel · main · 48219 in · 3104 out · 41890 cached",
+            ),
+            (85, " test-model · ask · effort high · demerzel · main"),
+            (36, " test-model · ask · effort high"),
+        ] {
+            let (lines, _) = render(
+                width,
+                3,
+                View {
+                    transcript: &mut transcript,
+                    editor: &mut editor,
+                    status: &status,
+                    palette: &palette,
+                    approval: None,
+                    progress: None,
+                },
+            );
+            assert_eq!(lines[2].trim_end(), row, "width {width}");
+        }
+        // The model is never a count: too narrow for it whole, the
+        // status shows what fits and a cut mark, on both forms.
+        let status = Status {
+            model: "a-long-model-name".into(),
+            ..status
+        };
+        let (lines, _) = render(
+            16,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert_eq!(lines[7], "╰─ a-long-mod…─╯");
+        let (lines, _) = render(
+            8,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert_eq!(lines[2], " a-long…");
     }
 
     #[test]

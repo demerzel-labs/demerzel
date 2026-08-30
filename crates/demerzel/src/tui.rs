@@ -5,13 +5,16 @@
 //! registry, the previews, and the message wording. The driver builds
 //! every preview, so the interface crate needs no knowledge of tools.
 
+use std::path::PathBuf;
+
 use demerzel_core::{
     ApprovalAnswer, Approver, BoxFuture, Effort, Engine, EngineEvent, EventSink, TurnOutcome,
 };
-use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
+use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, Submission};
 use serde_json::Value;
 
 use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
+use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
@@ -32,6 +35,21 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.model = config.model.clone();
     options.mode = mode.to_string();
     options.effort = config.effort.to_string();
+    // The config takes any path; the name and the branch need a
+    // real one, so `.` and `..` name their directory and the walk
+    // up visits true ancestors only. The session record's `cwd`
+    // resolves the same way.
+    let project_dir = config
+        .project_dir
+        .canonicalize()
+        .or_else(|_| std::path::absolute(&config.project_dir))
+        .unwrap_or_else(|_| config.project_dir.clone());
+    options.project = project_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let branch = git_branch(&project_dir).unwrap_or_default();
+    options.branch = branch.clone();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
     options.thinking = config.thinking;
@@ -43,6 +61,8 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         model: config.model.clone(),
         effort: config.effort,
         resume: config.continue_last,
+        project_dir,
+        branch,
     };
     demerzel_tui::run(&mut driver, options)
         .await
@@ -61,6 +81,13 @@ struct TuiDriver<'r> {
     /// Whether the next open resumes the latest session. `/new`
     /// clears it.
     resume: bool,
+    /// The project directory, resolved: the branch read walks up
+    /// from it.
+    project_dir: PathBuf,
+    /// The branch the status shows; empty for none. Read again at
+    /// each turn's start, so a checkout between turns shows at the
+    /// next turn.
+    branch: String,
 }
 
 /// The engine's event sink: it forwards every display event and
@@ -130,7 +157,9 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.model = name.clone();
-                events.model(name);
+                let mut patch = StatusPatch::default();
+                patch.model = Some(name);
+                events.status(patch);
                 return Submission::Note(model_note(&self.model));
             }
             Some(Effect::SetEffort(effort)) => {
@@ -140,12 +169,24 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.effort = effort;
-                events.effort(effort.to_string());
+                let mut patch = StatusPatch::default();
+                patch.effort = Some(effort.to_string());
+                events.status(patch);
                 return Submission::Note(effort_note(effort));
             }
             None => {}
         }
         Submission::Run(Box::pin(async move {
+            // The branch on the status follows a checkout between
+            // turns: one read at each turn's start, no polling, and
+            // a patch only on a change.
+            let branch = git_branch(&self.project_dir).unwrap_or_default();
+            if branch != self.branch {
+                self.branch = branch;
+                let mut patch = StatusPatch::default();
+                patch.branch = Some(self.branch.clone());
+                events.status(patch);
+            }
             if self.engine.is_none() {
                 match self
                     .runtime

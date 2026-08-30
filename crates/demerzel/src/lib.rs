@@ -7,6 +7,7 @@
 mod commands;
 pub mod config;
 pub mod doctor;
+mod git;
 pub mod login;
 mod preview;
 pub mod repl;
