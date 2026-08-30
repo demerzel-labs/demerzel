@@ -44,13 +44,13 @@ const FRAME_ROWS: u16 = 2;
 /// Columns the frame takes at each side: the box's edge.
 const FRAME_INSET: u16 = 1;
 
-/// What the status bar names: the model, the mode, the open session,
-/// and the open session's token totals, counted from this run's
-/// start. A session change restarts the totals.
+/// What the status names: the model, the mode, and the open
+/// session's token totals, counted from this run's start. A session
+/// change restarts the totals. The session's id is a `/session`
+/// reply, not a segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: String,
-    pub session: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
@@ -211,15 +211,11 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
         " · {} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let session = status.session.as_deref().unwrap_or("");
-    let separator = if status.session.is_some() { " · " } else { "" };
     let segments = [
         " ",
         status.model.as_str(),
         " · ",
         status.mode.as_str(),
-        separator,
-        session,
         totals.as_str(),
     ];
 
@@ -278,8 +274,8 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
 }
 
 /// The box's bottom edge with the status on it: the model, the
-/// mode, the session, and the token totals, each between line
-/// segments, cut to the width from the right; the corners stay.
+/// mode, and the token totals, each between line segments, cut to
+/// the width from the right; the corners stay.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
     let dim = paint(
         Style::default().add_modifier(Modifier::DIM),
@@ -290,12 +286,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let segments = [
-        Some(status.model.as_str()),
-        Some(status.mode.as_str()),
-        status.session.as_deref(),
-        Some(totals.as_str()),
-    ];
+    let segments = [status.model.as_str(), status.mode.as_str(), totals.as_str()];
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
     let mut used = 0usize;
     // The right corner keeps the last column.
@@ -304,7 +295,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         spans.push(Span::styled("╰─", dim));
         used = 2;
     }
-    for segment in segments.into_iter().flatten() {
+    for segment in segments {
         // One column stays for the line after the segment.
         let room = budget.saturating_sub(used + 1);
         if room == 0 {
@@ -752,7 +743,6 @@ mod tests {
         Status {
             model: "test-model".into(),
             mode: "ask".into(),
-            session: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
@@ -802,11 +792,10 @@ mod tests {
     }
 
     #[test]
-    fn the_status_bar_names_the_session_and_the_totals() {
+    fn the_status_bar_names_the_totals() {
         let mut transcript = Transcript::new(false);
         let mut editor = Editor::new(Vec::new());
         let status = Status {
-            session: Some("s-9".into()),
             input_tokens: 12,
             output_tokens: 5,
             cached_tokens: 2,
@@ -826,7 +815,7 @@ mod tests {
             },
         );
         assert!(
-            lines[2].contains("test-model · ask · s-9 · 12 in · 5 out · 2 cached"),
+            lines[2].contains("test-model · ask · 12 in · 5 out · 2 cached"),
             "{:?}",
             lines[2]
         );
@@ -1784,7 +1773,6 @@ line 12",
         let mut transcript = Transcript::new(false);
         let mut editor = Editor::new(Vec::new());
         let status = Status {
-            session: Some("s-9".into()),
             input_tokens: 12,
             output_tokens: 5,
             cached_tokens: 2,
@@ -1804,7 +1792,7 @@ line 12",
             },
         );
         let edge = &lines[7];
-        let head = "╰─ test-model ─ ask ─ s-9 ─ 12 in · 5 out · 2 cached ─";
+        let head = "╰─ test-model ─ ask ─ 12 in · 5 out · 2 cached ─";
         assert!(edge.starts_with(head), "{edge:?}");
         assert!(edge.ends_with('╯'), "{edge:?}");
         assert_eq!(edge.chars().count(), 60);

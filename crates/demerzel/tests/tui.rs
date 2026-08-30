@@ -817,24 +817,26 @@ async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_status_bar_names_the_session_from_the_first_prompt_on() {
+async fn the_session_command_names_the_open_session_and_new_restarts_the_totals() {
     let mock = MockServer::start(vec![text_turn("named reply")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
+    // Before the first prompt there is no session to name.
+    pty.send(b"/session\r");
+    pty.wait_for("no open session");
     pty.send(b"hello\r");
     pty.wait_for("named reply");
-    // The session file exists now; its id shows only on the bar. A
-    // resize makes the next draw repaint the bar in full.
+    // The session file exists now; /session names it and its file.
     let sessions = pty.session_files();
     assert_eq!(sessions.len(), 1);
     let id = sessions[0].clone();
-    pty.resize(90, 30);
-    pty.send(b"x");
-    pty.wait_for(&id);
-    pty.send(CTRL_C);
+    pty.send(b"/session\r");
+    pty.wait_for(&format!("session: {id}"));
+    pty.wait_for(&format!("{id}.jsonl"));
     // A fresh session restarts the totals: after the turn above the
-    // bar shows non-zero counts, so a later zero row is the reset.
+    // status shows non-zero counts, so a later zero row is the
+    // reset. A resize repaints the box's edge in full.
     pty.send(b"/new\r");
     pty.wait_for("fresh session");
     pty.resize(80, 30);

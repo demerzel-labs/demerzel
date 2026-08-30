@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
@@ -390,6 +390,13 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         engine = None;
                         resume = false;
                         eprintln!("{NEW_SESSION_NOTE}");
+                        continue;
+                    }
+                    Some(Effect::Session) => {
+                        let session = engine
+                            .as_ref()
+                            .map(|engine| (engine.session().id(), engine.session().path()));
+                        eprintln!("{}", session_note(session));
                         continue;
                     }
                     Some(Effect::SetModel(name)) => {

@@ -33,7 +33,6 @@ impl Screen {
             status: Status {
                 model: "bench-model".into(),
                 mode: "auto".into(),
-                session: Some("bench-session".into()),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,

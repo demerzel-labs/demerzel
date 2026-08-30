@@ -35,6 +35,10 @@ const COMMANDS: &[Command] = &[
         help: "start a fresh session at the next prompt",
     },
     Command {
+        usage: "/session",
+        help: "show the open session's id and file",
+    },
+    Command {
         usage: "/exit",
         help: "end the session (alias: /quit)",
     },
@@ -62,6 +66,15 @@ pub(crate) fn effort_note(effort: Effort) -> String {
     format!("effort: {effort}")
 }
 
+/// The `/session` reply: the open session's id and file, or the
+/// word that none is open yet.
+pub(crate) fn session_note(session: Option<(&str, &std::path::Path)>) -> String {
+    match session {
+        Some((id, path)) => format!("session: {id}\n  {}", path.display()),
+        None => "no open session; the next prompt opens one".to_string(),
+    }
+}
+
 /// What one command asks the interface to do.
 pub(crate) enum Effect {
     /// End the session.
@@ -70,6 +83,8 @@ pub(crate) enum Effect {
     Note(String),
     /// Drop the open session. The next prompt opens a fresh one.
     NewSession,
+    /// Show the open session's id and file.
+    Session,
     /// Switch the session model.
     SetModel(String),
     /// Set the reasoning effort for the turns that follow.
@@ -96,6 +111,7 @@ pub(crate) fn dispatch(line: &str, current_model: &str, current_effort: Effort) 
         "exit" | "quit" => Effect::Exit,
         "help" => Effect::Note(help_text()),
         "new" => Effect::NewSession,
+        "session" => Effect::Session,
         "model" => {
             // Two probes decide the shape; a pasted flood of tokens
             // must not build a vector of itself.
@@ -172,6 +188,10 @@ mod tests {
         assert!(matches!(
             dispatch("/new", "m", Effort::Medium),
             Some(Effect::NewSession)
+        ));
+        assert!(matches!(
+            dispatch("/session", "m", Effort::Medium),
+            Some(Effect::Session)
         ));
         assert!(dispatch("not a command", "m", Effort::Medium).is_none());
 

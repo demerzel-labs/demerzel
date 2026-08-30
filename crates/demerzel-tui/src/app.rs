@@ -203,7 +203,6 @@ impl App {
             status: Status {
                 model: options.model,
                 mode: options.mode,
-                session: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -436,10 +435,9 @@ impl App {
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
             DisplayEvent::Model(name) => self.status.model = name,
-            DisplayEvent::Session(id) => {
+            DisplayEvent::SessionChanged => {
                 // The totals belong to the open session; a session
                 // change restarts them.
-                self.status.session = id;
                 self.status.input_tokens = 0;
                 self.status.output_tokens = 0;
                 self.status.cached_tokens = 0;
