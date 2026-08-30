@@ -589,6 +589,9 @@ pub struct Transcript {
     /// the browse indicator — as `(rows, columns)`; a position there
     /// maps to no row.
     covered: Vec<(Range<usize>, Range<usize>)>,
+    /// The cells of the browse indicator on the last frame, as
+    /// `(row, columns)`: a press there is the key it names.
+    indicator: Option<(usize, Range<usize>)>,
 }
 
 impl Transcript {
@@ -610,6 +613,7 @@ impl Transcript {
             selection: None,
             shown: Vec::new(),
             covered: Vec::new(),
+            indicator: None,
         }
     }
 
@@ -1029,12 +1033,28 @@ impl Transcript {
     pub(crate) fn set_shown(&mut self, shown: Vec<(usize, usize)>) {
         self.shown = shown;
         self.covered.clear();
+        self.indicator = None;
     }
 
     /// A frame drew no transcript rows: no position maps to one.
     pub(crate) fn clear_shown(&mut self) {
         self.shown.clear();
         self.covered.clear();
+        self.indicator = None;
+    }
+
+    /// The frame drew the browse indicator on viewport row `row`
+    /// over `columns`: the cells are covered, and a press there
+    /// returns to follow mode.
+    pub(crate) fn set_indicator(&mut self, row: usize, columns: Range<usize>) {
+        self.cover(row..row + 1, columns.clone());
+        self.indicator = Some((row, columns));
+    }
+
+    fn on_indicator(&self, x: u16, y: u16) -> bool {
+        self.indicator.as_ref().is_some_and(|(row, columns)| {
+            *row == usize::from(y) && columns.contains(&usize::from(x))
+        })
     }
 
     /// The frame drew something over viewport `rows` and `columns`
@@ -1080,8 +1100,14 @@ impl Transcript {
 
     /// A press at viewport column `x` and row `y` starts a selection
     /// on the row shown there, or clears the selection when no row
-    /// is. Returns whether the frame changes.
+    /// is. A press on the browse indicator is the End key: the view
+    /// returns to follow mode. Returns whether the frame changes.
     pub fn select_press(&mut self, x: u16, y: u16) -> bool {
+        if self.on_indicator(x, y) {
+            self.follow();
+            self.selection = None;
+            return true;
+        }
         let before = self.selection;
         self.selection = self.point_at(x, y).map(|point| Selection {
             anchor: point,
