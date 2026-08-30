@@ -1345,10 +1345,15 @@ async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
         has_params(&params, &[38, 2, 0xd0, 0xd8, 0xe4]),
         "the text role in truecolor: {params:?}"
     );
-    // The box's edge, with the status on it, takes the dim role.
+    // The box's edge, with the status on it, takes the dim role; a
+    // framed screen draws no bar, so the bar's ground never paints.
     assert!(
         has_params(&params, &[38, 2, 0x7b, 0x84, 0x94]),
         "the dim role in truecolor: {params:?}"
+    );
+    assert!(
+        !has_params(&params, &[48, 2, 0x36, 0x3e, 0x4e]),
+        "no bar ground on a framed screen: {params:?}"
     );
 }
 

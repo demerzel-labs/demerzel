@@ -186,6 +186,11 @@ fn bench_render(c: &mut Criterion) {
         };
         assert_eq!(check.rendered_blocks(), rendered);
     }
+    // The selected frame's span must reach the pane's last row: a
+    // layout change that moves the row would leave a one-point
+    // selection and a bench that measures nothing.
+    let mut check = screen_with_history(false);
+    assert!(check.select((4, 0), (60, HEIGHT - 5)));
 
     // The frames run before any throughput is set on the group, the
     // M2 shape of `frame`. The formatted one redraws a screen whose
@@ -199,7 +204,7 @@ fn bench_render(c: &mut Criterion) {
         group.bench_function(format!("frame{suffix}"), |b| b.iter(|| screen.draw()));
         // The selection spans the whole transcript pane: the rows
         // above the input box and its frame.
-        screen.select((4, 0), (60, HEIGHT - 5));
+        assert!(screen.select((4, 0), (60, HEIGHT - 5)));
         screen.draw();
         group.bench_function(format!("frame-selected{suffix}"), |b| {
             b.iter(|| screen.draw())

@@ -12,7 +12,8 @@
 //! card to its kept output and collapses them again. Ctrl-T opens
 //! the newest thinking block and closes it again. With capture on, a
 //! drag over the transcript selects text and the release copies it
-//! to the clipboard through the terminal; a click clears it.
+//! to the clipboard through the terminal; a click clears it, and a
+//! press on the browse indicator is the End key.
 //!
 //! The editor holds several lines: Enter submits, Alt-Enter and
 //! Shift-Enter insert a newline, and a paste keeps its newlines. Up
@@ -23,9 +24,11 @@
 //! keep browsing.
 //!
 //! While a turn runs, a progress line above the input box shows a
-//! spinner, the elapsed time, and the stage. The status bar is the
-//! bottom row, under the input box. A tick timer wakes the
-//! loop for it during the turn only; at idle nothing wakes.
+//! spinner, the elapsed time, and the stage. The status sits on the
+//! input box's bottom edge, or on a bar under the box when the
+//! screen is too small for the frame. A tick timer wakes the loop
+//! for the progress line during the turn only; at idle nothing
+//! wakes.
 
 use std::future::poll_fn;
 use std::io;

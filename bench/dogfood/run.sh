@@ -3,7 +3,8 @@
 #
 # The session runs the release binary against the configured provider
 # with the ask approval mode, so the captures show the real screen:
-# the cards, the progress line, the question, and the status bar.
+# the cards, the progress line, the question, and the status on the
+# input box's edge.
 # Each capture is the 120x40 pane as text, written to the captures
 # directory (default: target/dogfood). Read them, or diff two runs.
 #

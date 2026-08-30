@@ -73,6 +73,9 @@ pub enum Submission<'a> {
 /// [`ApprovalChannel::ask`].
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
+    /// Display events the driver sends through `events` before this
+    /// call returns — a model or effort switch — show on the same
+    /// frame as the note the call returns.
     fn submit(
         &mut self,
         line: String,
@@ -91,10 +94,10 @@ pub struct Options {
     pub history_path: Option<PathBuf>,
     /// A dim line shown before the first prompt.
     pub banner: Option<String>,
-    /// The session model, shown on the status bar. The driver updates
+    /// The session model, shown on the status. The driver updates
     /// it through [`EventSender::model`].
     pub model: String,
-    /// The approval mode's display name, shown on the status bar.
+    /// The approval mode's display name, shown on the status.
     pub mode: String,
     /// The reasoning effort's name, shown on the status. The driver
     /// updates it through [`EventSender::effort`].

@@ -1,6 +1,8 @@
 //! Frame rendering: the transcript pane above, the progress line
-//! while a turn runs, the input box, the completion popup over the
-//! rows above the box, and the status bar at the bottom.
+//! while a turn runs, the input box in its frame with the status on
+//! the frame's bottom edge, the completion popup over the rows
+//! above the box, and, on a screen too small for the frame, the
+//! status bar at the bottom.
 //!
 //! Functions over interface state, driven in tests through ratatui's
 //! `TestBackend` without a terminal. The write-backs: `draw` lays out
@@ -12,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block as Bordered, BorderType, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::PROMPT;
@@ -32,7 +34,7 @@ const MAX_POPUP_ROWS: usize = 8;
 
 /// Screen size from which the input box gets its frame: a box with
 /// rounded corners whose bottom edge carries the status — the model,
-/// the mode, the session, the totals — between line segments. A
+/// the mode, the effort, the totals — between line segments. A
 /// smaller screen keeps every row and column for content and shows
 /// the status as a bar.
 const FRAMED_HEIGHT: u16 = 8;
@@ -207,21 +209,26 @@ fn input_columns(width: u16) -> (u16, bool) {
 }
 
 /// One row on the bar's ground — the theme's, or reversed when the
-/// theme sets none: model, mode, session, token totals, cut to the
-/// width from the right.
+/// theme sets none: model, mode, effort, token totals, cut to the
+/// width from the right. The small-screen form of the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let totals = format!(
         " · {} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let effort = effort_segment(status);
+    let (effort_sep, effort_label) = if status.effort.is_empty() {
+        ("", "")
+    } else {
+        (" · ", EFFORT_LABEL)
+    };
     let segments = [
         " ",
         status.model.as_str(),
         " · ",
         status.mode.as_str(),
-        if effort.is_empty() { "" } else { " · " },
-        effort.as_str(),
+        effort_sep,
+        effort_label,
+        status.effort.as_str(),
         totals.as_str(),
     ];
 
@@ -241,60 +248,41 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
 }
 
 /// The frame around the input box: a dim box with rounded corners,
-/// the status on its bottom edge. The input rows draw inside it
+/// the status on its bottom edge. The top and the sides come from
+/// the border widget, which writes the cells with no allocation;
+/// the bottom edge is its own line. The input rows draw inside
 /// afterwards.
 fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let style = paint(
         Style::default().add_modifier(Modifier::DIM),
         palette.color(Role::Dim),
     );
-    let across = "─".repeat(usize::from(area.width) - 2);
-    let top = Rect { height: 1, ..area };
+    let sides = Bordered::new()
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .border_type(BorderType::Rounded)
+        .border_style(style);
+    frame.render_widget(sides, area);
     let bottom = Rect {
         y: area.y + area.height - 1,
         height: 1,
         ..area
     };
     frame.render_widget(
-        Paragraph::new(Line::styled(format!("╭{across}╮"), style)),
-        top,
-    );
-    frame.render_widget(
         Paragraph::new(status_edge(status, usize::from(area.width), palette)),
         bottom,
     );
-    let sides = usize::from(area.height) - 2;
-    let edge: Vec<Line<'_>> = std::iter::repeat_n(Line::styled("│", style), sides).collect();
-    let left = Rect {
-        y: area.y + 1,
-        width: 1,
-        height: area.height - 2,
-        ..area
-    };
-    let right = Rect {
-        x: area.x + area.width - 1,
-        ..left
-    };
-    frame.render_widget(Paragraph::new(edge.clone()), left);
-    frame.render_widget(Paragraph::new(edge), right);
 }
 
-/// The effort as the status shows it, labeled so it reads apart
-/// from the mode; empty when the effort is unknown.
-fn effort_segment(status: &Status) -> String {
-    if status.effort.is_empty() {
-        String::new()
-    } else {
-        format!("effort {}", status.effort)
-    }
-}
+/// The label before the effort on the status, so the level reads
+/// apart from the mode next to it.
+const EFFORT_LABEL: &str = "effort ";
 
 /// The box's bottom edge with the status on it: the model, the
 /// mode, the effort, and the token totals, each between line
 /// segments, cut to the width from the right; the corners stay. The
-/// segments take
-/// the dim role's color, so they read apart from the typed text and
-/// follow the theme; with no color they dim like the lines.
+/// segments take the dim role's color, so they read apart from the
+/// typed text and follow the theme; with no color they dim like the
+/// lines.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
     let dim = paint(
         Style::default().add_modifier(Modifier::DIM),
@@ -308,29 +296,32 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let effort = effort_segment(status);
+    // Each segment is a label and its text; an empty text is no
+    // segment.
     let segments = [
-        status.model.as_str(),
-        status.mode.as_str(),
-        effort.as_str(),
-        totals.as_str(),
+        ("", status.model.as_str()),
+        ("", status.mode.as_str()),
+        (EFFORT_LABEL, status.effort.as_str()),
+        ("", totals.as_str()),
     ];
+    // The caller frames a screen of sixteen columns or more, so the
+    // corners and the first line always fit.
+    debug_assert!(width >= usize::from(FRAMED_WIDTH));
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
-    let mut used = 0usize;
     // The right corner keeps the last column.
     let budget = width.saturating_sub(1);
-    if budget >= 2 {
-        spans.push(Span::styled("╰─", dim));
-        used = 2;
-    }
-    for segment in segments.into_iter().filter(|segment| !segment.is_empty()) {
+    spans.push(Span::styled("╰─", dim));
+    let mut used = 2usize;
+    for (label, segment) in segments {
+        if segment.is_empty() {
+            continue;
+        }
         // One column stays for the line after the segment.
         let room = budget.saturating_sub(used + 1);
-        if room == 0 {
-            break;
-        }
-        let (piece, cols) = fit_row([" ", segment, " "], room);
-        if cols == 0 {
+        let (piece, cols) = fit_row([" ", label, segment, " "], room);
+        // The leading space always fits: a piece of one column
+        // holds none of the segment, and the line fills the rest.
+        if cols <= 1 {
             break;
         }
         spans.push(Span::styled(piece, text));
@@ -340,9 +331,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
     if used < budget {
         spans.push(Span::styled("─".repeat(budget - used), dim));
     }
-    if width >= 1 {
-        spans.push(Span::styled("╯", dim));
-    }
+    spans.push(Span::styled("╯", dim));
     Line::from(spans)
 }
 
@@ -359,8 +348,9 @@ fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
 /// name costs its visible columns, nothing more. Control characters
 /// drop: a name from config, from `/model`, or from the model must
 /// never put an escape byte in the frame, the transcript's rule.
-fn fit_row<'a>(parts: impl IntoIterator<Item = &'a str>, width: usize) -> (String, usize) {
-    let mut shown = String::with_capacity(width.min(512) * 2);
+fn fit_row<const N: usize>(parts: [&str; N], width: usize) -> (String, usize) {
+    let bytes: usize = parts.iter().map(|part| part.len()).sum();
+    let mut shown = String::with_capacity(bytes.min(width.saturating_mul(4)));
     let mut used = 0usize;
     'parts: for part in parts {
         for ch in part.chars() {
@@ -1847,11 +1837,9 @@ line 12",
                 progress: None,
             },
         );
-        let edge = &lines[7];
-        assert!(edge.starts_with("╰─ test-model ─"), "{edge:?}");
-        assert!(edge.ends_with('╯'), "{edge:?}");
-        assert_eq!(edge.chars().count(), 18);
-        assert!(!edge.contains("cached"));
+        // The mode has no room: the line fills it, and no empty
+        // slot shows.
+        assert_eq!(lines[7], "╰─ test-model ───╯");
     }
 
     #[test]
@@ -1864,7 +1852,7 @@ line 12",
             transcript.select_press(0, 0);
             transcript.select_drag(width - 1, 7);
             let text = transcript.select_release().unwrap().text;
-            assert!(!text.contains("dmz"), "width {width}: {text:?}");
+            assert!(!text.contains('❯'), "width {width}: {text:?}");
             assert!(!text.starts_with('\n'), "width {width}: {text:?}");
             assert_eq!(text.replace('\n', ""), "hellox", "width {width}: {text:?}");
         }
