@@ -530,7 +530,8 @@ pub fn kept_output(output: &str) -> (String, bool) {
     (text, start > 0)
 }
 
-/// Append a duration the way the card shows it.
+/// Append a duration the way the interface shows one: `340ms`,
+/// `4.2s`, `1m 05s`. Shared with the REPL for its usage line.
 pub fn write_duration(out: &mut String, duration: Duration) {
     let millis = duration.as_millis();
     let _ = if millis < 1_000 {

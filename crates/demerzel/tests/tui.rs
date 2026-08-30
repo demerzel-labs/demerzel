@@ -543,7 +543,7 @@ fn find_after(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tui_session_boots_streams_and_exits() {
+async fn a_tui_session_boots_streams_and_exits_with_the_turn_time_on_the_usage_line() {
     let mock = MockServer::start(vec![text_turn("hi there from the model")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
@@ -551,6 +551,8 @@ async fn a_tui_session_boots_streams_and_exits() {
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
     pty.wait_for("hi there from the model");
+    // The usage line ends with the turn's time.
+    pty.wait_for("2 cached ·");
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
 

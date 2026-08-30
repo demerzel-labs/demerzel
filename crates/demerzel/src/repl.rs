@@ -173,6 +173,8 @@ pub struct Renderer {
     /// applied change. Interrupted, not absent: a dropped turn can
     /// cut an approved call mid-run.
     pending_calls: std::sync::Mutex<Vec<(String, String)>>,
+    /// When the turn started, for the time on the usage line.
+    started: std::time::Instant,
 }
 
 impl Renderer {
@@ -187,6 +189,7 @@ impl Renderer {
             dim,
             line_open: AtomicU8::new(LINE_NONE),
             pending_calls: std::sync::Mutex::new(Vec::new()),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -299,10 +302,14 @@ impl EventSink for Renderer {
                 self.status_line(&format!("{mark} {}", summary.unwrap_or(name)));
             }
             EngineEvent::ModelUsage(usage) if self.show_reasoning => {
-                let line = self.dimmed(&format!(
-                    "· {} in · {} out · {} cached",
+                // The time since the turn started, as the full-screen
+                // interface shows it.
+                let mut text = format!(
+                    "· {} in · {} out · {} cached · ",
                     usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                ));
+                );
+                demerzel_tui::write_duration(&mut text, self.started.elapsed());
+                let line = self.dimmed(&text);
                 self.status_line(&line);
             }
             _ => {}

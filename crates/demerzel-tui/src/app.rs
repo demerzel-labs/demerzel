@@ -349,10 +349,11 @@ impl App {
         // turn as a dead prompt.
         while self.approvals.try_recv().is_ok() {}
         self.mode = Mode::Edit;
-        self.progress = None;
         // Apply what the turn streamed before the notice, so an
-        // aborted line does not split around it.
+        // aborted line does not split around it, and before the
+        // turn's clock goes: the last usage line reads its time.
         self.drain_displays();
+        self.progress = None;
         self.transcript.close();
         if aborted {
             self.transcript.push_line(Kind::Notice, "[turn aborted]");
@@ -424,13 +425,18 @@ impl App {
                 self.status.input_tokens += usage.input_tokens;
                 self.status.output_tokens += usage.output_tokens;
                 self.status.cached_tokens += usage.cache_read_tokens;
-                self.transcript.push_line(
-                    Kind::Notice,
-                    &format!(
-                        "· {} in · {} out · {} cached",
-                        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                    ),
+                let mut line = format!(
+                    "· {} in · {} out · {} cached",
+                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
                 );
+                // The time since the turn started: the turn's length
+                // on its last call, the time so far on the calls
+                // before it.
+                if let Some(progress) = &self.progress {
+                    line.push_str(" · ");
+                    cards::write_duration(&mut line, progress.started.elapsed());
+                }
+                self.transcript.push_line(Kind::Notice, &line);
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),

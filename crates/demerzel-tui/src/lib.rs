@@ -37,6 +37,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+pub use cards::write_duration;
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender};
 pub use theme::Theme;
