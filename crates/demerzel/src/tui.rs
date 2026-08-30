@@ -11,7 +11,7 @@ use demerzel_core::{
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, Submission};
 use serde_json::Value;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime, mode_name};
 
@@ -31,6 +31,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     ));
     options.model = config.model.clone();
     options.mode = mode.to_string();
+    options.effort = config.effort.to_string();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
     options.thinking = config.thinking;
@@ -112,8 +113,15 @@ impl Driver for TuiDriver<'_> {
             Some(Effect::NewSession) => {
                 self.engine = None;
                 self.resume = false;
-                events.session(None);
+                events.session_changed();
                 return Submission::Note(NEW_SESSION_NOTE.to_string());
+            }
+            Some(Effect::Session) => {
+                let session = self
+                    .engine
+                    .as_ref()
+                    .map(|engine| (engine.session().id(), engine.session().path()));
+                return Submission::Note(session_note(session));
             }
             Some(Effect::SetModel(name)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -132,6 +140,7 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.effort = effort;
+                events.effort(effort.to_string());
                 return Submission::Note(effort_note(effort));
             }
             None => {}
@@ -143,7 +152,7 @@ impl Driver for TuiDriver<'_> {
                     .open_session(self.resume, &self.model, self.effort)
                 {
                     Ok((session, history)) => {
-                        events.session(Some(session.id().to_string()));
+                        events.session_changed();
                         if !history.is_empty() {
                             events.notice(format!(
                                 "continuing session {} ({} messages)",

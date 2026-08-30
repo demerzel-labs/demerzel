@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 const READY: &str = "demerzel ready";
 // No trailing space: the frame diff skips cells that stay blank.
-const PROMPT: &str = "dmz>";
+const PROMPT: &str = "❯";
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 const CTRL_C: &[u8] = b"\x03";
 const CTRL_D: &[u8] = b"\x04";
@@ -35,10 +35,46 @@ const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
-/// Mouse reporting mode 1000, the first sequence capture turns on.
+/// Mouse reporting mode 1002 — buttons, the wheel, and the pointer
+/// while a button is down — the first sequence capture turns on.
 /// The mode is the only sign of capture a PTY can observe, so the
 /// test pins it; the interface owns the sequence, not a dependency.
-const MOUSE_CAPTURE: &str = "\x1b[?1000h";
+const MOUSE_CAPTURE: &str = "\x1b[?1002h";
+/// A left-button press, drag, and release at 1-based `(col, row)`,
+/// as a terminal reports them with SGR mouse mode.
+fn mouse_press(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<0;{col};{row}M").into_bytes()
+}
+fn mouse_drag(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<32;{col};{row}M").into_bytes()
+}
+fn mouse_release(col: u16, row: u16) -> Vec<u8> {
+    format!("\x1b[<0;{col};{row}m").into_bytes()
+}
+
+/// The standard base64 form of `text`, for the OSC 52 payload.
+fn base64(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        out.push(ALPHABET[(bits >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(bits >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(bits >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(bits & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 
 fn text_delta(text: &str) -> Value {
     json!({"type": "response.output_text.delta", "delta": text})
@@ -507,7 +543,7 @@ fn find_after(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tui_session_boots_streams_and_exits() {
+async fn a_tui_session_boots_streams_and_exits_with_the_turn_time_on_the_usage_line() {
     let mock = MockServer::start(vec![text_turn("hi there from the model")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
@@ -515,6 +551,8 @@ async fn a_tui_session_boots_streams_and_exits() {
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
     pty.wait_for("hi there from the model");
+    // The usage line ends with the turn's time.
+    pty.wait_for("2 cached ·");
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
 
@@ -694,8 +732,8 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.resize(100, 30);
     pty.wait_for("· bash $ sleep 20");
     pty.wait_for("s · bash");
-    pty.wait_for("dmz>");
-    pty.wait_for("· ask ·");
+    pty.wait_for(PROMPT);
+    pty.wait_for("─ ask ─");
     pty.send(CTRL_C);
     pty.wait_for("interrupted");
     pty.wait_for("[turn aborted]");
@@ -764,7 +802,7 @@ async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
     assert!(
-        contains_marker(&raw, "gpt-test · ask"),
+        contains_marker(&raw, "gpt-test ─ ask"),
         "the bar never showed the switched model"
     );
 
@@ -781,24 +819,26 @@ async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_status_bar_names_the_session_from_the_first_prompt_on() {
+async fn the_session_command_names_the_open_session_and_new_restarts_the_totals() {
     let mock = MockServer::start(vec![text_turn("named reply")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
+    // Before the first prompt there is no session to name.
+    pty.send(b"/session\r");
+    pty.wait_for("no open session");
     pty.send(b"hello\r");
     pty.wait_for("named reply");
-    // The session file exists now; its id shows only on the bar. A
-    // resize makes the next draw repaint the bar in full.
+    // The session file exists now; /session names it and its file.
     let sessions = pty.session_files();
     assert_eq!(sessions.len(), 1);
     let id = sessions[0].clone();
-    pty.resize(90, 30);
-    pty.send(b"x");
-    pty.wait_for(&id);
-    pty.send(CTRL_C);
+    pty.send(b"/session\r");
+    pty.wait_for(&format!("session: {id}"));
+    pty.wait_for(&format!("{id}.jsonl"));
     // A fresh session restarts the totals: after the turn above the
-    // bar shows non-zero counts, so a later zero row is the reset.
+    // status shows non-zero counts, so a later zero row is the
+    // reset. A resize repaints the box's edge in full.
     pty.send(b"/new\r");
     pty.wait_for("fresh session");
     pty.resize(80, 30);
@@ -911,8 +951,8 @@ fn long_reply() -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let mock = MockServer::start(vec![text_turn(&long_reply())], Vec::new()).await;
-    // Capture is off by default; the user file turns it on.
-    let mut pty = Pty::spawn_with_configs(&mock.url(), &[], None, Some("[tui]\nmouse = true\n"));
+    // Capture is on by default.
+    let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"long\r");
@@ -929,13 +969,24 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     // Two notches of three rows: the window moved up six rows past
     // the usage notice and the last five reply rows. The resize
     // lands in the same frame: the pane loses one row and the top
-    // row holds, so the scroll deepens to seven. A 27-row pane opens
-    // on row 27; the indicator counts the seven below.
-    pty.wait_for("row 27 of the long reply");
+    // row holds, so the scroll deepens to seven. A 25-row pane —
+    // 29 rows less the box and its frame — opens on row 29; the
+    // indicator counts the seven below.
+    pty.wait_for("row 29 of the long reply");
     pty.wait_for("7 below");
-    // End returns to the bottom of the transcript.
-    pty.send(END);
+    // A click on the indicator, at the right of the pane's last
+    // row, returns to the bottom. The frame diff rewrites only the
+    // digits that changed, so a resize forces the full repaint the
+    // assertion reads.
+    pty.send(&mouse_press(95, 25));
+    pty.send(&mouse_release(95, 25));
     pty.resize(100, 30);
+    pty.wait_for("row 59 of the long reply");
+    // Up again; End returns to the bottom of the transcript.
+    pty.send(WHEEL_UP);
+    pty.wait_for("3 below");
+    pty.send(END);
+    pty.resize(100, 29);
     pty.send(b"x");
     pty.wait_for("row 59 of the long reply");
     pty.send(CTRL_C);
@@ -943,16 +994,18 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     let raw = pty.wait_exit();
 
     let text = String::from_utf8_lossy(&raw);
-    assert!(
-        text.contains(MOUSE_CAPTURE),
-        "the mouse key turns capture on"
-    );
+    assert!(text.contains(MOUSE_CAPTURE), "capture is on by default");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_project_file_cannot_turn_mouse_capture_on() {
+async fn the_mouse_key_turns_capture_off_and_a_project_file_cannot_turn_it_on() {
     let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
-    let mut pty = Pty::spawn_with_project_config(&mock.url(), &[], Some("[tui]\nmouse = true\n"));
+    let mut pty = Pty::spawn_with_configs(
+        &mock.url(),
+        &[],
+        Some("[tui]\nmouse = true\n"),
+        Some("[tui]\nmouse = false\n"),
+    );
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
@@ -965,18 +1018,42 @@ async fn a_project_file_cannot_turn_mouse_capture_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mouse_capture_is_off_by_default() {
-    let mock = MockServer::start(vec![text_turn("no mouse")], Vec::new()).await;
+async fn a_drag_selects_transcript_text_and_the_release_copies_it() {
+    let mock = MockServer::start(
+        vec![text_turn("Done.\n\n```rust\nfn main() {}\n```\n")],
+        Vec::new(),
+    )
+    .await;
     let mut pty = Pty::spawn(&mock.url(), &[]);
 
     pty.wait_for(PROMPT);
     pty.send(b"hello\r");
-    pty.wait_for("no mouse");
+    pty.wait_for("fn main() {}");
+    // The usage notice is the last thing the turn draws.
+    pty.wait_for("2 cached");
+    // The screen, 1-based rows: the banner, the echo, then the reply
+    // on rows 3 to 7 — "Done.", a gap, the fence frame, the code, the
+    // frame's end. The press lands on "Done." and the drag runs to
+    // the frame's end. The frame repaints the selected cells, so
+    // the selected text reaches the stream again.
+    pty.send(&mouse_press(1, 3));
+    pty.send(&mouse_drag(6, 7));
+    pty.wait_for("fn main() {}");
+    pty.send(&mouse_release(6, 7));
+    // The copy: the rows between the points, without the fence
+    // frame, as one OSC 52 write.
+    let expected = format!("\x1b]52;c;{}\x07", base64("Done.\n\nfn main() {}"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !String::from_utf8_lossy(&pty.seen).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "no OSC 52 write; raw: {:?}",
+            String::from_utf8_lossy(&pty.seen)
+        );
+        pty.poll_read();
+    }
     pty.send(CTRL_D);
-    let raw = pty.wait_exit();
-
-    let text = String::from_utf8_lossy(&raw);
-    assert!(!text.contains(MOUSE_CAPTURE), "capture must stay off");
+    pty.wait_exit();
 }
 
 /// A reply with one of each markdown element the renderer formats.
@@ -1042,7 +1119,7 @@ async fn a_thinking_block_closes_to_one_line_and_ctrl_t_opens_it() {
     pty.send(CTRL_T);
     pty.resize(100, 28);
     pty.send(b"y");
-    pty.absent_until("second line", "dmz> xy");
+    pty.absent_until("second line", "❯ xy");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
@@ -1074,7 +1151,7 @@ async fn the_thinking_config_key_opens_the_blocks_or_hides_them() {
     pty.wait_for("2 cached");
     pty.resize(100, 29);
     pty.send(b"x");
-    pty.absent_until("thought", "dmz> x");
+    pty.absent_until("thought", "❯ x");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
@@ -1116,6 +1193,11 @@ async fn the_effort_flag_and_command_reach_the_requests() {
     pty.wait_for("low reply");
     pty.send(b"/effort high\r");
     pty.wait_for("effort: high");
+    // The status names the new level; a resize repaints the edge.
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("─ effort high ─");
+    pty.send(CTRL_C);
     pty.send(b"two\r");
     pty.wait_for("high reply");
     pty.send(CTRL_D);
@@ -1156,6 +1238,17 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.send(b"\r");
     pty.send(b"\r");
     pty.wait_for("effort: high");
+    // Up recalls the submitted /effort without the popup, so the
+    // next Up keeps browsing: the four-row prompt comes back. The
+    // resize lands a repaint between the two keys, so the check
+    // covers the whole screen.
+    pty.send(b"\x1b[A");
+    pty.resize(100, 29);
+    pty.absent_until("show or set the reasoning effort", "─ ask ─");
+    pty.send(b"\x1b[A");
+    pty.wait_for("fourth-row");
+    pty.send(CTRL_C);
+    pty.resize(100, 30);
     // Shift-Enter with the popup open stays a newline: the line
     // submits as typed, not as the completed /effort.
     pty.send(b"/e");
@@ -1173,7 +1266,7 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.wait_for("start a fresh session at the next prompt");
     pty.send(b"\x1b");
     pty.resize(100, 29);
-    pty.absent_until("start a fresh session", "· ask ·");
+    pty.absent_until("start a fresh session", "─ ask ─");
     pty.send(b"\r");
     pty.wait_for("unknown command: /ne");
     // Tab moves the selection: `/e` lists /effort first, then /exit.
@@ -1252,10 +1345,15 @@ async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
         has_params(&params, &[38, 2, 0xd0, 0xd8, 0xe4]),
         "the text role in truecolor: {params:?}"
     );
-    // The status bar's ground is the theme's.
+    // The box's edge, with the status on it, takes the dim role; a
+    // framed screen draws no bar, so the bar's ground never paints.
     assert!(
-        has_params(&params, &[48, 2, 0x36, 0x3e, 0x4e]),
-        "the bar's ground in truecolor: {params:?}"
+        has_params(&params, &[38, 2, 0x7b, 0x84, 0x94]),
+        "the dim role in truecolor: {params:?}"
+    );
+    assert!(
+        !has_params(&params, &[48, 2, 0x36, 0x3e, 0x4e]),
+        "no bar ground on a framed screen: {params:?}"
     );
 }
 

@@ -15,6 +15,11 @@
 //!   throughput is in frames per second; the bytes ride along. A
 //!   real stream arrives slower than the renderer draws, so arrival,
 //!   not the frame cap, sets the batch in use.
+//! - `frame-selected`: `frame` with a drag selection from the first
+//!   transcript row to the last, so every row is in the span. The
+//!   two end rows pay the column split and the extra spans; the rows
+//!   between take the whole-row path. The number pins that a
+//!   selection left on the screen costs a frame about nothing.
 //!
 //! Each bench runs twice. The prose run keeps the M2 workloads on a
 //! plain-text transcript, so its numbers compare with the M2
@@ -181,6 +186,11 @@ fn bench_render(c: &mut Criterion) {
         };
         assert_eq!(check.rendered_blocks(), rendered);
     }
+    // The selected frame's span must reach the pane's last row: a
+    // layout change that moves the row would leave a one-point
+    // selection and a bench that measures nothing.
+    let mut check = screen_with_history(false);
+    assert!(check.select((4, 0), (60, HEIGHT - 5)));
 
     // The frames run before any throughput is set on the group, the
     // M2 shape of `frame`. The formatted one redraws a screen whose
@@ -192,6 +202,13 @@ fn bench_render(c: &mut Criterion) {
             screen.draw();
         }
         group.bench_function(format!("frame{suffix}"), |b| b.iter(|| screen.draw()));
+        // The selection spans the whole transcript pane: the rows
+        // above the input box and its frame.
+        assert!(screen.select((4, 0), (60, HEIGHT - 5)));
+        screen.draw();
+        group.bench_function(format!("frame-selected{suffix}"), |b| {
+            b.iter(|| screen.draw())
+        });
     }
 
     for (suffix, markdown, text) in workloads {

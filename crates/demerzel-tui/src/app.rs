@@ -10,20 +10,25 @@
 //! wheel when capture is on, PageUp, and PageDown browse; End and a
 //! submitted line return to the bottom. Ctrl-O expands every tool
 //! card to its kept output and collapses them again. Ctrl-T opens
-//! the newest thinking block
-//! and closes it again.
+//! the newest thinking block and closes it again. With capture on, a
+//! drag over the transcript selects text and the release copies it
+//! to the clipboard through the terminal; a click clears it, and a
+//! press on the browse indicator is the End key.
 //!
 //! The editor holds several lines: Enter submits, Alt-Enter and
 //! Shift-Enter insert a newline, and a paste keeps its newlines. Up
 //! and Down move across rows, and at the first or last row they
 //! browse the history. A line that starts with `/` opens the
 //! completion popup: Tab and the arrows select, Enter completes, Esc
-//! closes it.
+//! closes it. A recalled history entry opens no popup, so the arrows
+//! keep browsing.
 //!
 //! While a turn runs, a progress line above the input box shows a
-//! spinner, the elapsed time, and the stage. The status bar is the
-//! bottom row, under the input box. A tick timer wakes the
-//! loop for it during the turn only; at idle nothing wakes.
+//! spinner, the elapsed time, and the stage. The status sits on the
+//! input box's bottom edge, or on a bar under the box when the
+//! screen is too small for the frame. A tick timer wakes the loop
+//! for the progress line during the turn only; at idle nothing
+//! wakes.
 
 use std::future::poll_fn;
 use std::io;
@@ -31,7 +36,7 @@ use std::time::Duration;
 
 use demerzel_core::ApprovalAnswer;
 use ratatui::crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
@@ -42,6 +47,7 @@ use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::render::{self, Status, View};
+use crate::select;
 use crate::terminal::Guard;
 use crate::theme::{Depth, Palette};
 use crate::transcript::{Kind, Transcript};
@@ -129,14 +135,19 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         app.transcript
             .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
         app.dirty = true;
+        // A command can send display events before it returns its
+        // note — a model or effort switch moves the status — so the
+        // queue drains first and the note's frame shows both.
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
+                app.drain_displays();
                 app.transcript.push_line(Kind::Notice, &text);
                 app.dirty = true;
                 app.draw()?;
             }
             Submission::Error(text) => {
+                app.drain_displays();
                 app.transcript.push_line(Kind::Error, &text);
                 app.dirty = true;
                 app.draw()?;
@@ -200,7 +211,7 @@ impl App {
             status: Status {
                 model: options.model,
                 mode: options.mode,
-                session: None,
+                effort: options.effort,
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -347,10 +358,11 @@ impl App {
         // turn as a dead prompt.
         while self.approvals.try_recv().is_ok() {}
         self.mode = Mode::Edit;
-        self.progress = None;
         // Apply what the turn streamed before the notice, so an
-        // aborted line does not split around it.
+        // aborted line does not split around it, and before the
+        // turn's clock goes: the last usage line reads its time.
         self.drain_displays();
+        self.progress = None;
         self.transcript.close();
         if aborted {
             self.transcript.push_line(Kind::Notice, "[turn aborted]");
@@ -422,21 +434,26 @@ impl App {
                 self.status.input_tokens += usage.input_tokens;
                 self.status.output_tokens += usage.output_tokens;
                 self.status.cached_tokens += usage.cache_read_tokens;
-                self.transcript.push_line(
-                    Kind::Notice,
-                    &format!(
-                        "· {} in · {} out · {} cached",
-                        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                    ),
+                let mut line = format!(
+                    "· {} in · {} out · {} cached",
+                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
                 );
+                // The time since the turn started: the turn's length
+                // on its last call, the time so far on the calls
+                // before it.
+                if let Some(progress) = &self.progress {
+                    line.push_str(" · ");
+                    cards::write_duration(&mut line, progress.started.elapsed());
+                }
+                self.transcript.push_line(Kind::Notice, &line);
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
             DisplayEvent::Model(name) => self.status.model = name,
-            DisplayEvent::Session(id) => {
+            DisplayEvent::Effort(name) => self.status.effort = name,
+            DisplayEvent::SessionChanged => {
                 // The totals belong to the open session; a session
                 // change restarts them.
-                self.status.session = id;
                 self.status.input_tokens = 0;
                 self.status.output_tokens = 0;
                 self.status.cached_tokens = 0;
@@ -483,8 +500,8 @@ impl App {
     }
 
     /// Apply one terminal event. Only an event that changes what the
-    /// screen shows marks a frame: a mouse event other than the wheel
-    /// changes nothing and must not wake one.
+    /// screen shows marks a frame: a mouse event that moves neither
+    /// the view nor the selection must not wake one.
     fn terminal_event(&mut self, event: Event, phase: Phase) -> Action {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -499,12 +516,29 @@ impl App {
                 Action::None
             }
             Event::Mouse(mouse) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => self.transcript.scroll_up(WHEEL_ROWS),
-                    MouseEventKind::ScrollDown => self.transcript.scroll_down(WHEEL_ROWS),
-                    _ => return Action::None,
+                let changed = match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.transcript.scroll_up(WHEEL_ROWS);
+                        true
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.transcript.scroll_down(WHEEL_ROWS);
+                        true
+                    }
+                    // The transcript pane starts at the screen's
+                    // origin, so the event's position is the pane's.
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.transcript.select_press(mouse.column, mouse.row)
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        self.transcript.select_drag(mouse.column, mouse.row)
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => self.copy_selection(),
+                    _ => false,
+                };
+                if changed {
+                    self.dirty = true;
                 }
-                self.dirty = true;
                 Action::None
             }
             Event::Resize(..) => {
@@ -513,6 +547,29 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    /// The button came up: a selection with a span goes to the
+    /// clipboard through the terminal. A terminal that refuses the
+    /// write loses the copy in silence; the loop cannot tell. A span
+    /// over marks alone — a card's header, a fence frame — yields no
+    /// text and writes nothing, so it cannot empty the clipboard.
+    /// Returns whether the frame changes: a notice names a copy cut
+    /// at the cap.
+    fn copy_selection(&mut self) -> bool {
+        let Some(copied) = self.transcript.select_release() else {
+            return false;
+        };
+        if copied.cut {
+            self.transcript.push_line(
+                Kind::Notice,
+                &format!("copy cut at {} KiB", select::COPY_CAP / 1024),
+            );
+        }
+        if !copied.text.is_empty() {
+            let _ = select::write_clipboard(&copied.text);
+        }
+        copied.cut
     }
 
     fn key(&mut self, key: KeyEvent, phase: Phase) -> Action {
@@ -619,7 +676,7 @@ impl App {
                     && let Some(text) = self.history.up(self.editor.text())
                 {
                     let text = text.to_string();
-                    self.editor.set(&text);
+                    self.editor.recall(&text);
                 }
             }
             KeyCode::Down => {
@@ -627,7 +684,7 @@ impl App {
                     && let Some(text) = self.history.down()
                 {
                     let text = text.to_string();
-                    self.editor.set(&text);
+                    self.editor.recall(&text);
                 }
             }
             _ => {}

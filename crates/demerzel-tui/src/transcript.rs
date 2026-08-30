@@ -35,12 +35,14 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::Instant;
 
-use crate::cards::{Card, Outcome, push_sanitized};
+use crate::cards::{Card, INDENT, Outcome, push_sanitized};
 use crate::markdown::{self, Face, Seam, Target};
+use crate::select::{self, Copied, Point, Selection};
 use crate::thinking::{SUMMARY_RESERVE, Thinking, Thought};
-use crate::wrap::row_starts;
+use crate::wrap::{display_width, row_starts};
 
 /// Blocks the transcript keeps. Old blocks beyond the cap drop.
 const MAX_BLOCKS: usize = 2_000;
@@ -423,6 +425,58 @@ impl Block {
         self.row_at(index).1
     }
 
+    /// Whether row `index` starts a line of the text, rather than
+    /// continuing a wrapped one.
+    fn line_start(&self, index: usize) -> bool {
+        let start = self.layout.rows[index] as usize;
+        start == 0 || self.buffer().as_bytes()[start - 1] == b'\n'
+    }
+
+    /// Whether row `index` continues a wrapped line of a plain
+    /// layout. A markdown render keeps no line ends between its
+    /// rows, so its rows never count as wrapped here.
+    pub(crate) fn wrapped(&self, index: usize) -> bool {
+        !self.rendered() && !self.line_start(index)
+    }
+
+    /// Whether the line of row `index` runs on into the next row: a
+    /// row of frame alone then holds nothing of its own.
+    pub(crate) fn continues(&self, index: usize) -> bool {
+        index + 1 < self.rows() && self.wrapped(index + 1)
+    }
+
+    /// Whether the block changed since the last frame laid it out:
+    /// text arrived, or a card or a thought waits for its render.
+    /// The rows on the screen no longer describe it.
+    pub(crate) fn pending(&self) -> bool {
+        self.layout.dirty
+            || match &self.body {
+                Body::Plain => false,
+                Body::Card(card) => card.stale(),
+                Body::Thought(thought) => thought.stale(),
+            }
+    }
+
+    /// The columns the frame takes at the start of row `index`,
+    /// which a copy leaves out: a card's indent on each of its
+    /// lines, the prompt on an echo, wherever its bytes fall when a
+    /// narrow pane wraps it.
+    pub(crate) fn frame_columns(&self, index: usize) -> usize {
+        match self.kind {
+            Kind::Tool if self.line_start(index) => display_width(INDENT),
+            Kind::Prompt if self.buffer().starts_with(crate::PROMPT) => {
+                let (start, row) = self.row_at(index);
+                let end = (start + row.len()).min(crate::PROMPT.len());
+                if start < end {
+                    display_width(&self.buffer()[start..end])
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Whether every row is one span in the block's own style.
     pub(crate) fn plain(&self) -> bool {
         self.layout.faces.is_empty()
@@ -524,6 +578,20 @@ pub struct Transcript {
     /// The absolute block count at the last frame: blocks past it
     /// arrived since.
     frame_end: usize,
+    /// The drag selection: the press and the pointer. Cleared when
+    /// a block under it changes, when the width changes, and when
+    /// its first block drops off the cap.
+    selection: Option<Selection>,
+    /// The block and row on each viewport row of the last frame,
+    /// top down, so a mouse position maps to a point.
+    shown: Vec<(usize, usize)>,
+    /// The viewport cells something covers — the completion popup,
+    /// the browse indicator — as `(rows, columns)`; a position there
+    /// maps to no row.
+    covered: Vec<(Range<usize>, Range<usize>)>,
+    /// The cells of the browse indicator on the last frame, as
+    /// `(row, columns)`: a press there is the key it names.
+    indicator: Option<(usize, Range<usize>)>,
 }
 
 impl Transcript {
@@ -542,11 +610,21 @@ impl Transcript {
             height: 0,
             width: 0,
             frame_end: 0,
+            selection: None,
+            shown: Vec::new(),
+            covered: Vec::new(),
+            indicator: None,
         }
     }
 
     pub fn blocks(&self) -> impl DoubleEndedIterator<Item = &Block> + ExactSizeIterator {
         self.blocks.iter()
+    }
+
+    /// Blocks dropped from the front: the absolute index of the
+    /// first block held.
+    pub(crate) fn dropped(&self) -> usize {
+        self.dropped
     }
 
     pub(crate) fn blocks_mut(
@@ -572,8 +650,10 @@ impl Transcript {
         if self.open == Some(kind)
             && let Some(last) = self.blocks.back_mut()
         {
-            if let Some(overflow) = last.append(delta) {
-                let carry = last.cut_at_cap();
+            let overflow = last.append(delta);
+            self.touch(self.dropped + self.blocks.len() - 1);
+            if let Some(overflow) = overflow {
+                let carry = self.blocks.back_mut().and_then(Block::cut_at_cap);
                 self.push_blocks(kind, &overflow, carry);
             }
         } else {
@@ -611,6 +691,7 @@ impl Transcript {
             && let Some(thought) = self.thought_at(index)
         {
             thought.push(delta, SUMMARY_BYTES);
+            self.touch(index);
             return;
         }
         if delta.trim_start().is_empty() {
@@ -634,14 +715,22 @@ impl Transcript {
             && let Some(thought) = self.thought_at(index)
         {
             thought.end(at);
+            self.touch(index);
         }
     }
 
     /// Open the newest thinking block, or close it again. Nothing
     /// happens when the transcript holds none.
     pub fn toggle_thinking(&mut self) {
-        if let Some(thought) = self.blocks.iter_mut().rev().find_map(Block::thought_mut) {
+        let newest = self
+            .blocks
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find_map(|(offset, block)| block.thought_mut().map(|thought| (offset, thought)));
+        if let Some((offset, thought)) = newest {
             thought.set_open(!thought.open());
+            self.touch(self.dropped + offset);
         }
     }
 
@@ -666,9 +755,14 @@ impl Transcript {
     /// without a card — one that fell off the cap — shows it as a
     /// notice, so nothing runs unseen.
     pub fn tool_preview(&mut self, id: &str, preview: &str) {
-        match self.card_mut(id) {
-            Some(card) => card.set_preview(preview),
-            None => self.push_line(Kind::Notice, preview),
+        match self.tools.get(id).copied() {
+            Some(index) if self.card_at(index).is_some() => {
+                if let Some(card) = self.card_at(index) {
+                    card.set_preview(preview);
+                }
+                self.touch(index);
+            }
+            _ => self.push_line(Kind::Notice, preview),
         }
     }
 
@@ -676,9 +770,13 @@ impl Transcript {
     /// card shows it. Returns false when no card can — no call runs,
     /// its card is gone, or the names differ.
     pub fn tool_pending(&mut self, tool: &str, preview: Option<&str>) -> bool {
-        match self.running.and_then(|index| self.card_at(index)) {
+        let Some(index) = self.running else {
+            return false;
+        };
+        match self.card_at(index) {
             Some(card) if card.name() == tool => {
                 card.pending(preview);
+                self.touch(index);
                 true
             }
             _ => false,
@@ -687,8 +785,11 @@ impl Transcript {
 
     /// The question about the running call is answered at `at`.
     pub fn tool_answered(&mut self, declined: bool, at: Instant) {
-        if let Some(card) = self.running.and_then(|index| self.card_at(index)) {
+        if let Some(index) = self.running
+            && let Some(card) = self.card_at(index)
+        {
             card.answered(declined, at);
+            self.touch(index);
         }
     }
 
@@ -699,8 +800,11 @@ impl Transcript {
         if index.is_some() && self.running == index {
             self.running = None;
         }
-        match index.and_then(|index| self.card_at(index)) {
-            Some(card) => card.end(outcome),
+        match index.and_then(|index| self.card_at(index).map(|card| (index, card))) {
+            Some((index, card)) => {
+                card.end(outcome);
+                self.touch(index);
+            }
             None => {
                 let mut card = Card::new(name, self.expanded);
                 card.end(outcome);
@@ -725,13 +829,13 @@ impl Transcript {
             && let Some(thought) = self.thought_at(index)
         {
             thought.interrupt();
+            self.touch(index);
         }
         let tools = std::mem::take(&mut self.tools);
         for index in tools.into_values() {
-            if let Some(offset) = index.checked_sub(self.dropped)
-                && let Some(card) = self.blocks.get_mut(offset).and_then(Block::card_mut)
-            {
+            if let Some(card) = self.card_at(index) {
                 card.interrupt();
+                self.touch(index);
             }
         }
     }
@@ -746,9 +850,10 @@ impl Transcript {
     /// cards a frame shows.
     pub fn set_expanded(&mut self, expanded: bool) {
         self.expanded = expanded;
-        for block in &mut self.blocks {
-            if let Some(card) = block.card_mut() {
+        for offset in 0..self.blocks.len() {
+            if let Some(card) = self.blocks[offset].card_mut() {
                 card.set_expanded(expanded);
+                self.touch(self.dropped + offset);
             }
         }
     }
@@ -825,6 +930,8 @@ impl Transcript {
         if width != self.width {
             self.width = width;
             self.scroll = 0;
+            // The rows the points named no longer exist.
+            self.selection = None;
         }
         if height != self.height {
             if self.scroll > 0 {
@@ -890,6 +997,178 @@ impl Transcript {
             self.blocks.pop_front();
             self.dropped += 1;
         }
+        if self
+            .selection
+            .is_some_and(|selection| selection.span().0.block < self.dropped)
+        {
+            self.selection = None;
+        }
+    }
+
+    /// Block `index` changed under the selection: the rows it named
+    /// moved, so the selection clears. A change outside the span
+    /// leaves it.
+    fn touch(&mut self, index: usize) {
+        if self
+            .selection
+            .is_some_and(|selection| selection.covers(index))
+        {
+            self.selection = None;
+        }
+    }
+
+    /// The drag selection, for the frame.
+    pub(crate) fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    /// The row map, taken for the frame to fill; see
+    /// [`Transcript::set_shown`].
+    pub(crate) fn take_shown(&mut self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut self.shown)
+    }
+
+    /// The block and row on each viewport row of the frame just
+    /// drawn, top down. Nothing covers them until the frame says so.
+    pub(crate) fn set_shown(&mut self, shown: Vec<(usize, usize)>) {
+        self.shown = shown;
+        self.covered.clear();
+        self.indicator = None;
+    }
+
+    /// A frame drew no transcript rows: no position maps to one.
+    pub(crate) fn clear_shown(&mut self) {
+        self.shown.clear();
+        self.covered.clear();
+        self.indicator = None;
+    }
+
+    /// The frame drew the browse indicator on viewport row `row`
+    /// over `columns`: the cells are covered, and a press there
+    /// returns to follow mode.
+    pub(crate) fn set_indicator(&mut self, row: usize, columns: Range<usize>) {
+        self.cover(row..row + 1, columns.clone());
+        self.indicator = Some((row, columns));
+    }
+
+    fn on_indicator(&self, x: u16, y: u16) -> bool {
+        self.indicator.as_ref().is_some_and(|(row, columns)| {
+            *row == usize::from(y) && columns.contains(&usize::from(x))
+        })
+    }
+
+    /// The frame drew something over viewport `rows` and `columns`
+    /// — the completion popup, the browse indicator: a position
+    /// there maps to no row.
+    pub(crate) fn cover(&mut self, rows: Range<usize>, columns: Range<usize>) {
+        self.covered.push((rows, columns));
+    }
+
+    fn is_covered(&self, x: u16, y: u16) -> bool {
+        self.covered.iter().any(|(rows, columns)| {
+            rows.contains(&usize::from(y)) && columns.contains(&usize::from(x))
+        })
+    }
+
+    /// Whether block `index` changed since the last frame, so the
+    /// row map no longer describes its rows. A press or a drag must
+    /// not name a row the user cannot see yet.
+    fn pending(&self, index: usize) -> bool {
+        index
+            .checked_sub(self.dropped)
+            .and_then(|offset| self.blocks.get(offset))
+            .is_none_or(Block::pending)
+    }
+
+    /// The point under viewport column `x` and row `y`, when a row
+    /// is shown there and its block still reads as the frame drew
+    /// it.
+    fn point_at(&self, x: u16, y: u16) -> Option<Point> {
+        if self.is_covered(x, y) {
+            return None;
+        }
+        let &(block, row) = self.shown.get(usize::from(y))?;
+        if self.pending(block) {
+            return None;
+        }
+        Some(Point {
+            block,
+            row,
+            col: usize::from(x),
+        })
+    }
+
+    /// A press at viewport column `x` and row `y` starts a selection
+    /// on the row shown there, or clears the selection when no row
+    /// is. A press on the browse indicator is the End key: the view
+    /// returns to follow mode. Returns whether the frame changes.
+    pub fn select_press(&mut self, x: u16, y: u16) -> bool {
+        if self.on_indicator(x, y) {
+            self.follow();
+            self.selection = None;
+            return true;
+        }
+        let before = self.selection;
+        self.selection = self.point_at(x, y).map(|point| Selection {
+            anchor: point,
+            head: point,
+        });
+        before.is_some_and(|selection| selection.is_span())
+    }
+
+    /// The pointer moved to viewport column `x` and row `y` with the
+    /// button down: the selection's head follows. On a blank cell
+    /// under the last shown row, inside the pane, the head is the
+    /// end of that row. Below the pane — the progress line, the
+    /// input box, the bar — on a covered cell, and on a block that
+    /// changed since the frame, the head stays. Returns whether the
+    /// frame changes.
+    pub fn select_drag(&mut self, x: u16, y: u16) -> bool {
+        if self.is_covered(x, y) || y >= self.height {
+            return false;
+        }
+        let head = match self.shown.get(usize::from(y)) {
+            Some(&(block, row)) => Point {
+                block,
+                row,
+                col: usize::from(x),
+            },
+            None => {
+                let Some(&(block, row)) = self.shown.last() else {
+                    return false;
+                };
+                Point {
+                    block,
+                    row,
+                    col: usize::MAX,
+                }
+            }
+        };
+        if self.pending(head.block) {
+            return false;
+        }
+        let Some(selection) = &mut self.selection else {
+            return false;
+        };
+        let changed = selection.head != head;
+        selection.head = head;
+        changed
+    }
+
+    /// The button came up. A selection with a span yields its copy
+    /// and stays on the screen; a click without a drag clears.
+    pub fn select_release(&mut self) -> Option<Copied> {
+        let selection = self.selection?;
+        if !selection.is_span() || self.width == 0 {
+            self.selection = None;
+            return None;
+        }
+        Some(select::copy(
+            selection,
+            &mut self.blocks,
+            self.dropped,
+            self.width,
+        ))
     }
 }
 

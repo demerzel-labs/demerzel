@@ -33,7 +33,7 @@ impl Screen {
             status: Status {
                 model: "bench-model".into(),
                 mode: "auto".into(),
-                session: Some("bench-session".into()),
+                effort: "high".into(),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -78,6 +78,16 @@ impl Screen {
                 );
             })
             .expect("headless draw");
+    }
+
+    /// Select the rows between two viewport positions, `(column,
+    /// row)` each, the way a drag does. Needs a frame drawn first:
+    /// the positions map through the last frame's rows. Returns
+    /// whether the drag moved the head: false when `to` lies off
+    /// the transcript pane, so a bench can assert its span exists.
+    pub fn select(&mut self, from: (u16, u16), to: (u16, u16)) -> bool {
+        self.transcript.select_press(from.0, from.1);
+        self.transcript.select_drag(to.0, to.1)
     }
 
     /// Blocks the transcript holds.

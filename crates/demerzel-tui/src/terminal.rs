@@ -28,10 +28,12 @@ use ratatui::crossterm::{cursor, execute};
 const KEYBOARD_FLAGS: KeyboardEnhancementFlags =
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
 
-/// Mouse reporting for buttons and the wheel, with SGR coordinates:
-/// modes 1000 and 1006. Not any-motion reporting (mode 1003), which
-/// would wake the loop on every pointer move.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// Mouse reporting for buttons, the wheel, and the pointer while a
+/// button is down, with SGR coordinates: modes 1002 and 1006. The
+/// motion reports carry a drag selection. Not any-motion reporting
+/// (mode 1003), which would wake the loop on every pointer move.
+/// The release sequence a dependency provides covers mode 1002.
+const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 
 /// Whether the mouse is captured, so restore releases it only then:
 /// the release sequence must not reach a terminal whose mouse mode

@@ -52,10 +52,12 @@ pub(crate) enum DisplayEvent {
     Usage(Usage),
     Notice(String),
     Error(String),
-    /// The session model changed; the status bar follows.
+    /// The session model changed; the status follows.
     Model(String),
-    /// A session opened or closed; the status bar names it.
-    Session(Option<String>),
+    /// The reasoning effort changed; the status follows.
+    Effort(String),
+    /// A session opened or closed; the status totals restart.
+    SessionChanged,
 }
 
 /// Sends display events into the interface loop. The driver hands it
@@ -81,14 +83,19 @@ impl EventSender {
         let _ = self.tx.send(DisplayEvent::Error(text.into()));
     }
 
-    /// Name the session model on the status bar.
+    /// Name the session model on the status.
     pub fn model(&self, name: impl Into<String>) {
         let _ = self.tx.send(DisplayEvent::Model(name.into()));
     }
 
-    /// Name the open session on the status bar; `None` clears it.
-    pub fn session(&self, id: Option<String>) {
-        let _ = self.tx.send(DisplayEvent::Session(id));
+    /// Name the reasoning effort on the status.
+    pub fn effort(&self, name: impl Into<String>) {
+        let _ = self.tx.send(DisplayEvent::Effort(name.into()));
+    }
+
+    /// A session opened or closed: the status totals restart.
+    pub fn session_changed(&self) {
+        let _ = self.tx.send(DisplayEvent::SessionChanged);
     }
 
     /// The preview of a dispatching call — the diff, the command —

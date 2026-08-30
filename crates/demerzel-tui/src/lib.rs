@@ -26,6 +26,7 @@ mod highlight;
 mod history;
 mod markdown;
 mod render;
+mod select;
 mod terminal;
 pub mod theme;
 mod thinking;
@@ -36,14 +37,16 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+pub use cards::write_duration;
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender};
 pub use theme::Theme;
 pub use thinking::Thinking;
 
-/// The input prompt, shared with the REPL. The bench probe waits for
-/// these bytes on the output stream, so the spelling is load-bearing.
-pub const PROMPT: &str = "dmz> ";
+/// The input prompt, shared with the REPL: a heavy angle bracket and
+/// a space. The bench probe waits for these bytes on the output
+/// stream, so the spelling is load-bearing.
+pub const PROMPT: &str = "❯ ";
 
 /// One user turn as the driver runs it. Not `Send`: the interface
 /// drives it on its own single-threaded loop.
@@ -70,6 +73,9 @@ pub enum Submission<'a> {
 /// [`ApprovalChannel::ask`].
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
+    /// Display events the driver sends through `events` before this
+    /// call returns — a model or effort switch — show on the same
+    /// frame as the note the call returns.
     fn submit(
         &mut self,
         line: String,
@@ -88,14 +94,19 @@ pub struct Options {
     pub history_path: Option<PathBuf>,
     /// A dim line shown before the first prompt.
     pub banner: Option<String>,
-    /// The session model, shown on the status bar. The driver updates
+    /// The session model, shown on the status. The driver updates
     /// it through [`EventSender::model`].
     pub model: String,
-    /// The approval mode's display name, shown on the status bar.
+    /// The approval mode's display name, shown on the status.
     pub mode: String,
-    /// Capture the mouse, so the wheel scrolls the transcript. Off by
-    /// default; on, the terminal loses its own text selection. The
-    /// binary sets it from the `tui.mouse` config key.
+    /// The reasoning effort's name, shown on the status. The driver
+    /// updates it through [`EventSender::effort`].
+    pub effort: String,
+    /// Capture the mouse: the wheel scrolls the transcript, and a
+    /// drag selects text that the release copies to the clipboard
+    /// through the terminal. On by default; off gives the terminal
+    /// its own text selection back. The binary sets it from the
+    /// `tui.mouse` config key.
     pub mouse: bool,
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.
@@ -120,7 +131,8 @@ impl Default for Options {
             banner: None,
             model: String::new(),
             mode: String::new(),
-            mouse: false,
+            effort: String::new(),
+            mouse: true,
             markdown: true,
             thinking: Thinking::default(),
             theme: Theme::default(),

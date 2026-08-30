@@ -142,7 +142,8 @@ roles! {
     CodeBlock = "code_block",
     /// The prompt, in the input box and on the echoed line.
     Prompt = "prompt",
-    /// The status bar's ground.
+    /// The status bar's ground, on a screen too small for the input
+    /// box's frame; a framed screen carries the status on the frame.
     StatusBar = "status_bar",
     ProgressLine = "progress_line",
     /// A `+` line of an edit preview.

@@ -37,7 +37,7 @@ base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 
 [tui]
-mouse = false                    # on: the wheel scrolls, no terminal selection
+mouse = true                     # off: the terminal's own selection, no wheel
 markdown = true                  # render model replies as markdown
 thinking = "closed"              # closed | open | hidden
 theme = "terminal"               # terminal | dark | light | a [theme.<name>] table
@@ -55,7 +55,7 @@ error = "bright-red"
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `history_file` | — | — | `true` |
-| `tui.mouse` | — | — | `false` |
+| `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 | `tui.theme` | — | — | `terminal` |
@@ -78,7 +78,8 @@ request, so a model that does not accept the field refuses the call;
 the current models accept it. Unknown keys warn on stderr and do not
 stop the run.
 
-`/effort [level]` shows or sets the level for the session.
+`/effort [level]` shows or sets the level for the session. The
+full-screen interface names the level on its status.
 Each `meta` record in the session file names the effort in force, so
 a reader can tell what a run used. A resumed session takes its level
 from config, not from the file.
@@ -108,7 +109,7 @@ built-in name edits that theme. A table with a new name starts from
 | Role | What it colors |
 |---|---|
 | `text` | replies, cards, the input box, the status bar's text |
-| `dim` | thinking blocks, notices, a card's output tail, markdown marks, link destinations, the completions not selected |
+| `dim` | thinking blocks, notices, a card's output tail and hint, markdown marks, link destinations, the completions not selected, the box's edge and the status on it |
 | `accent` | card headers, the selected completion, the browse indicator |
 | `error` | failure messages, a failed call's mark |
 | `success` | a finished call's mark |
@@ -118,7 +119,7 @@ built-in name edits that theme. A table with a new name starts from
 | `inline_code` | code spans |
 | `code_block` | the lines of a code fence |
 | `prompt` | the prompt |
-| `status_bar` | the status bar's ground |
+| `status_bar` | the status bar's ground, on a screen too small for the box's frame |
 | `progress_line` | the progress line |
 | `diff_add` | a `+` line of an edit preview |
 | `diff_remove` | a `-` line of an edit preview |
@@ -155,8 +156,12 @@ The interface fits the theme to the terminal:
 
 ## Keyboard keys
 
-Mouse capture sends the wheel and the buttons to Demerzel. It takes
-the terminal's own text selection, so it is off by default.
+Mouse capture sends the wheel and the buttons to Demerzel. It is on
+by default. `tui.mouse = false` gives the terminal its own text
+selection back. Some terminals also select with Shift-drag while
+capture is on; that depends on the terminal. Without capture, most
+terminals turn the wheel into arrow keys on the alternate screen,
+which browse the history.
 
 The full-screen interface has these keys:
 
@@ -175,9 +180,16 @@ The full-screen interface has these keys:
   of the line, Ctrl-W joins the previous line.
 - A line that starts with `/` opens the completion popup. Tab and
   the arrow keys select a command. Enter puts the command on the
-  line. The next Enter submits the line. Esc closes the popup.
+  line. The next Enter submits the line. Esc closes the popup. A
+  recalled history entry opens no popup; the next edit opens it.
 - PageUp and PageDown scroll the transcript. With `tui.mouse` on, the
   mouse wheel scrolls it too.
+- With `tui.mouse` on, a drag over the transcript selects text. The
+  release copies the text to the clipboard through the terminal, as
+  an OSC 52 write. The copy leaves out the marks the frame adds: a
+  fence gives its code, a card gives its output and its result line.
+  The copy is cut at 64 KiB, and a notice says so. A click clears
+  the selection.
 - Ctrl-C clears the input box. During a turn, Ctrl-C stops the
   turn. Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
@@ -194,8 +206,9 @@ privilege, move credentials, or raise cost:
 - It cannot set `base_url`.
 - It cannot turn `history_file` on against a user file that turned
   it off.
-- It cannot turn `tui.mouse` on. A repository must not take the
-  terminal's own text selection from a user who set no key.
+- It cannot turn `tui.mouse` on against a user file that turned it
+  off. A repository must not take the terminal's own text selection
+  from a user who turned capture off to keep it.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
 - It cannot define a theme's colors. It can pick `tui.theme`. A color
@@ -212,6 +225,7 @@ added the `[tui]` table. `effort` landed on 2026-08-24, between
 M2.5 steps 3 and 4. Cache-hit receipts before that date ran at the
 Codex adapter's fixed `low` effort and the Anthropic default.
 `tui.mouse` changed its default to `false` on 2026-08-29, after the
-M2.5 step-7 dogfood. Capture takes the terminal's own text
-selection. `tui.theme` and the `[theme.<name>]` tables landed with
-M2.5 step 8.
+M2.5 step-7 dogfood, because capture took the terminal's own text
+selection. M2.5 step 8b brought selection and copy into the
+interface and set the default back to `true` on the same day.
+`tui.theme` and the `[theme.<name>]` tables landed with M2.5 step 8.

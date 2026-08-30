@@ -29,8 +29,9 @@ pub const DEFAULT_PROVIDER: &str = demerzel_providers::openai_codex::PROVIDER_ID
 /// API's own default, and the level a coding agent wants.
 pub const DEFAULT_EFFORT: Effort = Effort::High;
 /// Mouse capture in the full-screen interface when nothing sets it.
-/// Off: capture takes the terminal's own text selection.
-pub const DEFAULT_MOUSE: bool = false;
+/// On: the wheel scrolls and a drag selects in the interface; off,
+/// terminals turn the wheel into arrow keys on the alternate screen.
+pub const DEFAULT_MOUSE: bool = true;
 /// The theme when nothing picks one: the terminal's own palette.
 pub const DEFAULT_THEME: &str = "terminal";
 
@@ -409,7 +410,7 @@ impl Locations {
 /// must not raise privilege or move credentials. It cannot raise the
 /// approval mode, it cannot set an endpoint, it cannot turn the
 /// history file on against a user who turned it off, and it cannot
-/// turn mouse capture on.
+/// turn mouse capture on against a user who turned it off.
 pub fn resolve(
     flags: &Flags,
     env: &dyn Fn(&str) -> Option<String>,
@@ -585,13 +586,12 @@ pub fn resolve(
         .unwrap_or_else(|| Setting::new(true, Origin::Default));
 
     // Trust rule: the project file can turn mouse capture off, never
-    // on — capture takes the terminal's own text selection, and the
-    // user knows their terminal. A repository must not take the
-    // selection from a user who set no key. Off by default for the
-    // same reason.
+    // on against a user file that turned it off — capture takes the
+    // terminal's own text selection, and the user knows their
+    // terminal. On matches the default and is accepted.
     let user_mouse = layer_key(user, Origin::User, |l| l.tui.mouse);
     let project_mouse = match layer_key(project, Origin::Project, |l| l.tui.mouse) {
-        Some(setting) if setting.value && !user_mouse.as_ref().is_some_and(|user| user.value) => {
+        Some(setting) if setting.value && user_mouse.as_ref().is_some_and(|user| !user.value) => {
             warnings.push("ignored: the project file cannot turn mouse capture on".to_string());
             None
         }
@@ -736,7 +736,7 @@ mod tests {
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
-        assert!(!settings.tui.mouse.value);
+        assert!(settings.tui.mouse.value);
         assert_eq!(settings.tui.mouse.origin, Origin::Default);
         assert_eq!(settings.approval_mode(true), ApprovalMode::Ask);
         assert_eq!(settings.approval_mode(false), ApprovalMode::ReadOnly);
@@ -756,18 +756,18 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("mouse capture"));
 
-        // Off matches the default and is accepted from the project
-        // file; on is a real change only a user file can make.
+        // Off is accepted from the project file: it takes nothing
+        // from the user. On matches the default and is accepted too;
+        // only a user file that turned capture off makes it a change.
         let project = layer("[tui]\nmouse = false");
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
         assert!(!settings.tui.mouse.value);
         assert_eq!(settings.tui.mouse.origin, Origin::Project);
 
         let project = layer("[tui]\nmouse = true");
-        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), None);
-        assert!(!settings.tui.mouse.value);
-        assert_eq!(settings.tui.mouse.origin, Origin::Default);
-        assert_eq!(warnings.len(), 1);
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
+        assert!(settings.tui.mouse.value);
+        assert_eq!(settings.tui.mouse.origin, Origin::Project);
 
         let user = layer("[tui]\nmouse = true");
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));

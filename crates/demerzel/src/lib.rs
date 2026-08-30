@@ -73,9 +73,9 @@ pub struct RunConfig {
     /// Input-history file for the REPL; `None` keeps history in
     /// memory only.
     pub history_path: Option<PathBuf>,
-    /// Capture the mouse in the full-screen interface, so the wheel
-    /// scrolls the transcript. Off by default: capture takes the
-    /// terminal's own text selection.
+    /// Capture the mouse in the full-screen interface: the wheel
+    /// scrolls the transcript and a drag selects text. On by
+    /// default; off gives the terminal its own text selection back.
     pub mouse: bool,
     /// Render model replies as markdown in the full-screen interface.
     pub markdown: bool,

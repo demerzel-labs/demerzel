@@ -88,6 +88,11 @@ impl Face {
     pub const DIFF_ADD: Face = Face(1 << 18);
     /// A `-` line of an edit preview on a card.
     pub const DIFF_REMOVE: Face = Face(1 << 19);
+    /// Whole-row structure, over `MARKER`: a fence frame line, a
+    /// rule, a table's head rule. The row holds nothing else, so a
+    /// copy leaves the row out; a row of marks that can hold text,
+    /// such as a quote's bar, copies as a blank line.
+    pub const FRAME: Face = Face(1 << 20);
 
     /// The face of one highlight class.
     fn class(class: Class) -> Face {
@@ -366,7 +371,7 @@ impl<'s> Renderer<'_, 's> {
                 let cols = self.avail();
                 if self.begin_row() {
                     self.push_prefix();
-                    self.set_face(Face::MARKER);
+                    self.set_face(Face::MARKER | Face::FRAME);
                     for _ in 0..cols {
                         self.out.text.push('─');
                     }
@@ -433,7 +438,7 @@ impl<'s> Renderer<'_, 's> {
                 self.highlighter = language.and_then(Highlighter::for_label);
                 if !carried && self.begin_row() {
                     self.push_prefix();
-                    self.push_out("╭─", Face::MARKER);
+                    self.push_out("╭─", Face::MARKER | Face::FRAME);
                     if let Some(language) = language {
                         // The label cuts at the width, like a table row.
                         let avail = self.avail();
@@ -562,7 +567,7 @@ impl<'s> Renderer<'_, 's> {
                 let cut = self.seam.cut && range.end >= self.end;
                 if !cut && self.begin_row() {
                     self.push_prefix();
-                    self.push_out("╰─", Face::MARKER);
+                    self.push_out("╰─", Face::MARKER | Face::FRAME);
                 }
                 self.need_gap = true;
             }
@@ -919,7 +924,7 @@ impl<'s> Renderer<'_, 's> {
                 let cells = row_cells(index);
                 let mut used = 0usize;
                 for (column, width) in widths.iter().enumerate() {
-                    if column > 0 && !self.push_cut(" │ ", &mut used, avail) {
+                    if column > 0 && !self.push_cell_line(&mut used, avail) {
                         break;
                     }
                     let (text, faces) = match cells.get(column) {
@@ -944,10 +949,12 @@ impl<'s> Renderer<'_, 's> {
                 }
                 if head && self.begin_row() {
                     self.push_prefix();
-                    self.set_face(Face::MARKER);
+                    self.set_face(Face::MARKER | Face::FRAME);
                     let mut used = 0usize;
                     for (column, width) in widths.iter().enumerate() {
-                        if column > 0 && !self.push_cut("─┼─", &mut used, avail) {
+                        if column > 0
+                            && !self.push_cut("─┼─", Face::MARKER | Face::FRAME, &mut used, avail)
+                        {
                             break;
                         }
                         for _ in 0..*width {
@@ -1007,13 +1014,27 @@ impl<'s> Renderer<'_, 's> {
     }
 
     /// Append a table line inside the cut, whole or not at all.
-    fn push_cut(&mut self, text: &str, used: &mut usize, avail: usize) -> bool {
+    fn push_cut(&mut self, text: &str, face: Face, used: &mut usize, avail: usize) -> bool {
         let cols = display_width(text);
         if *used + cols > avail {
             return false;
         }
-        self.push_out(text, Face::MARKER);
+        self.push_out(text, face);
         *used += cols;
+        true
+    }
+
+    /// Append the line between two cells inside the cut, whole or
+    /// not at all. The line is a mark; the spaces around it are the
+    /// cells' padding, so a copy keeps the cells apart.
+    fn push_cell_line(&mut self, used: &mut usize, avail: usize) -> bool {
+        if *used + 3 > avail {
+            return false;
+        }
+        self.push_out(" ", Face::PLAIN);
+        self.push_out("│", Face::MARKER);
+        self.push_out(" ", Face::PLAIN);
+        *used += 3;
         true
     }
 }
@@ -1370,7 +1391,10 @@ mod tests {
         ));
         assert_eq!(starts.len(), 3);
         assert!(faces.len() > 1000 && faces.len() < 1030, "{}", faces.len());
-        assert_eq!(faces.last().map(|&(_, face)| face), Some(Face::MARKER));
+        assert_eq!(
+            faces.last().map(|&(_, face)| face),
+            Some(Face::MARKER | Face::FRAME)
+        );
         assert_eq!(faces[faces.len() - 2].1, Face::CODE | Face::FENCE);
         assert!(
             faces

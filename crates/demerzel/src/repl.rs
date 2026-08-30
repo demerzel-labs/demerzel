@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
-use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note};
+use crate::commands::{Effect, NEW_SESSION_NOTE, dispatch, effort_note, model_note, session_note};
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, RunConfig, RunError, Runtime};
 
@@ -173,6 +173,8 @@ pub struct Renderer {
     /// applied change. Interrupted, not absent: a dropped turn can
     /// cut an approved call mid-run.
     pending_calls: std::sync::Mutex<Vec<(String, String)>>,
+    /// When the turn started, for the time on the usage line.
+    started: std::time::Instant,
 }
 
 impl Renderer {
@@ -187,6 +189,7 @@ impl Renderer {
             dim,
             line_open: AtomicU8::new(LINE_NONE),
             pending_calls: std::sync::Mutex::new(Vec::new()),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -299,10 +302,14 @@ impl EventSink for Renderer {
                 self.status_line(&format!("{mark} {}", summary.unwrap_or(name)));
             }
             EngineEvent::ModelUsage(usage) if self.show_reasoning => {
-                let line = self.dimmed(&format!(
-                    "· {} in · {} out · {} cached",
+                // The time since the turn started, as the full-screen
+                // interface shows it.
+                let mut text = format!(
+                    "· {} in · {} out · {} cached · ",
                     usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                ));
+                );
+                demerzel_tui::write_duration(&mut text, self.started.elapsed());
+                let line = self.dimmed(&text);
                 self.status_line(&line);
             }
             _ => {}
@@ -390,6 +397,13 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         engine = None;
                         resume = false;
                         eprintln!("{NEW_SESSION_NOTE}");
+                        continue;
+                    }
+                    Some(Effect::Session) => {
+                        let session = engine
+                            .as_ref()
+                            .map(|engine| (engine.session().id(), engine.session().path()));
+                        eprintln!("{}", session_note(session));
                         continue;
                     }
                     Some(Effect::SetModel(name)) => {
