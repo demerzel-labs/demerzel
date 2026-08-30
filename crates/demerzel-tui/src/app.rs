@@ -546,15 +546,14 @@ impl App {
         let Some(copied) = self.transcript.select_release() else {
             return false;
         };
-        if copied.text.is_empty() {
-            return false;
-        }
-        let _ = select::write_clipboard(&copied.text);
         if copied.cut {
             self.transcript.push_line(
                 Kind::Notice,
                 &format!("copy cut at {} KiB", select::COPY_CAP / 1024),
             );
+        }
+        if !copied.text.is_empty() {
+            let _ = select::write_clipboard(&copied.text);
         }
         copied.cut
     }

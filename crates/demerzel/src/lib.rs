@@ -75,8 +75,7 @@ pub struct RunConfig {
     pub history_path: Option<PathBuf>,
     /// Capture the mouse in the full-screen interface: the wheel
     /// scrolls the transcript and a drag selects text. On by
-    /// default; the terminal's own text selection needs its
-    /// override key while capture is on.
+    /// default; off gives the terminal its own text selection back.
     pub mouse: bool,
     /// Render model replies as markdown in the full-screen interface.
     pub markdown: bool,

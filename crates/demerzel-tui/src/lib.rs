@@ -96,9 +96,9 @@ pub struct Options {
     pub mode: String,
     /// Capture the mouse: the wheel scrolls the transcript, and a
     /// drag selects text that the release copies to the clipboard
-    /// through the terminal. On by default; the terminal's own text
-    /// selection needs its override key while capture is on. The
-    /// binary sets it from the `tui.mouse` config key.
+    /// through the terminal. On by default; off gives the terminal
+    /// its own text selection back. The binary sets it from the
+    /// `tui.mouse` config key.
     pub mouse: bool,
     /// Render model replies as markdown. On by default; off shows the
     /// raw text, for copying.

@@ -29,10 +29,13 @@ use crate::markdown::Face;
 use crate::transcript::Block;
 
 /// Bytes of text one copy holds at most. The write blocks the loop,
-/// and terminals cap the sequence near this size. The walk that
-/// builds the copy stops at as many rows, too: a row that adds
-/// nothing still counts one.
+/// and terminals cap the sequence near this size.
 pub(crate) const COPY_CAP: usize = 64 * 1024;
+
+/// Rows the walk that builds a copy visits at most. A row that adds
+/// nothing — a card's header, a fence frame line — still counts, so
+/// the walk is bounded when the bytes are not.
+const COPY_ROW_CAP: usize = 64 * 1024;
 
 /// One end of a selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,11 +131,11 @@ fn whole(from: usize, to: usize) -> bool {
 
 /// The byte range of `text` inside columns `from..to`, with `col`
 /// the column `text` starts at; `col` advances past the text. The
-/// range is contiguous: the chars inside a column window are.
+/// range is contiguous: the chars inside a column window are. On a
+/// whole row `col` stays: every span of the row takes that path,
+/// and none needs the count.
 pub(crate) fn window(text: &str, from: usize, to: usize, col: &mut usize) -> (usize, usize) {
     if whole(from, to) {
-        // Every span of the row takes this path, so the column
-        // count is not needed.
         return (0, text.len());
     }
     let mut start = None;
@@ -156,7 +159,9 @@ pub(crate) fn window(text: &str, from: usize, to: usize, col: &mut usize) -> (us
 /// trailing spaces dropped, a newline after. A card's header row and
 /// a row of whole-row structure — a fence frame line, a rule — add
 /// nothing. A row of marks that can hold text, such as a quote's
-/// bar or a card's blank output line, adds a blank line.
+/// bar or a card's blank output line, adds a blank line; a wrapped
+/// row of marks alone, such as a card's hint on a row of its own,
+/// adds nothing.
 pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out: &mut String) {
     let start = out.len();
     let skip = block.frame_columns(index);
@@ -164,6 +169,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
     let mut col = 0usize;
     let mut drop = false;
     let mut first = true;
+    let mut content = false;
     let mut push = |face: Face, text: &str| {
         // An empty row shares its offset with the next row's first
         // face; its span carries no face of its own.
@@ -183,6 +189,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
             if mark || at < skip {
                 continue;
             }
+            content = true;
             if whole || inside(at, width, from, to) {
                 out.push(ch);
             }
@@ -193,7 +200,7 @@ pub(crate) fn copy_row(block: &Block, index: usize, from: usize, to: usize, out:
     } else {
         block.spans(index, push);
     }
-    if drop {
+    if drop || (!content && col > 0 && block.wrapped(index)) {
         out.truncate(start);
         return;
     }
@@ -244,7 +251,7 @@ pub(crate) fn copy(
             };
             copy_row(block, row, from, to, &mut text);
             walked += 1;
-            if text.len() > COPY_CAP || walked > COPY_CAP {
+            if text.len() > COPY_CAP || walked > COPY_ROW_CAP {
                 let mut at = text.len().min(COPY_CAP);
                 while !text.is_char_boundary(at) {
                     at -= 1;

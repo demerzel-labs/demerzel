@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::Instant;
 
 use crate::cards::{Card, INDENT, Outcome, push_sanitized};
@@ -431,6 +432,13 @@ impl Block {
         start == 0 || self.buffer().as_bytes()[start - 1] == b'\n'
     }
 
+    /// Whether row `index` continues a wrapped line of a plain
+    /// layout. A markdown render keeps no line ends between its
+    /// rows, so its rows never count as wrapped here.
+    pub(crate) fn wrapped(&self, index: usize) -> bool {
+        !self.rendered() && !self.line_start(index)
+    }
+
     /// The columns the frame takes at the start of row `index`,
     /// which a copy leaves out: a card's indent on each of its
     /// lines, the prompt on an echo's first row.
@@ -550,9 +558,11 @@ pub struct Transcript {
     /// its first block drops off the cap.
     selection: Option<Selection>,
     /// The block and row on each viewport row of the last frame,
-    /// top down, so a mouse position maps to a point. `None` on a
-    /// row something covers, such as the completion popup.
-    shown: Vec<Option<(usize, usize)>>,
+    /// top down, so a mouse position maps to a point.
+    shown: Vec<(usize, usize)>,
+    /// The viewport cells something covers — the completion popup —
+    /// as `(rows, columns)`; a position there maps to no row.
+    covered: Option<(Range<usize>, Range<usize>)>,
 }
 
 impl Transcript {
@@ -573,6 +583,7 @@ impl Transcript {
             frame_end: 0,
             selection: None,
             shown: Vec::new(),
+            covered: None,
         }
     }
 
@@ -983,33 +994,42 @@ impl Transcript {
 
     /// The row map, taken for the frame to fill; see
     /// [`Transcript::set_shown`].
-    pub(crate) fn take_shown(&mut self) -> Vec<Option<(usize, usize)>> {
+    pub(crate) fn take_shown(&mut self) -> Vec<(usize, usize)> {
         std::mem::take(&mut self.shown)
     }
 
     /// The block and row on each viewport row of the frame just
-    /// drawn, top down.
-    pub(crate) fn set_shown(&mut self, shown: Vec<Option<(usize, usize)>>) {
+    /// drawn, top down. Nothing covers them until the frame says so.
+    pub(crate) fn set_shown(&mut self, shown: Vec<(usize, usize)>) {
         self.shown = shown;
+        self.covered = None;
     }
 
     /// A frame drew no transcript rows: no position maps to one.
     pub(crate) fn clear_shown(&mut self) {
         self.shown.clear();
+        self.covered = None;
     }
 
-    /// Viewport rows `from..to` are covered — the completion popup
-    /// sits on them — so a position there maps to no row.
-    pub(crate) fn cover_rows(&mut self, from: usize, to: usize) {
-        for row in self.shown.iter_mut().take(to).skip(from) {
-            *row = None;
-        }
+    /// The frame drew the completion popup over viewport `rows` and
+    /// `columns`: a position there maps to no row.
+    pub(crate) fn cover(&mut self, rows: Range<usize>, columns: Range<usize>) {
+        self.covered = Some((rows, columns));
+    }
+
+    fn is_covered(&self, x: u16, y: u16) -> bool {
+        self.covered.as_ref().is_some_and(|(rows, columns)| {
+            rows.contains(&usize::from(y)) && columns.contains(&usize::from(x))
+        })
     }
 
     /// The point under viewport column `x` and row `y`, when a row
     /// is shown there.
     fn point_at(&self, x: u16, y: u16) -> Option<Point> {
-        let (block, row) = (*self.shown.get(usize::from(y))?)?;
+        if self.is_covered(x, y) {
+            return None;
+        }
+        let &(block, row) = self.shown.get(usize::from(y))?;
         Some(Point {
             block,
             row,
@@ -1034,20 +1054,21 @@ impl Transcript {
     /// shown row the head is the end of that row; above the first it
     /// is the start of that row. Returns whether the frame changes.
     pub fn select_drag(&mut self, x: u16, y: u16) -> bool {
+        // A covered position: the head stays.
+        if self.is_covered(x, y) {
+            return false;
+        }
         let Some(selection) = &mut self.selection else {
             return false;
         };
         let head = match self.shown.get(usize::from(y)) {
-            Some(&Some((block, row))) => Point {
+            Some(&(block, row)) => Point {
                 block,
                 row,
                 col: usize::from(x),
             },
-            // A covered row: the head stays.
-            Some(None) => return false,
             None => {
-                let Some(&Some((block, row))) = self.shown.iter().rev().find(|row| row.is_some())
-                else {
+                let Some(&(block, row)) = self.shown.last() else {
                     return false;
                 };
                 Point {
@@ -1066,11 +1087,8 @@ impl Transcript {
     /// and stays on the screen; a click without a drag clears.
     pub fn select_release(&mut self) -> Option<Copied> {
         let selection = self.selection?;
-        if !selection.is_span() {
+        if !selection.is_span() || self.width == 0 {
             self.selection = None;
-            return None;
-        }
-        if self.width == 0 {
             return None;
         }
         Some(select::copy(

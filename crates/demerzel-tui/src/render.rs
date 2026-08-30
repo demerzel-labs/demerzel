@@ -129,11 +129,14 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
                 ..area
             };
             if let Some(popup) = draw_popup(frame, above, view.editor, prefix, palette) {
-                // The popup hides the rows under it: a press there
+                // The popup hides the cells under it: a press there
                 // must not select what it covers.
-                let from = usize::from(popup.y - area.y);
-                view.transcript
-                    .cover_rows(from, from + usize::from(popup.height));
+                let y = usize::from(popup.y - area.y);
+                let x = usize::from(popup.x - area.x);
+                view.transcript.cover(
+                    y..y + usize::from(popup.height),
+                    x..x + usize::from(popup.width),
+                );
             }
         }
     }
@@ -378,7 +381,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, transcript: &mut Transcript, p
             if lines.len() >= height {
                 break 'collect;
             }
-            shown.push(Some((absolute, index)));
+            shown.push((absolute, index));
             let columns = selection.and_then(|selection| selection.columns(absolute, index));
             if let Some((from, to)) = columns {
                 lines.push(selected_line(block, index, from, to, selected, palette));
@@ -1478,6 +1481,33 @@ line 12",
     }
 
     #[test]
+    fn a_card_hint_wrapped_onto_its_own_row_adds_no_line() {
+        let mut transcript = Transcript::new(false);
+        transcript.tool_start("c1", "bash");
+        let summary = "s".repeat(30);
+        transcript.tool_end(
+            "c1",
+            "bash",
+            crate::cards::Outcome {
+                summary: Some(&summary),
+                is_error: false,
+                output: "a\nb\nc\nd\ne\nf\ng\nh".to_string(),
+                output_cut: false,
+                at: std::time::Instant::now(),
+            },
+        );
+        transcript.push_line(Kind::Notice, "· 10 in");
+        let (lines, _) = frame_of(&mut transcript, 40, 12);
+        // The footer wraps: the hint lands on a row of its own.
+        assert!(lines[7].contains("Ctrl-O"), "{:?}", lines);
+        assert!(!lines[7].contains(&summary), "{:?}", lines);
+        transcript.select_press(0, 0);
+        transcript.select_drag(10, 8);
+        let text = transcript.select_release().unwrap().text;
+        assert!(text.ends_with(&format!("{summary}\n· 10 in")), "{text:?}");
+    }
+
+    #[test]
     fn a_press_on_the_popup_selects_nothing_under_it() {
         let commands = vec![
             CommandSpec::new("/help", "list the commands"),
@@ -1507,14 +1537,19 @@ line 12",
                 );
             })
             .unwrap();
-        // Rows 3 and 4 hold the popup; row 2 is transcript.
-        assert!(!transcript.select_press(0, 3));
+        // Rows 3 and 4 hold the popup from column 5; row 2 is
+        // transcript, and so are the columns left of the popup.
+        assert!(!transcript.select_press(6, 3));
         assert!(transcript.select_release().is_none());
         transcript.select_press(0, 2);
-        // A drag onto a covered row leaves the head where it is.
-        assert!(!transcript.select_drag(5, 3));
+        // A drag onto a covered cell leaves the head where it is.
+        assert!(!transcript.select_drag(6, 3));
         assert!(transcript.select_drag(5, 2));
         assert_eq!(transcript.select_release().unwrap().text, "line 2");
+        // The cells beside the popup stay the transcript's.
+        transcript.select_press(0, 3);
+        transcript.select_drag(3, 3);
+        assert_eq!(transcript.select_release().unwrap().text, "line");
     }
 
     #[test]
