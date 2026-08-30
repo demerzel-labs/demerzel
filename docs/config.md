@@ -107,7 +107,7 @@ built-in name edits that theme. A table with a new name starts from
 
 | Role | What it colors |
 |---|---|
-| `text` | replies, cards, the input box, the status bar's text |
+| `text` | replies, cards, the input box, the status on the box's edge, the status bar's text |
 | `dim` | thinking blocks, notices, a card's output tail and hint, markdown marks, link destinations, the completions not selected |
 | `accent` | card headers, the selected completion, the browse indicator |
 | `error` | failure messages, a failed call's mark |
@@ -118,7 +118,7 @@ built-in name edits that theme. A table with a new name starts from
 | `inline_code` | code spans |
 | `code_block` | the lines of a code fence |
 | `prompt` | the prompt |
-| `status_bar` | the status bar's ground |
+| `status_bar` | the status bar's ground, on a screen too small for the box's frame |
 | `progress_line` | the progress line |
 | `diff_add` | a `+` line of an edit preview |
 | `diff_remove` | a `-` line of an edit preview |

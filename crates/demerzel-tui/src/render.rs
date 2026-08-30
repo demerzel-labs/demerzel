@@ -31,18 +31,18 @@ const MAX_INPUT_ROWS: u16 = 8;
 const MAX_POPUP_ROWS: usize = 8;
 
 /// Screen size from which the input box gets its frame: a box with
-/// rounded corners and one column of padding inside, and a blank row
-/// between it and the status bar. A smaller screen keeps every row
-/// and column for content.
+/// rounded corners whose bottom edge carries the status — the model,
+/// the mode, the session, the totals — between line segments. A
+/// smaller screen keeps every row and column for content and shows
+/// the status as a bar.
 const FRAMED_HEIGHT: u16 = 8;
 const FRAMED_WIDTH: u16 = 16;
 
-/// Rows the frame takes: the box's top and bottom, and the gap.
-const FRAME_ROWS: u16 = 3;
+/// Rows the frame takes: the box's top and bottom edges.
+const FRAME_ROWS: u16 = 2;
 
-/// Columns the frame takes at each side: the box's edge and the
-/// padding.
-const FRAME_INSET: u16 = 2;
+/// Columns the frame takes at each side: the box's edge.
+const FRAME_INSET: u16 = 1;
 
 /// What the status bar names: the model, the mode, the open session,
 /// and the open session's token totals, counted from this run's
@@ -84,14 +84,19 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     // rows up to the cap, and the transcript keeps one row at least.
     // The progress line takes one more row above the box when it
     // shows and the screen has a fourth row. On a screen of eight
-    // rows and sixteen columns or more the box gets its frame: a
-    // box with rounded corners around it, and a blank row under
-    // that, before the bar.
-    let bar_rows = u16::from(area.height >= 3);
+    // rows and sixteen columns or more the box gets its frame, a
+    // box with rounded corners, and the status moves onto its
+    // bottom edge; the bar row goes, and the progress line gets a
+    // blank row above it, apart from the reply.
     let framed = area.height >= FRAMED_HEIGHT && area.width >= FRAMED_WIDTH;
+    let bar_rows = u16::from(!framed && area.height >= 3);
     let frame_rows = if framed { FRAME_ROWS } else { 0 };
     let inset = if framed { FRAME_INSET } else { 0 };
-    let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
+    let progress_rows = match view.progress {
+        Some(_) if framed => 2,
+        Some(_) if area.height >= 4 => 1,
+        _ => 0,
+    };
     let box_cap = (area.height - bar_rows - progress_rows - frame_rows)
         .saturating_sub(1)
         .clamp(1, MAX_INPUT_ROWS);
@@ -103,8 +108,8 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             .unwrap_or(u16::MAX)
             .clamp(1, box_cap),
     };
-    // From the bottom: the bar, then the gap and the box's bottom
-    // edge when framed, then the input rows.
+    // From the bottom: the bar, or the box's bottom edge when
+    // framed, then the input rows.
     let input_area = Rect {
         x: area.x + inset,
         y: area.y + area.height - bar_rows - frame_rows.saturating_sub(1) - input_rows,
@@ -124,7 +129,7 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             height: input_rows + 2,
             ..area
         };
-        draw_frame(frame, frame_area, palette);
+        draw_frame(frame, frame_area, view.status, palette);
     }
     if let Some(progress) = view.progress
         && progress_rows > 0
@@ -233,9 +238,10 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
 
-/// The frame around the input box: a dim box with rounded corners.
-/// The input rows draw inside it afterwards.
-fn draw_frame(frame: &mut Frame, area: Rect, palette: &Palette) {
+/// The frame around the input box: a dim box with rounded corners,
+/// the status on its bottom edge. The input rows draw inside it
+/// afterwards.
+fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
     let style = paint(
         Style::default().add_modifier(Modifier::DIM),
         palette.color(Role::Dim),
@@ -252,7 +258,7 @@ fn draw_frame(frame: &mut Frame, area: Rect, palette: &Palette) {
         top,
     );
     frame.render_widget(
-        Paragraph::new(Line::styled(format!("╰{across}╯"), style)),
+        Paragraph::new(status_edge(status, usize::from(area.width), palette)),
         bottom,
     );
     let sides = usize::from(area.height) - 2;
@@ -269,6 +275,56 @@ fn draw_frame(frame: &mut Frame, area: Rect, palette: &Palette) {
     };
     frame.render_widget(Paragraph::new(edge.clone()), left);
     frame.render_widget(Paragraph::new(edge), right);
+}
+
+/// The box's bottom edge with the status on it: the model, the
+/// mode, the session, and the token totals, each between line
+/// segments, cut to the width from the right; the corners stay.
+fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
+    let dim = paint(
+        Style::default().add_modifier(Modifier::DIM),
+        palette.color(Role::Dim),
+    );
+    let text = paint(Style::default(), palette.color(Role::Text));
+    let totals = format!(
+        "{} in · {} out · {} cached",
+        status.input_tokens, status.output_tokens, status.cached_tokens
+    );
+    let segments = [
+        Some(status.model.as_str()),
+        Some(status.mode.as_str()),
+        status.session.as_deref(),
+        Some(totals.as_str()),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
+    let mut used = 0usize;
+    // The right corner keeps the last column.
+    let budget = width.saturating_sub(1);
+    if budget >= 2 {
+        spans.push(Span::styled("╰─", dim));
+        used = 2;
+    }
+    for segment in segments.into_iter().flatten() {
+        // One column stays for the line after the segment.
+        let room = budget.saturating_sub(used + 1);
+        if room == 0 {
+            break;
+        }
+        let (piece, cols) = fit_row([" ", segment, " "], room);
+        if cols == 0 {
+            break;
+        }
+        spans.push(Span::styled(piece, text));
+        spans.push(Span::styled("─", dim));
+        used += cols + 1;
+    }
+    if used < budget {
+        spans.push(Span::styled("─".repeat(budget - used), dim));
+    }
+    if width >= 1 {
+        spans.push(Span::styled("╯", dim));
+    }
+    Line::from(spans)
 }
 
 /// One row of text cut to the width: the progress line, the
@@ -1120,13 +1176,13 @@ line 12",
         top_line(&mut transcript, &mut editor);
         transcript.scroll_up(5);
         let before = top_line(&mut transcript, &mut editor);
-        assert_eq!(before.trim_end(), "line 12");
+        assert_eq!(before.trim_end(), "line 10");
         // Two more editor rows take two transcript rows; the top row
         // stays.
         editor.set("one\ntwo\nthree");
         // The pane is one row now, so the indicator shares it.
         let after = top_line(&mut transcript, &mut editor);
-        assert!(after.starts_with("line 12"), "{after:?}");
+        assert!(after.starts_with("line 10"), "{after:?}");
         assert_eq!(transcript.scroll(), 7);
     }
 
@@ -1541,7 +1597,7 @@ line 12",
         transcript.tool_end("c2", "bash", outcome("a\nb\nc\nd\ne\nf\ng\nh"));
         let (lines, _) = frame_of(&mut transcript, 40, 40);
         // The pane is the rows above the frame, the box, and the bar.
-        let last = lines[..35]
+        let last = lines[..37]
             .iter()
             .rposition(|line| !line.is_empty())
             .unwrap();
@@ -1633,14 +1689,13 @@ line 12",
         let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "line 0");
         transcript.push_line(Kind::Text, "line 1");
-        // An eight-row screen: three pane rows, the box with its
-        // frame, the gap, the bar.
+        // An eight-row screen: five pane rows, then the box with
+        // its frame.
         frame_of(&mut transcript, 30, 8);
         transcript.select_press(0, 0);
         assert!(transcript.select_drag(2, 0));
-        // Rows 3 to 7 are the box, its frame, the gap, and the bar:
-        // the head stays.
-        for y in 3..8 {
+        // Rows 5 to 7 are the box and its frame: the head stays.
+        for y in 5..8 {
             assert!(!transcript.select_drag(9, y));
         }
         assert_eq!(transcript.select_release().unwrap().text, "lin");
@@ -1694,16 +1749,18 @@ line 12",
                 progress: Some("⠋ 3s · bash"),
             },
         );
-        // The pane, the progress line, the box's top, the input row
-        // inside the box, the box's bottom, the gap, the bar.
-        assert_eq!(rows, 2);
+        // The pane, a blank row, the progress line, the box's top,
+        // the input row inside the box, the box's bottom edge with
+        // the status.
+        assert_eq!(rows, 3);
         assert_eq!(lines[0].trim_end(), "line 0");
-        assert_eq!(lines[2].trim_end(), "⠋ 3s · bash");
-        assert_eq!(lines[3], "╭──────────────────╮");
-        assert_eq!(lines[4], format!("│ ❯{}│", " ".repeat(16)));
-        assert_eq!(lines[5], "╰──────────────────╯");
-        assert_eq!(lines[6].trim(), "");
-        assert!(lines[7].contains("test-model"), "{:?}", lines[7]);
+        assert_eq!(lines[3].trim(), "");
+        assert_eq!(lines[4].trim_end(), "⠋ 3s · bash");
+        assert_eq!(lines[5], "╭──────────────────╮");
+        assert_eq!(lines[6], format!("│❯{}│", " ".repeat(17)));
+        assert!(lines[7].starts_with("╰─ test-model ─"), "{:?}", lines[7]);
+        assert!(lines[7].ends_with('╯'), "{:?}", lines[7]);
+        assert_eq!(lines[7].chars().count(), 20);
         // A seven-row screen keeps the packed layout.
         let (lines, rows) = render(
             20,
@@ -1720,6 +1777,63 @@ line 12",
         assert_eq!(rows, 5);
         assert_eq!(lines[5].trim_end(), "❯");
         assert!(!lines.iter().any(|line| line.contains('─')));
+    }
+
+    #[test]
+    fn the_status_sits_on_the_box_edge_between_line_segments() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            session: Some("s-9".into()),
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_tokens: 2,
+            ..status()
+        };
+        let palette = palette();
+        let (lines, _) = render(
+            60,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        let edge = &lines[7];
+        let head = "╰─ test-model ─ ask ─ s-9 ─ 12 in · 5 out · 2 cached ─";
+        assert!(edge.starts_with(head), "{edge:?}");
+        assert!(edge.ends_with('╯'), "{edge:?}");
+        assert_eq!(edge.chars().count(), 60);
+        assert!(
+            edge[head.len()..]
+                .trim_end_matches('╯')
+                .chars()
+                .all(|ch| ch == '─'),
+            "{edge:?}"
+        );
+        // A narrow box cuts the segments from the right and keeps
+        // its corners.
+        let (lines, _) = render(
+            18,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        let edge = &lines[7];
+        assert!(edge.starts_with("╰─ test-model ─"), "{edge:?}");
+        assert!(edge.ends_with('╯'), "{edge:?}");
+        assert_eq!(edge.chars().count(), 18);
+        assert!(!edge.contains("cached"));
     }
 
     #[test]

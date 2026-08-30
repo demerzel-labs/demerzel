@@ -198,8 +198,8 @@ fn bench_render(c: &mut Criterion) {
         }
         group.bench_function(format!("frame{suffix}"), |b| b.iter(|| screen.draw()));
         // The selection spans the whole transcript pane: the rows
-        // above the input box's frame, the box, and the bar.
-        screen.select((4, 0), (60, HEIGHT - 6));
+        // above the input box and its frame.
+        screen.select((4, 0), (60, HEIGHT - 4));
         screen.draw();
         group.bench_function(format!("frame-selected{suffix}"), |b| {
             b.iter(|| screen.draw())

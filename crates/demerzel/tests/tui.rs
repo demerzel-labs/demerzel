@@ -731,7 +731,7 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.wait_for("· bash $ sleep 20");
     pty.wait_for("s · bash");
     pty.wait_for(PROMPT);
-    pty.wait_for("· ask ·");
+    pty.wait_for("─ ask ─");
     pty.send(CTRL_C);
     pty.wait_for("interrupted");
     pty.wait_for("[turn aborted]");
@@ -800,7 +800,7 @@ async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
     assert!(
-        contains_marker(&raw, "gpt-test · ask"),
+        contains_marker(&raw, "gpt-test ─ ask"),
         "the bar never showed the switched model"
     );
 
@@ -965,17 +965,17 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     // Two notches of three rows: the window moved up six rows past
     // the usage notice and the last five reply rows. The resize
     // lands in the same frame: the pane loses one row and the top
-    // row holds, so the scroll deepens to seven. A 24-row pane —
-    // 29 rows less the bar, the box, and the box's frame — opens on
-    // row 30; the indicator counts the seven below.
-    pty.wait_for("row 30 of the long reply");
+    // row holds, so the scroll deepens to seven. A 26-row pane —
+    // 29 rows less the box and its frame — opens on row 28; the
+    // indicator counts the seven below.
+    pty.wait_for("row 28 of the long reply");
     pty.wait_for("7 below");
     // A click on the indicator, at the right of the pane's last
     // row, returns to the bottom. The frame diff rewrites only the
     // digits that changed, so a resize forces the full repaint the
     // assertion reads.
-    pty.send(&mouse_press(95, 24));
-    pty.send(&mouse_release(95, 24));
+    pty.send(&mouse_press(95, 26));
+    pty.send(&mouse_release(95, 26));
     pty.resize(100, 30);
     pty.wait_for("row 59 of the long reply");
     // Up again; End returns to the bottom of the transcript.
@@ -1235,7 +1235,7 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     // covers the whole screen.
     pty.send(b"\x1b[A");
     pty.resize(100, 29);
-    pty.absent_until("show or set the reasoning effort", "· ask ·");
+    pty.absent_until("show or set the reasoning effort", "─ ask ─");
     pty.send(b"\x1b[A");
     pty.wait_for("fourth-row");
     pty.send(CTRL_C);
@@ -1257,7 +1257,7 @@ async fn the_editor_takes_several_lines_and_completes_a_command() {
     pty.wait_for("start a fresh session at the next prompt");
     pty.send(b"\x1b");
     pty.resize(100, 29);
-    pty.absent_until("start a fresh session", "· ask ·");
+    pty.absent_until("start a fresh session", "─ ask ─");
     pty.send(b"\r");
     pty.wait_for("unknown command: /ne");
     // Tab moves the selection: `/e` lists /effort first, then /exit.
@@ -1336,10 +1336,10 @@ async fn the_dark_theme_paints_truecolor_when_the_terminal_declares_it() {
         has_params(&params, &[38, 2, 0xd0, 0xd8, 0xe4]),
         "the text role in truecolor: {params:?}"
     );
-    // The status bar's ground is the theme's.
+    // The box's edge, with the status on it, takes the dim role.
     assert!(
-        has_params(&params, &[48, 2, 0x36, 0x3e, 0x4e]),
-        "the bar's ground in truecolor: {params:?}"
+        has_params(&params, &[38, 2, 0x7b, 0x84, 0x94]),
+        "the dim role in truecolor: {params:?}"
     );
 }
 
