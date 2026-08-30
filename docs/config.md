@@ -36,6 +36,7 @@ effort = "medium"                # per-provider override
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
+context_window = 200000          # in tokens; wins over the model catalog
 
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
@@ -56,6 +57,7 @@ error = "bright-red"
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `max_model_calls` | — | — | `128` |
+| `context_window` | — | — | the provider catalog |
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
@@ -119,6 +121,25 @@ value. The session keeps every result up to the stop, and the next
 prompt continues from those results. The limit guards against a
 runaway tool loop; it is not a spend budget. The project file can
 lower the limit. It cannot raise the limit.
+
+## The context on the status
+
+The full-screen interface names the context in use on its status:
+`context 34.2k`. The count is the input tokens of the last model
+call, the prompt the model just read. Cached tokens count: the
+model read them. The totals beside it sum the session's spend
+across calls; the two numbers are different measures. A fresh
+session clears the count.
+
+When the model's context window is known, the segment adds the
+share: `context 34.2k · 17%`. Each provider adapter has a catalog
+of known models and their windows. The `context_window` key under
+`[providers.<id>]` names the window, in tokens: an integer from 1
+to the 32-bit maximum. The key wins over the catalog, so a stale
+catalog row has an override. The key applies to every model of its
+provider. A model with no window shows the count alone. A window
+smaller than the prompt shows a share over 100%. A `/model`
+switch moves the window with the model, with no new call.
 
 ## Thinking blocks
 
@@ -272,4 +293,5 @@ interface and set the default back to `true` on the same day.
 `tui.theme` and the `[theme.<name>]` tables landed with M2.5 step 8.
 `max_model_calls` landed on 2026-08-30, after a code-review
 dogfood hit the fixed limit; the default rose from 32 to 128 on
-the same day.
+the same day. The context segment and `context_window` landed with
+M2.5 step 8e.

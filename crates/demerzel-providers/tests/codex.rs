@@ -419,3 +419,43 @@ async fn gives_up_after_max_attempts_on_rate_limits() {
     assert!(matches!(error, ProviderError::RateLimited { .. }));
     assert_eq!(mock.received().len(), 3);
 }
+
+#[tokio::test]
+async fn an_incomplete_response_reports_its_usage_before_the_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockServer::start(
+        vec![MockResponse::stream(vec![
+            json!({"type": "response.output_text.delta", "delta": "cut"}),
+            json!({"type": "response.incomplete", "response": {"usage": {
+                "input_tokens": 101_003,
+                "output_tokens": 64_000,
+                "input_tokens_details": {"cached_tokens": 90_000},
+            }}}),
+        ])],
+        vec![],
+    )
+    .await;
+    let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
+
+    let events: Vec<StreamEvent> = collect(
+        provider
+            .stream(request(Vec::new(), Vec::new()))
+            .await
+            .unwrap(),
+    )
+    .await
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+
+    use StreamEvent::*;
+    match &events[..] {
+        [TextDelta(_), Usage(usage), Done(stop)] => {
+            assert_eq!(usage.input_tokens, 101_003);
+            assert_eq!(usage.output_tokens, 64_000);
+            assert_eq!(usage.cache_read_tokens, 90_000);
+            assert_eq!(*stop, StopReason::MaxTokens);
+        }
+        other => panic!("unexpected events: {other:?}"),
+    }
+}

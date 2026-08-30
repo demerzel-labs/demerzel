@@ -73,6 +73,12 @@ pub struct StatusPatch {
     /// The git branch, or the short hash of a detached head; empty
     /// shows no segment.
     pub branch: Option<String>,
+    /// The model's context window, in tokens, for the share on the
+    /// context segment. The outer `Option` is the patch: `None`
+    /// leaves the window alone. The inner value is the window:
+    /// `Some(None)` takes the share away — the window is unknown and
+    /// the segment shows the count alone.
+    pub context_window: Option<Option<u64>>,
 }
 
 /// Sends display events into the interface loop. The driver hands it

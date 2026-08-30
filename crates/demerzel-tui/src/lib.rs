@@ -116,6 +116,10 @@ pub struct Options {
     /// [`EventSender::status`] at each turn's start. The interface
     /// cuts it at 64 bytes and drops control characters.
     pub branch: String,
+    /// The model's context window, in tokens, for the share on the
+    /// context segment. `None` shows the count alone. The driver
+    /// updates it through [`EventSender::status`] on a model switch.
+    pub context_window: Option<u64>,
     /// Capture the mouse: the wheel scrolls the transcript, and a
     /// drag selects text that the release copies to the clipboard
     /// through the terminal. On by default; off gives the terminal
@@ -148,6 +152,7 @@ impl Default for Options {
             effort: String::new(),
             project: String::new(),
             branch: String::new(),
+            context_window: None,
             mouse: true,
             markdown: true,
             thinking: Thinking::default(),

@@ -24,7 +24,8 @@
 //! Each bench runs twice. The prose run keeps the M2 workloads on a
 //! plain-text transcript, so its numbers compare with the M2
 //! receipts. Since M2.5 step 8c the status carries a project segment
-//! and a branch segment. The formatted run (`*-formatted`) streams a markdown
+//! and a branch segment; since step 8e it carries a context segment
+//! with a share. The formatted run (`*-formatted`) streams a markdown
 //! document with headings, lists, tables, and code fences through a
 //! transcript that renders it. A formatted block renders again whole
 //! on every frame that changes it, so the formatted `stream` carries

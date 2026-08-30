@@ -26,6 +26,17 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// `/v1/models` list).
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
+/// The context windows of the models this adapter knows, in tokens,
+/// from the provider's models documentation (2026-08). The rows name
+/// the exact ids the provider publishes; where an id has an alias
+/// and a dated form, each gets a row.
+pub(crate) const CONTEXT_WINDOWS: &[(&str, u64)] = &[
+    ("claude-opus-5", 1_000_000),
+    ("claude-sonnet-5", 1_000_000),
+    ("claude-haiku-4-5", 200_000),
+    ("claude-haiku-4-5-20251001", 200_000),
+];
+
 /// The environment variable that holds the API key. It wins over the
 /// auth store.
 pub const ENV_API_KEY: &str = "ANTHROPIC_API_KEY";

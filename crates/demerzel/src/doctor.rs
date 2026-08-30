@@ -105,6 +105,19 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         .as_deref()
         .unwrap_or("provider default");
     print_setting(out, "base_url", base_url, settings.base_url.origin)?;
+    let context_window = settings.context_window.value.or_else(|| {
+        demerzel_providers::context_window(&settings.provider.value, &settings.model.value)
+    });
+    let context_window = match context_window {
+        Some(window) => window.to_string(),
+        None => "unknown".to_string(),
+    };
+    print_setting(
+        out,
+        "context_window",
+        &context_window,
+        settings.context_window.origin,
+    )?;
     if !demerzel_providers::PROVIDER_IDS.contains(&settings.provider.value.as_str()) {
         problems += 1;
         writeln!(

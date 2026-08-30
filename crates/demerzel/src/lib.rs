@@ -83,6 +83,9 @@ pub struct RunConfig {
     pub effort: Effort,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: u32,
+    /// The context window, in tokens. Set, it wins over the provider
+    /// catalog; `None` leaves the catalog in charge.
+    pub context_window: Option<u64>,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
     /// Input-history file for the REPL; `None` keeps history in
@@ -114,6 +117,7 @@ impl RunConfig {
             base_url: None,
             effort: config::DEFAULT_EFFORT,
             max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
+            context_window: None,
             auth: None,
             history_path: None,
             mouse: config::DEFAULT_MOUSE,
@@ -285,6 +289,16 @@ impl Runtime {
             settings.approval,
         )?;
         Ok((session, Vec::new()))
+    }
+
+    /// The context window of `model`, in tokens: the
+    /// `context_window` key when set — the config wins, so a stale
+    /// catalog row has an override — or the provider catalog's
+    /// number.
+    pub(crate) fn context_window(&self, model: &str) -> Option<u64> {
+        self.config
+            .context_window
+            .or_else(|| demerzel_providers::context_window(self.provider.id(), model))
     }
 
     /// The tool set for an approval mode: `read-only` advertises the

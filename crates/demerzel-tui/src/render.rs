@@ -51,10 +51,10 @@ const FRAME_ROWS: u16 = 3;
 const FRAME_INSET: u16 = 1;
 
 /// What the status names: the model, the mode, the reasoning
-/// effort, the project and its branch, and the open session's token
-/// totals, counted from this run's start. A session change restarts
-/// the totals. The session's id is a `/session` reply, not a
-/// segment.
+/// effort, the project and its branch, the context in use, and the
+/// open session's token totals, counted from this run's start. A
+/// session change restarts the totals and the context. The
+/// session's id is a `/session` reply, not a segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: ApprovalMode,
@@ -65,26 +65,52 @@ pub(crate) struct Status {
     /// The git branch, or a detached head's short hash; empty shows
     /// no segment.
     pub branch: String,
+    /// The last model call's input tokens, the prompt the model just
+    /// read, cache reads counted. Zero shows no segment: no call ran
+    /// in the open session yet.
+    pub context_tokens: u64,
+    /// The model's context window, in tokens, for the share beside
+    /// the count. `None` shows the count alone.
+    pub context_window: Option<u64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
 }
 
 /// Segments the status shows at most.
-const SEGMENTS: usize = 6;
+const SEGMENTS: usize = 7;
 
 impl Status {
     /// The segments in order, each a label and its text. An empty
     /// text is no segment.
-    fn segments<'a>(&'a self, totals: &'a str) -> [(&'a str, &'a str); SEGMENTS] {
+    fn segments<'a>(&'a self, context: &'a str, totals: &'a str) -> [(&'a str, &'a str); SEGMENTS] {
         [
             ("", self.model.as_str()),
             ("", self.mode.as_str()),
             (EFFORT_LABEL, self.effort.as_str()),
             ("", self.project.as_str()),
             ("", self.branch.as_str()),
+            (CONTEXT_LABEL, context),
             ("", totals),
         ]
+    }
+
+    /// The context segment's text: the count, and the share of the
+    /// window when the window is known. Empty before the first call.
+    fn context(&self) -> String {
+        if self.context_tokens == 0 {
+            return String::new();
+        }
+        let count = compact_count(self.context_tokens);
+        match self.context_window {
+            Some(window) if window > 0 => {
+                // Floor, like the count: the share never reads bigger
+                // than it is. Wide math: the count is wire data.
+                let percent = u128::from(self.context_tokens) * 100 / u128::from(window);
+                format!("{count} · {percent}%")
+            }
+            _ => count,
+        }
     }
 
     /// Take the segments `patch` names.
@@ -100,6 +126,9 @@ impl Status {
         }
         if let Some(branch) = patch.branch {
             self.branch = status_text(&branch);
+        }
+        if let Some(window) = patch.context_window {
+            self.context_window = window.filter(|window| *window > 0);
         }
     }
 }
@@ -280,11 +309,12 @@ fn input_columns(width: u16) -> (u16, bool) {
 const BAR_SEP: &str = " · ";
 
 /// One row on the bar's ground — the theme's, or reversed when the
-/// theme sets none: model, mode, effort, project, branch, token
-/// totals, cut to the width from the right one whole segment at a
+/// theme sets none: model, mode, effort, project, branch, context,
+/// token totals, cut to the width from the right one whole segment at a
 /// time; the model alone cuts with a mark. The small-screen form of
 /// the status.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
+    let context = status.context();
     let totals = format!(
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
@@ -294,7 +324,7 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
     let mut used = 0usize;
     let mut sep = " ";
     // An empty text is no segment: its separator and label go too.
-    for (label, segment) in status.segments(&totals) {
+    for (label, segment) in status.segments(&context, &totals) {
         if segment.is_empty() {
             continue;
         }
@@ -356,8 +386,35 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
 /// apart from the mode next to it.
 const EFFORT_LABEL: &str = "effort ";
 
+/// The label before the context count, so one prompt's size reads
+/// apart from the session totals beside it.
+const CONTEXT_LABEL: &str = "context ";
+
+/// A compact token count: the plain number below one thousand, then
+/// `34.2k`, then `1.1M`, each rounded down so the count never reads
+/// bigger than it is.
+fn compact_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    // Integer tenths: a float conversion rounds the top of the u64
+    // range up, against the floor rule.
+    let (tenths, unit) = if tokens < 1_000_000 {
+        (tokens / 100, "k")
+    } else {
+        (tokens / 100_000, "M")
+    };
+    let (whole, tenth) = (tenths / 10, tenths % 10);
+    if tenth == 0 {
+        format!("{whole}{unit}")
+    } else {
+        format!("{whole}.{tenth}{unit}")
+    }
+}
+
 /// The box's bottom edge with the status on it: the model, the
-/// mode, the effort, the project, the branch, and the token totals,
+/// mode, the effort, the project, the branch, the context, and the
+/// token totals,
 /// each between line segments, cut to the width from the right one
 /// whole segment at a time, the model alone with a mark; the corners
 /// stay. The segments take the
@@ -372,6 +429,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         Some(color) => Style::default().fg(color),
         None => dim,
     };
+    let context = status.context();
     let totals = format!(
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
@@ -385,7 +443,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
     spans.push(Span::styled("╰─", dim));
     let mut used = 2usize;
     // An empty text is no segment.
-    for (label, segment) in status.segments(&totals) {
+    for (label, segment) in status.segments(&context, &totals) {
         if segment.is_empty() {
             continue;
         }
@@ -874,6 +932,8 @@ mod tests {
             effort: "high".into(),
             project: String::new(),
             branch: String::new(),
+            context_tokens: 0,
+            context_window: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
@@ -2287,5 +2347,116 @@ line 12",
         assert!(copied.cut);
         assert!(copied.text.len() <= crate::select::COPY_CAP);
         assert!(copied.text.starts_with(&line));
+    }
+
+    #[test]
+    fn a_count_reads_compact_and_rounds_down() {
+        for (tokens, text) in [
+            (1, "1"),
+            (999, "999"),
+            (1_000, "1k"),
+            (1_099, "1k"),
+            (34_249, "34.2k"),
+            (999_999, "999.9k"),
+            (1_000_000, "1M"),
+            (1_150_000, "1.1M"),
+            (2_599_999, "2.5M"),
+            (9_999_999_999_999_999, "9999999999.9M"),
+            (u64::MAX, "18446744073709.5M"),
+        ] {
+            assert_eq!(compact_count(tokens), text, "{tokens}");
+        }
+    }
+
+    #[test]
+    fn the_context_counts_one_prompt_and_names_the_share() {
+        let mut status = Status {
+            context_tokens: 34_200,
+            context_window: Some(200_000),
+            ..status()
+        };
+        assert_eq!(status.context(), "34.2k · 17%");
+        // The share floors, like the count: almost full is not full.
+        status.context_tokens = 199_999;
+        assert_eq!(status.context(), "199.9k · 99%");
+        status.context_tokens = 35_000;
+        assert_eq!(status.context(), "35k · 17%");
+        // No window: the count alone.
+        status.context_window = None;
+        assert_eq!(status.context(), "35k");
+        // No call yet: no segment.
+        status.context_tokens = 0;
+        assert_eq!(status.context(), "");
+    }
+
+    #[test]
+    fn the_patch_takes_the_window_and_an_unknown_takes_it_away() {
+        let mut status = status();
+        let patch = StatusPatch {
+            context_window: Some(Some(272_000)),
+            ..Default::default()
+        };
+        status.apply(patch);
+        assert_eq!(status.context_window, Some(272_000));
+        // An empty patch leaves the window alone.
+        status.apply(StatusPatch::default());
+        assert_eq!(status.context_window, Some(272_000));
+        let patch = StatusPatch {
+            context_window: Some(None),
+            ..Default::default()
+        };
+        status.apply(patch);
+        assert_eq!(status.context_window, None);
+    }
+
+    #[test]
+    fn the_context_joins_the_edge_and_cuts_whole() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            project: "demerzel".into(),
+            branch: "main".into(),
+            context_tokens: 34_200,
+            context_window: Some(200_000),
+            input_tokens: 48219,
+            output_tokens: 3104,
+            cached_tokens: 41890,
+            ..status()
+        };
+        let palette = palette();
+        // The edge needs 113 columns whole. The totals go first, the
+        // context next, so a narrow box never shows a cut count. At
+        // 80 columns, the plan's floor, the context still shows.
+        let with_context =
+            "╰─ test-model ─ ask ─ effort high ─ demerzel ─ main ─ context 34.2k · 17% ─";
+        for (width, head) in [
+            (
+                113,
+                "╰─ test-model ─ ask ─ effort high ─ demerzel ─ main ─ context 34.2k · 17% ─ 48219 in · 3104 out · 41890 cached ─",
+            ),
+            (112, with_context),
+            (80, with_context),
+            (76, with_context),
+            (75, "╰─ test-model ─ ask ─ effort high ─ demerzel ─ main ─"),
+        ] {
+            let (lines, _) = render(
+                width,
+                8,
+                View {
+                    transcript: &mut transcript,
+                    editor: &mut editor,
+                    status: &status,
+                    palette: &palette,
+                    approval: None,
+                    progress: None,
+                },
+            );
+            let edge = &lines[7];
+            assert!(edge.starts_with(head), "width {width}: {edge:?}");
+            assert!(
+                edge[head.len()..].chars().all(|ch| ch == '─' || ch == '╯'),
+                "width {width}: {edge:?}"
+            );
+        }
     }
 }

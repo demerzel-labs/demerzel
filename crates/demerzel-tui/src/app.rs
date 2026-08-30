@@ -215,6 +215,8 @@ impl App {
                 effort: options.effort,
                 project: status_text(&options.project),
                 branch: status_text(&options.branch),
+                context_tokens: 0,
+                context_window: options.context_window.filter(|window| *window > 0),
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -441,6 +443,8 @@ impl App {
                 self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
+                // The last call's prompt is the context in use.
+                self.status.context_tokens = usage.input_tokens;
                 self.status.input_tokens += usage.input_tokens;
                 self.status.output_tokens += usage.output_tokens;
                 self.status.cached_tokens += usage.cache_read_tokens;
@@ -461,8 +465,9 @@ impl App {
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
             DisplayEvent::Status(patch) => self.status.apply(patch),
             DisplayEvent::SessionChanged => {
-                // The totals belong to the open session; a session
-                // change restarts them.
+                // The totals and the context belong to the open
+                // session; a session change restarts them.
+                self.status.context_tokens = 0;
                 self.status.input_tokens = 0;
                 self.status.output_tokens = 0;
                 self.status.cached_tokens = 0;
