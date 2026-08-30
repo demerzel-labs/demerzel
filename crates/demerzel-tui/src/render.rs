@@ -45,13 +45,15 @@ const FRAME_ROWS: u16 = 3;
 /// Columns the frame takes at each side: the box's edge.
 const FRAME_INSET: u16 = 1;
 
-/// What the status names: the model, the mode, and the open
-/// session's token totals, counted from this run's start. A session
-/// change restarts the totals. The session's id is a `/session`
-/// reply, not a segment.
+/// What the status names: the model, the mode, the reasoning
+/// effort, and the open session's token totals, counted from this
+/// run's start. A session change restarts the totals. The session's
+/// id is a `/session` reply, not a segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: String,
+    /// The effort's name; empty shows no segment.
+    pub effort: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
@@ -212,11 +214,14 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
         " · {} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
+    let effort = effort_segment(status);
     let segments = [
         " ",
         status.model.as_str(),
         " · ",
         status.mode.as_str(),
+        if effort.is_empty() { "" } else { " · " },
+        effort.as_str(),
         totals.as_str(),
     ];
 
@@ -274,9 +279,20 @@ fn draw_frame(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette)
     frame.render_widget(Paragraph::new(edge), right);
 }
 
+/// The effort as the status shows it, labeled so it reads apart
+/// from the mode; empty when the effort is unknown.
+fn effort_segment(status: &Status) -> String {
+    if status.effort.is_empty() {
+        String::new()
+    } else {
+        format!("effort {}", status.effort)
+    }
+}
+
 /// The box's bottom edge with the status on it: the model, the
-/// mode, and the token totals, each between line segments, cut to
-/// the width from the right; the corners stay. The segments take
+/// mode, the effort, and the token totals, each between line
+/// segments, cut to the width from the right; the corners stay. The
+/// segments take
 /// the dim role's color, so they read apart from the typed text and
 /// follow the theme; with no color they dim like the lines.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
@@ -292,7 +308,13 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         "{} in · {} out · {} cached",
         status.input_tokens, status.output_tokens, status.cached_tokens
     );
-    let segments = [status.model.as_str(), status.mode.as_str(), totals.as_str()];
+    let effort = effort_segment(status);
+    let segments = [
+        status.model.as_str(),
+        status.mode.as_str(),
+        effort.as_str(),
+        totals.as_str(),
+    ];
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(12);
     let mut used = 0usize;
     // The right corner keeps the last column.
@@ -301,7 +323,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         spans.push(Span::styled("╰─", dim));
         used = 2;
     }
-    for segment in segments {
+    for segment in segments.into_iter().filter(|segment| !segment.is_empty()) {
         // One column stays for the line after the segment.
         let room = budget.saturating_sub(used + 1);
         if room == 0 {
@@ -749,6 +771,7 @@ mod tests {
         Status {
             model: "test-model".into(),
             mode: "ask".into(),
+            effort: "high".into(),
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
@@ -821,7 +844,7 @@ mod tests {
             },
         );
         assert!(
-            lines[2].contains("test-model · ask · 12 in · 5 out · 2 cached"),
+            lines[2].contains("test-model · ask · effort high · 12 in · 5 out · 2 cached"),
             "{:?}",
             lines[2]
         );
@@ -1787,7 +1810,7 @@ line 12",
         };
         let palette = palette();
         let (lines, _) = render(
-            60,
+            70,
             8,
             View {
                 transcript: &mut transcript,
@@ -1799,10 +1822,10 @@ line 12",
             },
         );
         let edge = &lines[7];
-        let head = "╰─ test-model ─ ask ─ 12 in · 5 out · 2 cached ─";
+        let head = "╰─ test-model ─ ask ─ effort high ─ 12 in · 5 out · 2 cached ─";
         assert!(edge.starts_with(head), "{edge:?}");
         assert!(edge.ends_with('╯'), "{edge:?}");
-        assert_eq!(edge.chars().count(), 60);
+        assert_eq!(edge.chars().count(), 70);
         assert!(
             edge[head.len()..]
                 .trim_end_matches('╯')

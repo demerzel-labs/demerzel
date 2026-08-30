@@ -96,6 +96,9 @@ pub struct Options {
     pub model: String,
     /// The approval mode's display name, shown on the status bar.
     pub mode: String,
+    /// The reasoning effort's name, shown on the status. The driver
+    /// updates it through [`EventSender::effort`].
+    pub effort: String,
     /// Capture the mouse: the wheel scrolls the transcript, and a
     /// drag selects text that the release copies to the clipboard
     /// through the terminal. On by default; off gives the terminal
@@ -125,6 +128,7 @@ impl Default for Options {
             banner: None,
             model: String::new(),
             mode: String::new(),
+            effort: String::new(),
             mouse: true,
             markdown: true,
             thinking: Thinking::default(),

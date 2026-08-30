@@ -78,7 +78,8 @@ request, so a model that does not accept the field refuses the call;
 the current models accept it. Unknown keys warn on stderr and do not
 stop the run.
 
-`/effort [level]` shows or sets the level for the session.
+`/effort [level]` shows or sets the level for the session. The
+full-screen interface names the level on its status.
 Each `meta` record in the session file names the effort in force, so
 a reader can tell what a run used. A resumed session takes its level
 from config, not from the file.

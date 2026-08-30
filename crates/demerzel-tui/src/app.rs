@@ -132,14 +132,19 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         app.transcript
             .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
         app.dirty = true;
+        // A command can send display events before it returns its
+        // note — a model or effort switch moves the status — so the
+        // queue drains first and the note's frame shows both.
         match driver.submit(line, app.sender(), app.approver()) {
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
+                app.drain_displays();
                 app.transcript.push_line(Kind::Notice, &text);
                 app.dirty = true;
                 app.draw()?;
             }
             Submission::Error(text) => {
+                app.drain_displays();
                 app.transcript.push_line(Kind::Error, &text);
                 app.dirty = true;
                 app.draw()?;
@@ -203,6 +208,7 @@ impl App {
             status: Status {
                 model: options.model,
                 mode: options.mode,
+                effort: options.effort,
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
@@ -441,6 +447,7 @@ impl App {
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
             DisplayEvent::Model(name) => self.status.model = name,
+            DisplayEvent::Effort(name) => self.status.effort = name,
             DisplayEvent::SessionChanged => {
                 // The totals belong to the open session; a session
                 // change restarts them.

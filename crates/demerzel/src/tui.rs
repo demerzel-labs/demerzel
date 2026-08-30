@@ -31,6 +31,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     ));
     options.model = config.model.clone();
     options.mode = mode.to_string();
+    options.effort = config.effort.to_string();
     options.mouse = config.mouse;
     options.markdown = config.markdown;
     options.thinking = config.thinking;
@@ -139,6 +140,7 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.effort = effort;
+                events.effort(effort.to_string());
                 return Submission::Note(effort_note(effort));
             }
             None => {}

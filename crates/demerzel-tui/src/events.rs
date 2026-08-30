@@ -54,6 +54,8 @@ pub(crate) enum DisplayEvent {
     Error(String),
     /// The session model changed; the status follows.
     Model(String),
+    /// The reasoning effort changed; the status follows.
+    Effort(String),
     /// A session opened or closed; the status totals restart.
     SessionChanged,
 }
@@ -84,6 +86,11 @@ impl EventSender {
     /// Name the session model on the status.
     pub fn model(&self, name: impl Into<String>) {
         let _ = self.tx.send(DisplayEvent::Model(name.into()));
+    }
+
+    /// Name the reasoning effort on the status.
+    pub fn effort(&self, name: impl Into<String>) {
+        let _ = self.tx.send(DisplayEvent::Effort(name.into()));
     }
 
     /// A session opened or closed: the status totals restart.

@@ -1193,6 +1193,11 @@ async fn the_effort_flag_and_command_reach_the_requests() {
     pty.wait_for("low reply");
     pty.send(b"/effort high\r");
     pty.wait_for("effort: high");
+    // The status names the new level; a resize repaints the edge.
+    pty.resize(100, 29);
+    pty.send(b"x");
+    pty.wait_for("─ effort high ─");
+    pty.send(CTRL_C);
     pty.send(b"two\r");
     pty.wait_for("high reply");
     pty.send(CTRL_D);
