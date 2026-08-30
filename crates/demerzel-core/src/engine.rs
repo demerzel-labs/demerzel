@@ -56,7 +56,7 @@ impl EngineConfig {
         Self {
             model: model.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            max_model_calls: 32,
+            max_model_calls: 128,
             max_output_tokens: None,
             effort: None,
         }

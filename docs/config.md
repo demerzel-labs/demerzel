@@ -54,6 +54,7 @@ error = "bright-red"
 | `base_url` | `--base-url` | `DEMERZEL_BASE_URL` | the provider's endpoint |
 | `approval` | `--auto`, `--read-only` | — | `ask`; one-shot runs read-only |
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
+| `max_model_calls` | — | — | `128` |
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
@@ -106,6 +107,16 @@ Each `meta` record in the session file names the mode in force. The
 spelling. A reader of the file must accept both. A resumed session
 takes its mode from the flags and the config, not from the file. A one-shot run has no command and no key, so its
 mode is the one the flags and the config set.
+
+## The model-call limit
+
+`max_model_calls` caps the model calls in one user turn. Each tool
+round is one more call, so a long code review uses many. When a
+turn hits the cap, the engine stops it and the interface reports
+the limit. The session keeps every result up to the stop. The next
+prompt continues from them. The cap is a guard against a runaway
+tool loop, not a budget. The project file can lower the cap, never
+raise it.
 
 ## Thinking blocks
 

@@ -297,6 +297,7 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.model = settings.model.value;
     config.base_url = settings.base_url.value;
     config.effort = settings.effort.value;
+    config.max_model_calls = settings.max_model_calls.value;
     config.continue_last = cli.continue_last;
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;
