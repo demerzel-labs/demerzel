@@ -42,9 +42,10 @@ pub use events::{ApprovalChannel, EventSender};
 pub use theme::Theme;
 pub use thinking::Thinking;
 
-/// The input prompt, shared with the REPL. The bench probe waits for
-/// these bytes on the output stream, so the spelling is load-bearing.
-pub const PROMPT: &str = "dmz> ";
+/// The input prompt, shared with the REPL: a heavy angle bracket and
+/// a space. The bench probe waits for these bytes on the output
+/// stream, so the spelling is load-bearing.
+pub const PROMPT: &str = "❯ ";
 
 /// One user turn as the driver runs it. Not `Send`: the interface
 /// drives it on its own single-threaded loop.

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 const READY: &str = "demerzel ready";
 // No trailing space: the frame diff skips cells that stay blank.
-const PROMPT: &str = "dmz>";
+const PROMPT: &str = "❯";
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 const CTRL_C: &[u8] = b"\x03";
 const CTRL_D: &[u8] = b"\x04";
@@ -730,7 +730,7 @@ async fn tool_cards_show_each_state_and_the_output_tail() {
     pty.resize(100, 30);
     pty.wait_for("· bash $ sleep 20");
     pty.wait_for("s · bash");
-    pty.wait_for("dmz>");
+    pty.wait_for(PROMPT);
     pty.wait_for("· ask ·");
     pty.send(CTRL_C);
     pty.wait_for("interrupted");
@@ -965,17 +965,17 @@ async fn the_wheel_browses_the_transcript_and_end_follows_again() {
     // Two notches of three rows: the window moved up six rows past
     // the usage notice and the last five reply rows. The resize
     // lands in the same frame: the pane loses one row and the top
-    // row holds, so the scroll deepens to seven. A 25-row pane —
+    // row holds, so the scroll deepens to seven. A 24-row pane —
     // 29 rows less the bar, the box, and the box's frame — opens on
-    // row 29; the indicator counts the seven below.
-    pty.wait_for("row 29 of the long reply");
+    // row 30; the indicator counts the seven below.
+    pty.wait_for("row 30 of the long reply");
     pty.wait_for("7 below");
     // A click on the indicator, at the right of the pane's last
     // row, returns to the bottom. The frame diff rewrites only the
     // digits that changed, so a resize forces the full repaint the
     // assertion reads.
-    pty.send(&mouse_press(95, 25));
-    pty.send(&mouse_release(95, 25));
+    pty.send(&mouse_press(95, 24));
+    pty.send(&mouse_release(95, 24));
     pty.resize(100, 30);
     pty.wait_for("row 59 of the long reply");
     // Up again; End returns to the bottom of the transcript.
@@ -1115,7 +1115,7 @@ async fn a_thinking_block_closes_to_one_line_and_ctrl_t_opens_it() {
     pty.send(CTRL_T);
     pty.resize(100, 28);
     pty.send(b"y");
-    pty.absent_until("second line", "dmz> xy");
+    pty.absent_until("second line", "❯ xy");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();
@@ -1147,7 +1147,7 @@ async fn the_thinking_config_key_opens_the_blocks_or_hides_them() {
     pty.wait_for("2 cached");
     pty.resize(100, 29);
     pty.send(b"x");
-    pty.absent_until("thought", "dmz> x");
+    pty.absent_until("thought", "❯ x");
     pty.send(CTRL_C);
     pty.send(CTRL_D);
     pty.wait_exit();

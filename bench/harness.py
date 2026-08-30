@@ -42,9 +42,10 @@ else:
     raise ImportError(f"the bench suite supports Linux and macOS, not {sys.platform}")
 
 READY_MARKER = b"demerzel ready"
-# No trailing space: the full-screen interface draws the prompt cell
-# by cell and never writes the blank cell after it.
-PROMPT_MARKER = b"dmz>"
+# The prompt glyph without its trailing space: the full-screen
+# interface draws the prompt cell by cell and never writes the blank
+# cell after it.
+PROMPT_MARKER = "❯".encode()
 READY_TIMEOUT_S = 10.0
 PROMPT_TIMEOUT_S = 2.0
 EXIT_TIMEOUT_S = 5.0

@@ -42,7 +42,7 @@ wait_for() {
 
 snap() { cap > "$OUT/$1.txt"; echo "captured $1"; }
 
-wait_for 00-prompt 'dmz>' 20
+wait_for 00-prompt '❯' 20
 
 # A bash call with a question: the pending card, the spinner while
 # it runs, the done card with its tail and duration.

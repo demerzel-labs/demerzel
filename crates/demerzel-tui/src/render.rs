@@ -30,10 +30,19 @@ const MAX_INPUT_ROWS: u16 = 8;
 /// inside it.
 const MAX_POPUP_ROWS: usize = 8;
 
-/// Screen height from which the input box gets its frame: a rule
-/// above it and a blank row between it and the status bar. A
-/// smaller screen keeps every row for content.
+/// Screen size from which the input box gets its frame: a box with
+/// rounded corners and one column of padding inside, and a blank row
+/// between it and the status bar. A smaller screen keeps every row
+/// and column for content.
 const FRAMED_HEIGHT: u16 = 8;
+const FRAMED_WIDTH: u16 = 16;
+
+/// Rows the frame takes: the box's top and bottom, and the gap.
+const FRAME_ROWS: u16 = 3;
+
+/// Columns the frame takes at each side: the box's edge and the
+/// padding.
+const FRAME_INSET: u16 = 2;
 
 /// What the status bar names: the model, the mode, the open session,
 /// and the open session's token totals, counted from this run's
@@ -75,16 +84,18 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
     // rows up to the cap, and the transcript keeps one row at least.
     // The progress line takes one more row above the box when it
     // shows and the screen has a fourth row. On a screen of eight
-    // rows or more the box gets its frame: a rule above it and a
-    // blank row under it, before the bar.
+    // rows and sixteen columns or more the box gets its frame: a
+    // box with rounded corners around it, and a blank row under
+    // that, before the bar.
     let bar_rows = u16::from(area.height >= 3);
-    let rule_rows = u16::from(area.height >= FRAMED_HEIGHT);
-    let gap_rows = rule_rows;
+    let framed = area.height >= FRAMED_HEIGHT && area.width >= FRAMED_WIDTH;
+    let frame_rows = if framed { FRAME_ROWS } else { 0 };
+    let inset = if framed { FRAME_INSET } else { 0 };
     let progress_rows = u16::from(view.progress.is_some() && area.height >= 4);
-    let box_cap = (area.height - bar_rows - progress_rows - rule_rows - gap_rows)
+    let box_cap = (area.height - bar_rows - progress_rows - frame_rows)
         .saturating_sub(1)
         .clamp(1, MAX_INPUT_ROWS);
-    let (text_width, prefix) = input_columns(area.width);
+    let (text_width, prefix) = input_columns(area.width - 2 * inset);
     let editor_rows = view.editor.sync(text_width);
     let input_rows = match view.approval {
         Some(_) => 1,
@@ -92,31 +103,34 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
             .unwrap_or(u16::MAX)
             .clamp(1, box_cap),
     };
+    // From the bottom: the bar, then the gap and the box's bottom
+    // edge when framed, then the input rows.
     let input_area = Rect {
-        y: area.y + area.height - input_rows - bar_rows - gap_rows,
+        x: area.x + inset,
+        y: area.y + area.height - bar_rows - frame_rows.saturating_sub(1) - input_rows,
+        width: area.width - 2 * inset,
         height: input_rows,
-        ..area
     };
     let transcript_area = Rect {
-        height: area.height - input_rows - bar_rows - progress_rows - rule_rows - gap_rows,
+        height: area.height - input_rows - bar_rows - progress_rows - frame_rows,
         ..area
     };
 
     let palette = view.palette;
     draw_transcript(frame, transcript_area, view.transcript, palette);
-    if rule_rows > 0 {
-        let rule_row = Rect {
+    if framed {
+        let frame_area = Rect {
             y: input_area.y - 1,
-            height: 1,
+            height: input_rows + 2,
             ..area
         };
-        draw_rule(frame, rule_row, palette);
+        draw_frame(frame, frame_area, palette);
     }
     if let Some(progress) = view.progress
         && progress_rows > 0
     {
         let progress_row = Rect {
-            y: input_area.y - 1 - rule_rows,
+            y: input_area.y - 1 - u16::from(framed),
             height: 1,
             ..area
         };
@@ -141,11 +155,19 @@ pub(crate) fn draw(frame: &mut Frame, view: View<'_>) -> u16 {
         }
         None => {
             draw_input(frame, input_area, view.editor, editor_rows, prefix, palette);
+            // The popup sits above the box's top edge, at the text
+            // column of the prompt.
             let above = Rect {
-                height: input_area.y - area.y,
+                height: input_area.y - area.y - u16::from(framed),
                 ..area
             };
-            if let Some(popup) = draw_popup(frame, above, view.editor, prefix, palette) {
+            let text_x = inset
+                + if prefix {
+                    u16::try_from(display_width(PROMPT)).unwrap_or(0)
+                } else {
+                    0
+                };
+            if let Some(popup) = draw_popup(frame, above, view.editor, text_x, palette) {
                 // The popup hides the cells under it: a press there
                 // must not select what it covers.
                 let y = usize::from(popup.y - area.y);
@@ -211,14 +233,42 @@ fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
 
-/// The rule above the input box: a dim line across the width.
-fn draw_rule(frame: &mut Frame, area: Rect, palette: &Palette) {
-    let text = "─".repeat(usize::from(area.width));
+/// The frame around the input box: a dim box with rounded corners.
+/// The input rows draw inside it afterwards.
+fn draw_frame(frame: &mut Frame, area: Rect, palette: &Palette) {
     let style = paint(
         Style::default().add_modifier(Modifier::DIM),
         palette.color(Role::Dim),
     );
-    frame.render_widget(Paragraph::new(Line::styled(text, style)), area);
+    let across = "─".repeat(usize::from(area.width) - 2);
+    let top = Rect { height: 1, ..area };
+    let bottom = Rect {
+        y: area.y + area.height - 1,
+        height: 1,
+        ..area
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!("╭{across}╮"), style)),
+        top,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!("╰{across}╯"), style)),
+        bottom,
+    );
+    let sides = usize::from(area.height) - 2;
+    let edge: Vec<Line<'_>> = std::iter::repeat_n(Line::styled("│", style), sides).collect();
+    let left = Rect {
+        y: area.y + 1,
+        width: 1,
+        height: area.height - 2,
+        ..area
+    };
+    let right = Rect {
+        x: area.x + area.width - 1,
+        ..left
+    };
+    frame.render_widget(Paragraph::new(edge.clone()), left);
+    frame.render_widget(Paragraph::new(edge), right);
 }
 
 /// One row of text cut to the width: the progress line, the
@@ -560,14 +610,14 @@ fn draw_input(
 
 /// The completion popup, over the rows above the input box: one row
 /// per matching command, the usage and the help, the selected one
-/// reversed. It sits at the prompt's text column. A popup taller
-/// than its cap scrolls to keep the selection in view. Returns the
-/// area the popup took, when it drew.
+/// reversed. It sits at `text_x`, the prompt's text column. A popup
+/// taller than its cap scrolls to keep the selection in view.
+/// Returns the area the popup took, when it drew.
 fn draw_popup(
     frame: &mut Frame,
     above: Rect,
     editor: &Editor,
-    prefix: bool,
+    text_x: u16,
     palette: &Palette,
 ) -> Option<Rect> {
     let matches: Vec<&CommandSpec> = editor.matches().collect();
@@ -580,11 +630,7 @@ fn draw_popup(
     }
     let selected = editor.selected().min(matches.len() - 1);
     let first = selected.saturating_sub(rows - 1);
-    let x = if prefix {
-        u16::try_from(display_width(PROMPT)).unwrap_or(0)
-    } else {
-        0
-    };
+    let x = text_x;
     let usage_cols = matches
         .iter()
         .map(|command| display_width(command.usage()))
@@ -695,7 +741,7 @@ mod tests {
             },
         );
         assert_eq!(rows, 2);
-        assert_eq!(lines[2].trim_end(), "dmz> ".trim_end());
+        assert_eq!(lines[2].trim_end(), "❯");
         assert!(lines[3].contains("test-model · ask"), "{:?}", lines[3]);
     }
 
@@ -772,7 +818,7 @@ mod tests {
         );
         assert_eq!(rows, 1);
         assert_eq!(lines[0].trim_end(), "tail");
-        assert_eq!(lines[1].trim_end(), "dmz> ".trim_end());
+        assert_eq!(lines[1].trim_end(), "❯");
     }
 
     #[test]
@@ -979,30 +1025,25 @@ line 12",
         // A two-row screen keeps a one-row box: the row with the
         // cursor shows, indented, without the prompt.
         let (lines, cursor, _) = render_cursor(10, 2, &mut editor);
-        assert_eq!(lines[1], "     ij   ");
-        assert_eq!(cursor, (7, 1));
+        assert_eq!(lines[1], "  ij      ");
+        assert_eq!(cursor, (4, 1));
         // A tall screen shows every row under the cap, the prompt
-        // on the first.
-        // A tall screen shows every row under the cap, the prompt
-        // on the first, under the rule and above the gap.
+        // on the first. Ten columns are too few for the frame.
         let (lines, cursor, _) = render_cursor(10, 12, &mut editor);
-        assert_eq!(lines[1], "──────────");
-        assert_eq!(lines[2], "dmz> abcd ");
-        assert_eq!(lines[3], "     efgh ");
-        assert_eq!(lines[9], "     ij   ");
-        assert_eq!(lines[10].trim(), "");
-        assert_eq!(cursor, (7, 9));
+        assert_eq!(lines[6], "❯ abcdefg ");
+        assert_eq!(lines[7], "  hijabcd ");
+        assert_eq!(lines[10], "  ij      ");
+        assert_eq!(cursor, (4, 10));
         // Past the cap the box scrolls: the cursor at the top row
-        // brings the first rows back. An eight-row screen holds a
-        // four-row box under its frame.
+        // brings the first rows back.
         editor.home();
         for _ in 0..7 {
             editor.up();
         }
         let (lines, cursor, _) = render_cursor(10, 8, &mut editor);
-        assert_eq!(lines[2], "dmz> abcd ");
-        assert_eq!(lines[5], "     cdef ");
-        assert_eq!(cursor, (5, 2));
+        assert_eq!(lines[2], "❯ abcdefg ");
+        assert_eq!(lines[6], "  ij      ");
+        assert_eq!(cursor, (2, 2));
     }
 
     #[test]
@@ -1010,25 +1051,25 @@ line 12",
         let mut editor = Editor::new(Vec::new());
         editor.set("one\ntwo");
         let (lines, cursor, _) = render_cursor(20, 4, &mut editor);
-        assert_eq!(lines[1].trim_end(), "dmz> one");
-        assert_eq!(lines[2].trim_end(), "     two");
-        assert_eq!(cursor, (8, 2));
+        assert_eq!(lines[1].trim_end(), "❯ one");
+        assert_eq!(lines[2].trim_end(), "  two");
+        assert_eq!(cursor, (5, 2));
         assert!(lines[3].contains("test-model"), "{:?}", lines[3]);
         // A one-row screen keeps the row with the cursor.
         let (lines, cursor, _) = render_cursor(20, 1, &mut editor);
-        assert_eq!(lines[0].trim_end(), "     two");
-        assert_eq!(cursor, (8, 0));
+        assert_eq!(lines[0].trim_end(), "  two");
+        assert_eq!(cursor, (5, 0));
     }
 
     #[test]
     fn a_wide_char_at_the_box_edge_keeps_the_cursor_aligned() {
         let mut editor = Editor::new(Vec::new());
         editor.set("日本日本日");
-        // Four text columns: two wide chars per row, the fifth on a
-        // row of its own, the cursor after it.
+        // Seven text columns: three wide chars on the first row,
+        // two on the second, the cursor after them.
         let (_, cursor, buffer) = render_cursor(10, 2, &mut editor);
-        assert_eq!(cursor, (7, 1));
-        assert_eq!(buffer[(5u16, 1u16)].symbol(), "日");
+        assert_eq!(cursor, (6, 1));
+        assert_eq!(buffer[(4u16, 1u16)].symbol(), "日");
     }
 
     #[test]
@@ -1040,7 +1081,7 @@ line 12",
         assert_eq!(cursor, (1, 1));
         // A screen too narrow for the prompt and two text columns
         // drops the prompt.
-        let (lines, cursor, _) = render_cursor(7, 2, &mut editor);
+        let (lines, cursor, _) = render_cursor(4, 2, &mut editor);
         assert_eq!(lines[1].trim_end(), "日");
         assert_eq!(cursor, (2, 1));
     }
@@ -1079,12 +1120,13 @@ line 12",
         top_line(&mut transcript, &mut editor);
         transcript.scroll_up(5);
         let before = top_line(&mut transcript, &mut editor);
-        assert_eq!(before.trim_end(), "line 11");
+        assert_eq!(before.trim_end(), "line 12");
         // Two more editor rows take two transcript rows; the top row
         // stays.
         editor.set("one\ntwo\nthree");
+        // The pane is one row now, so the indicator shares it.
         let after = top_line(&mut transcript, &mut editor);
-        assert_eq!(after.trim_end(), "line 11");
+        assert!(after.starts_with("line 12"), "{after:?}");
         assert_eq!(transcript.scroll(), 7);
     }
 
@@ -1097,8 +1139,8 @@ line 12",
         let mut editor = Editor::new(commands);
         editor.set("/");
         let (lines, cursor, buffer) = render_cursor(60, 6, &mut editor);
-        assert_eq!(cursor, (6, 4));
-        assert_eq!(lines[4].trim_end(), "dmz> /");
+        assert_eq!(cursor, (3, 4));
+        assert_eq!(lines[4].trim_end(), "❯ /");
         // One row per match: the usage, then the help.
         assert!(lines[2].contains("/help"), "{:?}", lines[2]);
         assert!(lines[2].contains("list the commands"), "{:?}", lines[2]);
@@ -1286,7 +1328,7 @@ line 12",
         assert_eq!(rows, 2);
         assert_eq!(lines[1].trim_end(), "line 4");
         assert_eq!(lines[2].trim_end(), "⠋ 3s · bash[2J");
-        assert_eq!(lines[3].trim_end(), "dmz>");
+        assert_eq!(lines[3].trim_end(), "❯");
         assert!(lines[4].contains("test-model · ask"), "{:?}", lines[4]);
         // A three-row screen keeps the bar and drops the line.
         let (lines, rows) = render(
@@ -1302,7 +1344,7 @@ line 12",
             },
         );
         assert_eq!(rows, 1);
-        assert_eq!(lines[1].trim_end(), "dmz>");
+        assert_eq!(lines[1].trim_end(), "❯");
         assert!(lines[2].contains("test-model"), "{:?}", lines[2]);
     }
 
@@ -1380,7 +1422,7 @@ line 12",
     /// output, and a notice.
     fn copy_fixture() -> Transcript {
         let mut transcript = Transcript::new(true);
-        transcript.push_line(Kind::Prompt, "dmz> hello");
+        transcript.push_line(Kind::Prompt, &format!("{PROMPT}hello"));
         transcript.push_delta(Kind::Text, "Done.\n\n```rust\nfn main() {}\n```\n");
         transcript.tool_start("c1", "bash");
         transcript.tool_preview("c1", "bash $ ls");
@@ -1402,11 +1444,11 @@ line 12",
     #[test]
     fn a_drag_reverses_the_span_and_the_release_copies_it_without_the_marks() {
         let mut transcript = copy_fixture();
-        let (lines, _) = frame_of(&mut transcript, 40, 16);
+        let (lines, _) = frame_of(&mut transcript, 40, 17);
         assert_eq!(
             &lines[..11],
             &[
-                "dmz> hello",
+                "❯ hello",
                 "Done.",
                 "",
                 "╭─ rust",
@@ -1423,7 +1465,7 @@ line 12",
         // notice's fourth column.
         assert!(!transcript.select_press(0, 0));
         assert!(transcript.select_drag(3, 10));
-        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        let (_, buffer) = frame_of(&mut transcript, 40, 17);
         assert!(reversed(&buffer, 0, 0));
         assert!(reversed(&buffer, 2, 4));
         assert!(reversed(&buffer, 3, 10));
@@ -1438,14 +1480,14 @@ line 12",
             "hello\nDone.\n\nfn main() {}\na.rs\nb.rs\nlisted\n· 10"
         );
         // The selection stays on the screen after the release.
-        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        let (_, buffer) = frame_of(&mut transcript, 40, 17);
         assert!(reversed(&buffer, 0, 1));
 
         // A span inside one row: the columns under the drag, both
         // ends inclusive, whichever way the drag went.
         assert!(transcript.select_press(4, 1));
         assert!(transcript.select_drag(2, 1));
-        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        let (_, buffer) = frame_of(&mut transcript, 40, 17);
         assert!(!reversed(&buffer, 1, 1));
         assert!(reversed(&buffer, 2, 1));
         assert!(reversed(&buffer, 4, 1));
@@ -1470,7 +1512,7 @@ line 12",
         // A click selects nothing and clears the highlight.
         assert!(transcript.select_press(3, 1));
         assert!(transcript.select_release().is_none());
-        let (_, buffer) = frame_of(&mut transcript, 40, 16);
+        let (_, buffer) = frame_of(&mut transcript, 40, 17);
         assert!(!reversed(&buffer, 3, 1));
         // A press off the rows clears too.
         transcript.select_press(0, 2);
@@ -1499,7 +1541,7 @@ line 12",
         transcript.tool_end("c2", "bash", outcome("a\nb\nc\nd\ne\nf\ng\nh"));
         let (lines, _) = frame_of(&mut transcript, 40, 40);
         // The pane is the rows above the frame, the box, and the bar.
-        let last = lines[..36]
+        let last = lines[..35]
             .iter()
             .rposition(|line| !line.is_empty())
             .unwrap();
@@ -1591,20 +1633,20 @@ line 12",
         let mut transcript = Transcript::new(false);
         transcript.push_line(Kind::Text, "line 0");
         transcript.push_line(Kind::Text, "line 1");
-        // An eight-row screen: four pane rows, the rule, the box,
-        // the gap, the bar.
+        // An eight-row screen: three pane rows, the box with its
+        // frame, the gap, the bar.
         frame_of(&mut transcript, 30, 8);
         transcript.select_press(0, 0);
         assert!(transcript.select_drag(2, 0));
-        // Rows 4 to 7 are the frame, the box, and the bar: the head
-        // stays.
-        for y in 4..8 {
+        // Rows 3 to 7 are the box, its frame, the gap, and the bar:
+        // the head stays.
+        for y in 3..8 {
             assert!(!transcript.select_drag(9, y));
         }
         assert_eq!(transcript.select_release().unwrap().text, "lin");
-        // Row 3 is blank inside the pane: the last row, to its end.
+        // Row 2 is blank inside the pane: the last row, to its end.
         transcript.select_press(0, 0);
-        assert!(transcript.select_drag(0, 3));
+        assert!(transcript.select_drag(0, 2));
         assert_eq!(transcript.select_release().unwrap().text, "line 0\nline 1");
     }
 
@@ -1652,13 +1694,14 @@ line 12",
                 progress: Some("⠋ 3s · bash"),
             },
         );
-        // The pane, the progress line, the rule, the box, the gap,
-        // the bar.
-        assert_eq!(rows, 3);
+        // The pane, the progress line, the box's top, the input row
+        // inside the box, the box's bottom, the gap, the bar.
+        assert_eq!(rows, 2);
         assert_eq!(lines[0].trim_end(), "line 0");
-        assert_eq!(lines[3].trim_end(), "⠋ 3s · bash");
-        assert_eq!(lines[4], "─".repeat(20));
-        assert_eq!(lines[5].trim_end(), "dmz>");
+        assert_eq!(lines[2].trim_end(), "⠋ 3s · bash");
+        assert_eq!(lines[3], "╭──────────────────╮");
+        assert_eq!(lines[4], format!("│ ❯{}│", " ".repeat(16)));
+        assert_eq!(lines[5], "╰──────────────────╯");
         assert_eq!(lines[6].trim(), "");
         assert!(lines[7].contains("test-model"), "{:?}", lines[7]);
         // A seven-row screen keeps the packed layout.
@@ -1675,7 +1718,7 @@ line 12",
             },
         );
         assert_eq!(rows, 5);
-        assert_eq!(lines[5].trim_end(), "dmz>");
+        assert_eq!(lines[5].trim_end(), "❯");
         assert!(!lines.iter().any(|line| line.contains('─')));
     }
 
@@ -1683,7 +1726,7 @@ line 12",
     fn a_narrow_pane_keeps_the_prompt_out_of_the_copy() {
         for width in [4u16, 5, 7] {
             let mut transcript = Transcript::new(false);
-            transcript.push_line(Kind::Prompt, "dmz> hello");
+            transcript.push_line(Kind::Prompt, &format!("{PROMPT}hello"));
             transcript.push_line(Kind::Text, "x");
             frame_of(&mut transcript, width, 12);
             transcript.select_press(0, 0);
@@ -1734,10 +1777,10 @@ line 12",
         assert!(!transcript.select_drag(6, 3));
         assert!(transcript.select_drag(5, 2));
         assert_eq!(transcript.select_release().unwrap().text, "line 2");
-        // The cells beside the popup stay the transcript's.
+        // The cells left of the popup stay the transcript's.
         transcript.select_press(0, 3);
-        transcript.select_drag(3, 3);
-        assert_eq!(transcript.select_release().unwrap().text, "line");
+        transcript.select_drag(1, 3);
+        assert_eq!(transcript.select_release().unwrap().text, "li");
     }
 
     #[test]
@@ -1816,7 +1859,7 @@ line 12",
         }
         transcript.push_line(Kind::Text, &text);
         frame_of(&mut transcript, 100, 10);
-        transcript.select_press(0, 5);
+        transcript.select_press(0, 4);
         transcript.scroll_up(usize::MAX);
         frame_of(&mut transcript, 100, 10);
         transcript.select_drag(0, 0);
