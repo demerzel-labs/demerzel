@@ -21,6 +21,7 @@ use crate::PROMPT;
 use crate::editor::{CommandSpec, Editor, displayed};
 use demerzel_core::ApprovalMode;
 
+use crate::QUIT_HINT;
 use crate::events::StatusPatch;
 use crate::markdown::Face;
 use crate::select;
@@ -54,7 +55,8 @@ const FRAME_INSET: u16 = 1;
 /// effort, the project and its branch, the context in use, and the
 /// open session's token totals, counted from this run's start. A
 /// session change restarts the totals and the context. The
-/// session's id is a `/session` reply, not a segment.
+/// session's id is a `/session` reply, not a segment. While the
+/// quit hint shows, it takes the place of every segment.
 pub(crate) struct Status {
     pub model: String,
     pub mode: ApprovalMode,
@@ -75,6 +77,10 @@ pub(crate) struct Status {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    /// One Ctrl-C on an empty box asked whether to quit: the status
+    /// shows [`QUIT_HINT`] alone until the span runs out or a key
+    /// answers.
+    pub quit_hint: bool,
 }
 
 /// Segments the status shows at most.
@@ -312,36 +318,43 @@ const BAR_SEP: &str = " · ";
 /// theme sets none: model, mode, effort, project, branch, context,
 /// token totals, cut to the width from the right one whole segment at a
 /// time; the model alone cuts with a mark. The small-screen form of
-/// the status.
+/// the status. The quit hint takes the row alone.
 fn draw_status(frame: &mut Frame, area: Rect, status: &Status, palette: &Palette) {
-    let context = status.context();
-    let totals = format!(
-        "{} in · {} out · {} cached",
-        status.input_tokens, status.output_tokens, status.cached_tokens
-    );
     let width = usize::from(area.width);
     let mut shown = String::with_capacity(width.min(256));
     let mut used = 0usize;
-    let mut sep = " ";
-    // An empty text is no segment: its separator and label go too.
-    for (label, segment) in status.segments(&context, &totals) {
-        if segment.is_empty() {
-            continue;
+    if status.quit_hint {
+        if let Some((piece, cols)) = fit_marked([" ", QUIT_HINT], width) {
+            shown.push_str(&piece);
+            used += cols;
         }
-        // The first segment, the model, cuts with a mark: see
-        // `status_edge`.
-        let parts = [sep, label, segment];
-        let fit = if used == 0 {
-            fit_marked(parts, width)
-        } else {
-            fit_whole(parts, width - used)
-        };
-        let Some((piece, cols)) = fit else {
-            break;
-        };
-        shown.push_str(&piece);
-        used += cols;
-        sep = BAR_SEP;
+    } else {
+        let context = status.context();
+        let totals = format!(
+            "{} in · {} out · {} cached",
+            status.input_tokens, status.output_tokens, status.cached_tokens
+        );
+        let mut sep = " ";
+        // An empty text is no segment: its separator and label go too.
+        for (label, segment) in status.segments(&context, &totals) {
+            if segment.is_empty() {
+                continue;
+            }
+            // The first segment, the model, cuts with a mark: see
+            // `status_edge`.
+            let parts = [sep, label, segment];
+            let fit = if used == 0 {
+                fit_marked(parts, width)
+            } else {
+                fit_whole(parts, width - used)
+            };
+            let Some((piece, cols)) = fit else {
+                break;
+            };
+            shown.push_str(&piece);
+            used += cols;
+            sep = BAR_SEP;
+        }
     }
     // Pad to the full width so the whole row reads as one bar.
     shown.extend(std::iter::repeat_n(' ', width - used));
@@ -419,7 +432,9 @@ fn compact_count(tokens: u64) -> String {
 /// whole segment at a time, the model alone with a mark; the corners
 /// stay. The segments take the
 /// dim role's color, so they read apart from the typed text and
-/// follow the theme; with no color they dim like the lines.
+/// follow the theme; with no color they dim like the lines. The
+/// quit hint takes the edge alone, in the warning role's color: it
+/// is the one thing to read.
 fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static> {
     let dim = paint(
         Style::default().add_modifier(Modifier::DIM),
@@ -429,11 +444,6 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
         Some(color) => Style::default().fg(color),
         None => dim,
     };
-    let context = status.context();
-    let totals = format!(
-        "{} in · {} out · {} cached",
-        status.input_tokens, status.output_tokens, status.cached_tokens
-    );
     // The caller frames a screen of sixteen columns or more, so the
     // corners and the first line always fit.
     debug_assert!(width >= usize::from(FRAMED_WIDTH));
@@ -442,28 +452,43 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
     let budget = width.saturating_sub(1);
     spans.push(Span::styled("╰─", dim));
     let mut used = 2usize;
-    // An empty text is no segment.
-    for (label, segment) in status.segments(&context, &totals) {
-        if segment.is_empty() {
-            continue;
-        }
-        // One column stays for the line after the segment. The
-        // first segment, the model, is never a count: a box too
-        // narrow for it shows what fits and a cut mark, so the
-        // status never goes blank.
+    if status.quit_hint {
+        let warning = paint(Style::default(), palette.color(Role::Warning));
         let room = budget.saturating_sub(used + 1);
-        let parts = [" ", label, segment, " "];
-        let fit = if used == 2 {
-            fit_marked(parts, room)
-        } else {
-            fit_whole(parts, room)
-        };
-        let Some((piece, cols)) = fit else {
-            break;
-        };
-        spans.push(Span::styled(piece, text));
-        spans.push(Span::styled("─", dim));
-        used += cols + 1;
+        if let Some((piece, cols)) = fit_marked([" ", QUIT_HINT, " "], room) {
+            spans.push(Span::styled(piece, warning));
+            spans.push(Span::styled("─", dim));
+            used += cols + 1;
+        }
+    } else {
+        let context = status.context();
+        let totals = format!(
+            "{} in · {} out · {} cached",
+            status.input_tokens, status.output_tokens, status.cached_tokens
+        );
+        // An empty text is no segment.
+        for (label, segment) in status.segments(&context, &totals) {
+            if segment.is_empty() {
+                continue;
+            }
+            // One column stays for the line after the segment. The
+            // first segment, the model, is never a count: a box too
+            // narrow for it shows what fits and a cut mark, so the
+            // status never goes blank.
+            let room = budget.saturating_sub(used + 1);
+            let parts = [" ", label, segment, " "];
+            let fit = if used == 2 {
+                fit_marked(parts, room)
+            } else {
+                fit_whole(parts, room)
+            };
+            let Some((piece, cols)) = fit else {
+                break;
+            };
+            spans.push(Span::styled(piece, text));
+            spans.push(Span::styled("─", dim));
+            used += cols + 1;
+        }
     }
     if used < budget {
         spans.push(Span::styled("─".repeat(budget - used), dim));
@@ -937,6 +962,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            quit_hint: false,
         }
     }
 
@@ -1080,6 +1106,91 @@ mod tests {
             lines[2].contains("effort high · demerzel · 0 in"),
             "{:?}",
             lines[2]
+        );
+    }
+
+    #[test]
+    fn the_quit_hint_takes_the_status_alone() {
+        let mut transcript = Transcript::new(false);
+        let mut editor = Editor::new(Vec::new());
+        let status = Status {
+            project: "demerzel".into(),
+            quit_hint: true,
+            ..status()
+        };
+        let palette = palette();
+        // On the box's edge: the hint, then the line to the corner.
+        let (lines, _) = render(
+            80,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[7].starts_with("╰─ press Ctrl-C again to quit ─") && lines[7].ends_with('╯'),
+            "{:?}",
+            lines[7]
+        );
+        assert!(!lines[7].contains("test-model"), "{:?}", lines[7]);
+        // On the bar.
+        let (lines, _) = render(
+            80,
+            3,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[2].starts_with(" press Ctrl-C again to quit") && !lines[2].contains("ask"),
+            "{:?}",
+            lines[2]
+        );
+        // A box too narrow for the hint cuts it with a mark.
+        let (lines, _) = render(
+            20,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert_eq!(lines[7], "╰─ press Ctrl-C a…─╯");
+        // The hint down: the segments are back.
+        let status = Status {
+            quit_hint: false,
+            ..status
+        };
+        let (lines, _) = render(
+            80,
+            8,
+            View {
+                transcript: &mut transcript,
+                editor: &mut editor,
+                status: &status,
+                palette: &palette,
+                approval: None,
+                progress: None,
+            },
+        );
+        assert!(
+            lines[7].starts_with("╰─ test-model ─ ask ─"),
+            "{:?}",
+            lines[7]
         );
     }
 

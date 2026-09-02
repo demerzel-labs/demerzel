@@ -242,6 +242,23 @@ impl SessionStore {
         Ok(session)
     }
 
+    /// The session file with this id in the project, or `None` when
+    /// no file has the id. An id is letters and digits; anything else
+    /// — a path, an empty string — names no file, so a `--session`
+    /// argument cannot reach outside the project's directory.
+    pub fn find(&self, project: &Path, id: &str) -> io::Result<Option<PathBuf>> {
+        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Ok(None);
+        }
+        let path = self.sessions_dir(project).join(format!("{id}.jsonl"));
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => Ok(Some(path)),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The newest session file for the project, by id. Session ids
     /// start with a millisecond timestamp, so the name order is the
     /// creation order.
@@ -915,6 +932,37 @@ mod tests {
         let latest = store.latest(&project).unwrap().unwrap();
         assert_eq!(latest, second.path());
         assert_ne!(first.path(), second.path());
+    }
+
+    #[test]
+    fn find_names_one_session_by_id_and_refuses_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::at(dir.path());
+        let project = dir.path().to_path_buf();
+        assert!(
+            store
+                .find(&project, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .unwrap()
+                .is_none()
+        );
+
+        let session = store
+            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
+        let found = store.find(&project, session.id()).unwrap().unwrap();
+        assert_eq!(found, session.path());
+        // Not a session id: no file, whatever the path would name.
+        std::fs::write(dir.path().join("outside.jsonl"), "").unwrap();
+        for id in [
+            "",
+            "../../outside",
+            "../outside",
+            ".",
+            "a/b",
+            "01ARZ3.jsonl",
+        ] {
+            assert!(store.find(&project, id).unwrap().is_none(), "{id:?}");
+        }
     }
 
     #[test]

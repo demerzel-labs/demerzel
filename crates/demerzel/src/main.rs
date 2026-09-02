@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
-use demerzel::{RunConfig, Runtime, doctor, login};
+use demerzel::{Resume, RunConfig, Runtime, doctor, login};
 use demerzel_core::{ApprovalMode, Effort, TurnOutcome};
 
 /// Demerzel: a terminal coding agent.
@@ -19,8 +19,13 @@ struct Cli {
     prompt: Option<String>,
 
     /// Continue the latest session in this project.
-    #[arg(short = 'c', long = "continue")]
+    #[arg(short = 'c', long = "continue", conflicts_with = "session")]
     continue_last: bool,
+
+    /// Continue the session with this id in this project. /session
+    /// shows the id, and so does the line a session prints on exit.
+    #[arg(long, value_name = "ID")]
+    session: Option<String>,
 
     /// Use the plain line interface instead of the full screen.
     #[arg(long)]
@@ -302,7 +307,11 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.effort = settings.effort.value;
     config.max_model_calls = settings.max_model_calls.value;
     config.context_window = settings.context_window.value;
-    config.continue_last = cli.continue_last;
+    config.resume = match &cli.session {
+        Some(id) => Resume::Id(id.clone()),
+        None if cli.continue_last => Resume::Latest,
+        None => Resume::Fresh,
+    };
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;
     config.thinking = settings.tui.thinking.value;
@@ -375,6 +384,15 @@ mod tests {
         let cli = parse(&["fix the bug", "--auto"]);
         assert!(cli.auto);
         assert_eq!(cli.prompt.as_deref(), Some("fix the bug"));
+    }
+
+    #[test]
+    fn the_session_flag_names_an_id_and_excludes_continue() {
+        let cli = parse(&["--session", "01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+        assert_eq!(cli.session.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(!cli.continue_last);
+        let error = Cli::try_parse_from(["demerzel", "-c", "--session", "X"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

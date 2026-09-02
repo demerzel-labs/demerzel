@@ -43,6 +43,7 @@ impl Screen {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
+                quit_hint: false,
             },
             palette: Palette::new(&Theme::default(), Depth::TrueColor),
             terminal: Terminal::new(TestBackend::new(width, height)).expect("headless terminal"),

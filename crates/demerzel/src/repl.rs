@@ -4,19 +4,23 @@
 //! One dedicated thread owns the line editor and stdin; the async loop
 //! asks it for lines over a channel. Approval prompts use the same
 //! thread, so no two readers ever hold stdin. During a prompt the
-//! terminal is in raw mode and Ctrl-C answers the prompt: it clears
-//! the main prompt, and it stops the turn at an approval prompt.
-//! During a running turn Ctrl-C is a signal that aborts the turn by
-//! dropping its future. The session file stays valid across an abort,
-//! and the next turn repairs any cut tool call.
+//! terminal is in raw mode and Ctrl-C answers the prompt: at the
+//! main prompt it discards the line and asks once, and a second
+//! press inside the span ends the session; at an approval prompt it
+//! stops the turn. During a running turn Ctrl-C is a signal that
+//! aborts the turn by dropping its future. The session file stays
+//! valid across an abort, and the next turn repairs any cut tool
+//! call.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::time::Instant;
 
 use demerzel_core::{
     ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
 };
+use demerzel_tui::{QUIT_HINT, QUIT_SPAN};
 use serde_json::Value;
 use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
@@ -25,7 +29,7 @@ use crate::commands::{
     Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
 };
 use crate::preview::{ask_preview, run_preview};
-use crate::{READY_MARKER, RunConfig, RunError, Runtime, SessionSettings};
+use crate::{READY_MARKER, Resume, RunConfig, RunError, Runtime, SessionSettings};
 
 /// Byte cap for one history entry. A pasted document must not grow
 /// the history file and slow every later boot.
@@ -44,7 +48,9 @@ struct ReadRequest {
 
 enum ReadOutcome {
     Line(String),
-    /// Ctrl-C at the prompt.
+    /// Ctrl-C at the prompt. The line editor discards the line; it
+    /// cannot say whether one was there, so the loop cannot tell a
+    /// clear from an empty press the way the full screen does.
     Interrupted,
     /// Ctrl-D, or stdin closed.
     Closed,
@@ -372,7 +378,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mode = runtime.config().approval;
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
-    eprintln!("Type a prompt. /exit or Ctrl-D ends the session.");
+    eprintln!("Type a prompt. /exit, Ctrl-D, or Ctrl-C twice ends the session.");
 
     // Every session opens on the first submitted prompt — `-c` too —
     // so an idle boot reads and writes no session file.
@@ -381,10 +387,15 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // and `/approval` switch them.
     let mut settings = SessionSettings::from_config(runtime.config());
     // `/new` turns the next open into a fresh session, `-c` or not.
-    let mut resume = runtime.config().continue_last;
+    let mut resume = runtime.config().resume.clone();
+    // Set after one Ctrl-C at the prompt: the deadline for the second
+    // press. Any line takes it back. The press discards a typed line
+    // too, so a stray press costs the line, never the session.
+    let mut quit_asked: Option<Instant> = None;
     loop {
         match reader.read(demerzel_tui::PROMPT, true).await {
             ReadOutcome::Line(line) => {
+                quit_asked = None;
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
@@ -397,7 +408,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     }
                     Some(Effect::NewSession) => {
                         engine = None;
-                        resume = false;
+                        resume = Resume::Fresh;
                         eprintln!("{NEW_SESSION_NOTE}");
                         continue;
                     }
@@ -444,7 +455,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session(resume, &settings)?;
+                    let (session, history) = runtime.open_session(&resume, &settings)?;
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
@@ -464,9 +475,20 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 )
                 .await;
             }
-            ReadOutcome::Interrupted => continue,
+            ReadOutcome::Interrupted => {
+                if quit_asked.is_some_and(|until| Instant::now() < until) {
+                    break;
+                }
+                quit_asked = Some(Instant::now() + QUIT_SPAN);
+                eprintln!("{QUIT_HINT}");
+            }
             ReadOutcome::Closed => break,
         }
+    }
+    // The line lands after the last prompt, whatever ended the
+    // session; a run that opened no session prints nothing.
+    if let Some(engine) = &engine {
+        eprintln!("{}", runtime.exit_line(engine.session()));
     }
     Ok(())
 }

@@ -90,7 +90,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut sessions = Vec::new();
     for run in 1..=args.runs {
         let settings = demerzel::SessionSettings::from_config(runtime.config());
-        let (session, history) = runtime.open_session(false, &settings)?;
+        let (session, history) = runtime.open_session(&demerzel::Resume::Fresh, &settings)?;
         let session_id = session.id().to_string();
         let mut engine = runtime.engine(session, history, &settings);
         let mut turns: Vec<Value> = Vec::with_capacity(args.prompts.len());

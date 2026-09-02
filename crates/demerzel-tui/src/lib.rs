@@ -36,6 +36,7 @@ mod wrap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::time::Duration;
 
 use demerzel_core::ApprovalMode;
 
@@ -49,6 +50,14 @@ pub use thinking::Thinking;
 /// a space. The bench probe waits for these bytes on the output
 /// stream, so the spelling is load-bearing.
 pub const PROMPT: &str = "❯ ";
+
+/// The hint the status shows after one Ctrl-C on an empty input box.
+/// The REPL prints the same words on stderr.
+pub const QUIT_HINT: &str = "press Ctrl-C again to quit";
+
+/// How long the quit hint stays. A second Ctrl-C inside this span
+/// ends the session; a later one asks again. Shared with the REPL.
+pub const QUIT_SPAN: Duration = Duration::from_secs(3);
 
 /// One user turn as the driver runs it. Not `Send`: the interface
 /// drives it on its own single-threaded loop.
