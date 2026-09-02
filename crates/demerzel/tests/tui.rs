@@ -723,6 +723,9 @@ async fn the_plain_interface_names_the_log_file_after_the_marker() {
 
     pty.wait_for(READY);
     pty.wait_for("log file:");
+    // Ctrl-D reaches the line editor only once it reads: sent before
+    // the prompt, the EOF is lost on Linux and the session stays.
+    pty.wait_for(PROMPT);
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
 
