@@ -1,0 +1,331 @@
+//! The debug trace: one log file per run, behind `DEMERZEL_LOG`.
+//!
+//! The variable names a level — `error`, `warn`, `info`, `debug`, or
+//! `trace` — and turns the trace on for a session run: a one-shot,
+//! the plain interface, or the full screen. Unset, nothing is
+//! written, and every `log` macro across the crates costs one level
+//! check. The file lands under the data directory:
+//! `$XDG_DATA_HOME/demerzel/logs/<run-start RFC3339>-<pid>.log`. It is
+//! the one sink for every mode: the full-screen interface cannot
+//! write to stderr behind the alternate screen, so a line on stderr
+//! names the path and the file holds the trace.
+//!
+//! The sink takes the harness's own events only: a record whose
+//! target is outside the `demerzel` crates is dropped, whatever its
+//! level. A dependency's `log` output — a line editor's key events,
+//! a connection pool's churn — is not this trace.
+//!
+//! Line shape: `<RFC3339 millis> <LEVEL> <target> <message>`, one
+//! event per line. A message with a line break lands escaped, so a
+//! reader can split the file on newlines. Lines at `info` and above
+//! flush as they land; `debug` and `trace` lines buffer, and
+//! [`flush`] empties the buffer at exit and on a panic.
+//!
+//! Every run gets a fresh file: `create_new` refuses a name that
+//! exists, so a reused pid inside one second gets a numbered suffix.
+//! The file stops at [`MAX_FILE_BYTES`]; a last line says so.
+//!
+//! The file is mode 0600: at `trace` it holds the request bodies and
+//! the conversation, and at `info` a tool summary holds the head of
+//! a command. It never holds the harness's own credentials — no
+//! bearer token, no API key, no auth-store content — and the
+//! emitters keep that promise; `docs/config.md` states it and names
+//! what each level carries.
+
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+use log::{Level, LevelFilter, Log, Metadata, Record};
+
+/// The environment variable that turns the trace on and names its
+/// level.
+const ENV_LOG: &str = "DEMERZEL_LOG";
+
+/// The level names the variable takes, for the error message.
+const LEVEL_NAMES: &str = "error, warn, info, debug, trace";
+
+/// The target prefix of the harness's own crates. The sink keeps
+/// these records and drops every other crate's.
+const OWN_TARGETS: &str = "demerzel";
+
+/// The most one file takes. At `trace` every model call writes the
+/// whole history again, so a long session grows near-quadratically;
+/// past the cap the sink writes one last line and drops the rest.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+static SINK: OnceLock<FileSink> = OnceLock::new();
+
+/// Set once the path line went to stderr, so every exit path can
+/// name the file and none names it twice.
+static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
+/// The file sink: one line per event, flushed per line at `info` and
+/// above. The lock serializes writers; the engine and the interfaces
+/// emit from more than one thread.
+struct FileSink {
+    level: LevelFilter,
+    path: PathBuf,
+    file: Mutex<Output>,
+}
+
+/// The open file with its byte count, behind the sink's lock.
+struct Output {
+    writer: BufWriter<File>,
+    written: u64,
+    /// The cap was hit; nothing more is written.
+    capped: bool,
+}
+
+impl Log for FileSink {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= self.level && metadata.target().starts_with(OWN_TARGETS)
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = format_line(
+            SystemTime::now(),
+            record.level(),
+            record.target(),
+            record.args(),
+        );
+        let mut output = self
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if output.capped {
+            return;
+        }
+        // A write failure has nowhere to report; the trace is a
+        // diagnostic, and the run goes on without it.
+        let _ = output.writer.write_all(line.as_bytes());
+        output.written += line.len() as u64;
+        if output.written >= MAX_FILE_BYTES {
+            output.capped = true;
+            let last = format_line(
+                SystemTime::now(),
+                Level::Warn,
+                "demerzel",
+                &format_args!(
+                    "trace cap reached at {} bytes; later events are dropped",
+                    output.written
+                ),
+            );
+            let _ = output.writer.write_all(last.as_bytes());
+            let _ = output.writer.flush();
+            return;
+        }
+        if record.level() <= Level::Info {
+            let _ = output.writer.flush();
+        }
+    }
+
+    fn flush(&self) {
+        let mut output = self
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _ = output.writer.flush();
+    }
+}
+
+/// One log line, newline included: the time, the level, the target,
+/// and the message. A line break inside the message lands as `\n`
+/// or `\r`, so one event stays one line.
+fn format_line(now: SystemTime, level: Level, target: &str, args: &fmt::Arguments<'_>) -> String {
+    let mut line = format!(
+        "{} {level} {target} {args}",
+        humantime::format_rfc3339_millis(now)
+    );
+    if line.contains('\n') || line.contains('\r') {
+        let mut escaped = String::with_capacity(line.len() + 8);
+        for ch in line.chars() {
+            match ch {
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                other => escaped.push(other),
+            }
+        }
+        line = escaped;
+    }
+    line.push('\n');
+    line
+}
+
+/// The level the variable's value names: `None` for unset or empty,
+/// an error for a value that is not a level.
+fn parse_level(value: Option<&OsStr>) -> Result<Option<LevelFilter>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    match value.as_ref() {
+        "" => Ok(None),
+        "error" => Ok(Some(LevelFilter::Error)),
+        "warn" => Ok(Some(LevelFilter::Warn)),
+        "info" => Ok(Some(LevelFilter::Info)),
+        "debug" => Ok(Some(LevelFilter::Debug)),
+        "trace" => Ok(Some(LevelFilter::Trace)),
+        other => Err(format!(
+            "{ENV_LOG} must be one of {LEVEL_NAMES}, not `{other}`"
+        )),
+    }
+}
+
+/// Read `DEMERZEL_LOG`. When it names a level, open the run's log
+/// file, install the sink, and return the path; when it is unset or
+/// empty, return `None` and install nothing. A value that is not a
+/// level is an error, so a typo does not run silent.
+pub fn init() -> Result<Option<PathBuf>, String> {
+    let Some(level) = parse_level(std::env::var_os(ENV_LOG).as_deref())? else {
+        return Ok(None);
+    };
+    let dir = demerzel_core::paths::data_dir()
+        .map_err(|error| error.to_string())?
+        .join("logs");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    // A fresh file every run: `create_new` refuses a name that exists,
+    // so a reused pid inside one second gets a suffix instead of a
+    // merged file, and an old file's mode never carries over.
+    let stem = format!(
+        "{}-{}",
+        humantime::format_rfc3339_seconds(SystemTime::now()),
+        std::process::id()
+    );
+    let mut options = OpenOptions::new();
+    options.create_new(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let (path, file) = (1u32..)
+        .map(|attempt| {
+            let name = if attempt == 1 {
+                format!("{stem}.log")
+            } else {
+                format!("{stem}-{attempt}.log")
+            };
+            dir.join(name)
+        })
+        .find_map(|path| match options.open(&path) {
+            Ok(file) => Some(Ok((path, file))),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+            Err(error) => Some(Err(format!("cannot open {}: {error}", path.display()))),
+        })
+        .expect("an unbounded name sequence finds a free name")?;
+    let sink = FileSink {
+        level,
+        path: path.clone(),
+        file: Mutex::new(Output {
+            writer: BufWriter::new(file),
+            written: 0,
+            capped: false,
+        }),
+    };
+    if SINK.set(sink).is_err() {
+        return Err("the debug trace is already open".to_string());
+    }
+    let sink = SINK.get().expect("set above");
+    log::set_logger(sink).map_err(|error| error.to_string())?;
+    log::set_max_level(level);
+    // A panic skips main's exits; write the buffered tail out first,
+    // then let the default hook report.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        flush();
+        report(info);
+    }));
+    log::info!(
+        target: "demerzel",
+        "demerzel {} pid={} level={level}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
+    Ok(Some(path))
+}
+
+/// The open log file's path; `None` when the trace is off.
+pub fn path() -> Option<&'static Path> {
+    SINK.get().map(|sink| sink.path.as_path())
+}
+
+/// The stderr line that names the log file. The interfaces print it
+/// after the ready marker; a one-shot run prints it first.
+pub fn path_line(path: &Path) -> String {
+    format!("log file: {}", path.display())
+}
+
+/// Print the path line once. The interfaces call it after the ready
+/// marker, a one-shot run first, and a failed boot on its way out, so
+/// a run that never reached its interface still names its file.
+pub fn announce() {
+    if let Some(path) = path()
+        && !ANNOUNCED.swap(true, Ordering::Relaxed)
+    {
+        eprintln!("{}", path_line(path));
+    }
+}
+
+/// Write out the buffered `debug` and `trace` lines. Call it before
+/// the process exits; a no-op when the trace is off.
+pub fn flush() {
+    if let Some(sink) = SINK.get() {
+        sink.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn a_line_break_in_the_message_lands_escaped() {
+        let at = UNIX_EPOCH + Duration::from_millis(1_788_256_800_123);
+        let line = format_line(
+            at,
+            Level::Warn,
+            "demerzel_core::engine",
+            &format_args!("error={}", "line one\r\nline two"),
+        );
+        assert_eq!(
+            line,
+            "2026-09-01T10:00:00.123Z WARN demerzel_core::engine error=line one\\r\\nline two\n"
+        );
+        // A plain message takes the fast path and the same shape.
+        let line = format_line(at, Level::Info, "demerzel", &format_args!("turn completed"));
+        assert_eq!(
+            line,
+            "2026-09-01T10:00:00.123Z INFO demerzel turn completed\n"
+        );
+    }
+
+    #[test]
+    fn the_variable_names_a_level_or_nothing() {
+        assert_eq!(parse_level(None), Ok(None));
+        assert_eq!(parse_level(Some(OsStr::new(""))), Ok(None));
+        assert_eq!(
+            parse_level(Some(OsStr::new("info"))),
+            Ok(Some(LevelFilter::Info))
+        );
+        assert_eq!(
+            parse_level(Some(OsStr::new("trace"))),
+            Ok(Some(LevelFilter::Trace))
+        );
+        let error = parse_level(Some(OsStr::new("loud"))).unwrap_err();
+        assert!(error.contains(ENV_LOG), "{error}");
+        assert!(error.contains("loud"), "{error}");
+        // Case matters: the doc names the lowercase spellings.
+        assert!(parse_level(Some(OsStr::new("INFO"))).is_err());
+    }
+}

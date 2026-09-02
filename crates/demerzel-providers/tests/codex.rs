@@ -352,8 +352,40 @@ async fn retries_a_server_error_with_backoff() {
     ));
 }
 
+/// A `log` sink that keeps every line, so a test can read what the
+/// adapter would write to the debug trace. One per test binary:
+/// the facade takes one logger, and the tests share it, so the
+/// buffer holds the lines of every test that ran before the read
+/// and a scan over it covers them all.
+struct Capture(std::sync::Mutex<Vec<String>>);
+
+static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+
+impl log::Log for Capture {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", record.target(), record.args()));
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install the capture at the fullest level; a second call is a
+/// no-op, so every test can ask for it.
+fn capture_log() {
+    let _ = log::set_logger(&CAPTURE);
+    log::set_max_level(log::LevelFilter::Trace);
+}
+
 #[tokio::test]
 async fn refreshes_once_on_401_and_persists_the_new_token() {
+    capture_log();
     let dir = tempfile::tempdir().unwrap();
     let store_path = write_store(dir.path(), "stale-token");
     let mock = MockServer::start(
@@ -391,10 +423,50 @@ async fn refreshes_once_on_401_and_persists_the_new_token() {
         Some("Bearer fresh-token")
     );
 
+    assert_eq!(
+        received[2].content_type.as_deref(),
+        Some("application/json")
+    );
+
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
     assert_eq!(saved["openai_codex"]["access_token"], "fresh-token");
     assert_eq!(saved["openai_codex"]["refresh_token"], "fresh-refresh");
+
+    // The refresh path logged its steps and none of the four tokens
+    // it handled: the trace's credential promise on the one path
+    // the binary-level test cannot reach.
+    let lines = CAPTURE.0.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|line| line.contains("token refresh")),
+        "{lines:?}"
+    );
+    for secret in ["stale-token", "fresh-token", "refresh-1", "fresh-refresh"] {
+        assert!(
+            !lines.iter().any(|line| line.contains(secret)),
+            "{secret} in {lines:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_server_echo_of_the_token_is_redacted_from_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // The mock's error body echoes the bearer header, the way a
+    // careless proxy can; a 400 does not retry, so the body becomes
+    // the error text the engine records and logs.
+    let mock = MockServer::start(vec![MockResponse::error(400)], vec![]).await;
+    let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
+
+    let error = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .err()
+        .expect("a 400 fails the call");
+    let text = error.to_string();
+    assert!(text.contains("status 400"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(!text.contains("token-1"), "{text}");
 }
 
 #[tokio::test]

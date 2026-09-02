@@ -422,7 +422,9 @@ prompt caching and API-key credentials, `dmz login` for the ChatGPT
 subscription, layered config (user, project, flags), slash commands, `doctor`.
 Measurement seams for the evaluation contract: engine events and session
 records keep usage, cost, cache, tool-step, termination, environment, and
-final-outcome fields. The full evaluation runner does not delay M2.
+final-outcome fields. Since 2026-09-01 the records keep wall time too:
+each `usage`, `tool`, and `turn` record carries its start time and its
+duration. The full evaluation runner does not delay M2.
 **Verify:** TUI session parity with the REPL; cache-hit rate measured on a
 replayed session; config precedence tests.
 

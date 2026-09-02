@@ -1,6 +1,28 @@
-//! Backoff helpers shared by the adapters.
+//! Backoff and response-header helpers shared by the adapters.
 
 use std::time::Duration;
+
+/// `text` with every copy of `secret` replaced by `[redacted]`. Server
+/// text — an error body, a failure message — can echo the request's
+/// own credential; it must not reach the session file or the trace.
+pub(crate) fn redact(text: &str, secret: &str) -> String {
+    if secret.is_empty() || !text.contains(secret) {
+        return text.to_string();
+    }
+    text.replace(secret, "[redacted]")
+}
+
+/// The endpoint's request id for one response, for the debug trace:
+/// `x-request-id` or `request-id`, whichever the endpoint sent, or
+/// `-` when neither came back.
+pub(crate) fn request_id(response: &reqwest::Response) -> &str {
+    let headers = response.headers();
+    headers
+        .get("x-request-id")
+        .or_else(|| headers.get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+}
 
 /// Exponential backoff: `base`, `2*base`, `4*base`, ...
 pub(crate) fn backoff(base: Duration, attempt: u32) -> Duration {

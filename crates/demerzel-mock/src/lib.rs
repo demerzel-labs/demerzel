@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use axum::Router;
@@ -113,6 +114,7 @@ pub struct Received {
     pub account_id: Option<String>,
     pub api_key: Option<String>,
     pub anthropic_version: Option<String>,
+    pub content_type: Option<String>,
     pub body: Value,
 }
 
@@ -123,6 +125,9 @@ struct ServerState {
     /// Cycle the response script forever and record nothing. The
     /// Layer-2 benchmarks run unbounded iteration counts.
     cycle: bool,
+    /// Numbers the `x-request-id` header on every model-route reply,
+    /// the way the live endpoints tag a response.
+    replies: AtomicU64,
 }
 
 /// A running mock server. Dropping the handle stops the server task.
@@ -157,6 +162,7 @@ impl MockServer {
             token_responses: Mutex::new(token_responses.into()),
             received: Mutex::new(Vec::new()),
             cycle,
+            replies: AtomicU64::new(0),
         });
         let app = Router::new()
             .route("/responses", post(handle_responses))
@@ -204,6 +210,7 @@ fn record(state: &ServerState, path: &str, headers: &HeaderMap, body: Value) {
         account_id: header("chatgpt-account-id"),
         api_key: header("x-api-key"),
         anthropic_version: header("anthropic-version"),
+        content_type: header("content-type"),
         body,
     });
 }
@@ -247,12 +254,20 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock script exhausted").into_response();
     };
+    let request_id = format!("mock-{}", state.replies.fetch_add(1, Ordering::Relaxed) + 1);
     if reply.status != 200 {
         let status =
             StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // The body echoes the request's credential header, the way a
+        // careless proxy can: an adapter must redact it.
+        let echo = headers
+            .get("authorization")
+            .or_else(|| headers.get("x-api-key"))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
         let mut response = (
             status,
-            json!({"error": {"message": "scripted error"}}).to_string(),
+            json!({"error": {"message": format!("scripted error for {echo}")}}).to_string(),
         )
             .into_response();
         if let Some(seconds) = reply.retry_after {
@@ -261,6 +276,10 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
                 seconds.to_string().parse().expect("digits are a header"),
             );
         }
+        response.headers_mut().insert(
+            "x-request-id",
+            request_id.parse().expect("a plain id is a header"),
+        );
         return response;
     }
     let mut sse = String::new();
@@ -277,6 +296,7 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
+        .header("x-request-id", request_id)
         .body(body)
         .expect("build sse response")
 }

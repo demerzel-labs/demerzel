@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
+use demerzel::trace;
 use demerzel::{Resume, RunConfig, Runtime, doctor, login};
 use demerzel_core::{ApprovalMode, Effort, TurnOutcome};
 
@@ -101,21 +102,26 @@ fn main() {
         Ok(dir) => dir,
         Err(error) => {
             eprintln!("demerzel: cannot read the working directory: {error}");
-            std::process::exit(1);
+            exit(1);
         }
     };
     match &cli.command {
-        Some(Command::Doctor) => std::process::exit(doctor::run(&cwd, &cli.flags())),
-        Some(Command::Login { provider }) => {
-            std::process::exit(run_login(&cli, provider.as_deref(), &cwd))
-        }
+        Some(Command::Doctor) => exit(doctor::run(&cwd, &cli.flags())),
+        Some(Command::Login { provider }) => exit(run_login(&cli, provider.as_deref(), &cwd)),
         None => {}
+    }
+    // The debug trace covers a session run; `doctor` and `login`
+    // write none. It opens before the config resolves, so every
+    // later step can emit.
+    if let Err(message) = trace::init() {
+        eprintln!("demerzel: {message}");
+        exit(1);
     }
     let config = match run_config(&cli, cwd) {
         Ok(config) => config,
         Err(message) => {
             eprintln!("demerzel: {message}");
-            std::process::exit(1);
+            exit(1);
         }
     };
 
@@ -132,11 +138,14 @@ fn main() {
         };
         if let Err(error) = result {
             eprintln!("demerzel: {error}");
-            std::process::exit(1);
+            exit(1);
         }
+        trace::flush();
         return;
     }
 
+    // A one-shot run has no ready marker: the path line comes first.
+    trace::announce();
     let prompt = cli.prompt.expect("checked above");
     let max_model_calls = config.max_model_calls;
     let outcome = runtime.block_on(async {
@@ -160,35 +169,47 @@ fn main() {
     match outcome {
         None => {
             eprintln!("demerzel: aborted");
-            std::process::exit(130);
+            exit(130);
         }
         Some(Ok(TurnOutcome::Completed)) => {}
         Some(Ok(TurnOutcome::MaxTokens)) => {
             eprintln!(
                 "demerzel: the model hit a token limit — the output cap or the context window"
             );
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::CallLimit)) => {
             eprintln!(
                 "demerzel: the turn hit the model-call limit ({max_model_calls} model calls)"
             );
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::Refused)) => {
             eprintln!("demerzel: the model refused the request");
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::Aborted)) => {
             eprintln!("demerzel: stopped at an approval prompt");
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(_)) => {}
         Some(Err(error)) => {
             eprintln!("demerzel: {error}");
-            std::process::exit(1);
+            exit(1);
         }
     }
+    trace::flush();
+}
+
+/// End the process after the debug trace wrote out its buffer. A
+/// failed boot names the file too, so the trace of a run that never
+/// reached its interface is not a secret.
+fn exit(code: i32) -> ! {
+    if code != 0 {
+        trace::announce();
+    }
+    trace::flush();
+    std::process::exit(code)
 }
 
 /// The full screen needs a real terminal on both ends and a terminal
@@ -242,7 +263,7 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
             eprintln!("demerzel: login aborted");
             // Exit while the runtime lives. Dropping it would wait
             // for a parked stdin read that only Enter can end.
-            std::process::exit(130);
+            exit(130);
         }
         Some(Ok(())) => 0,
         Some(Err(error)) => {

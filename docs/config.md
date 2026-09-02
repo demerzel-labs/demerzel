@@ -63,6 +63,10 @@ error = "bright-red"
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 | `tui.theme` | — | — | `terminal` |
+| — | — | `DEMERZEL_LOG` | unset: no trace |
+
+`DEMERZEL_LOG` is not a key. It turns on the debug trace for one
+run, and no file sets it. See "The debug trace".
 
 In one layer, a `[providers.<id>]` value is more specific than the
 top-level key, so it wins. A top-level `model` in a layer that names
@@ -289,6 +293,67 @@ Two flags resume a session. Both look in the current project only:
 The two flags exclude each other. `/session` shows the open
 session's id and file.
 
+## The debug trace
+
+`DEMERZEL_LOG=<level>` turns the debug trace on for one run. The
+levels are `error`, `warn`, `info`, `debug`, and `trace`. The
+variable has no config key and no flag: a diagnostic switch belongs
+in the environment, not in a config file. An unset or empty variable
+turns the trace off. A value that is not a level stops the run with
+an error.
+
+The trace covers a session run: a one-shot prompt, the plain
+interface, and the full screen. `doctor` and `login` write no
+trace. The trace writes one file per run:
+`$XDG_DATA_HOME/demerzel/logs/<run-start>-<pid>.log`. The run start
+is in RFC 3339. The run creates the file at boot; a name that exists
+gets a numbered suffix, so two runs never share a file. One line on
+stderr names the file: `log file: <path>`. In the interfaces the line
+follows the ready marker. A run that stops before its interface
+names the file on its way out. The file is the one sink in every
+mode, because the full-screen interface cannot write to stderr
+behind the alternate screen. The file has mode 0600. The file stops
+at 256 MiB, with a last line that says so. The trace removes no
+file: the user owns the `logs` directory.
+
+Each line holds one event: `<time> <LEVEL> <target> <message>`. The
+time is RFC 3339 UTC at millisecond precision. A message never spans
+lines. A line at `info` or above leaves the buffer as it lands. The
+file holds the harness's own events only, not a dependency's.
+
+Each level adds events. At `error`: a turn that ends in a provider
+failure, with the message, and a request that failed on its last
+attempt. At `warn`: a model call that failed, a stream that failed
+or ended early. At `info`:
+
+- The session create and resume, with the id and the path.
+- Each model call, with the provider, the model, the effort, the
+  stop reason, the duration, and the usage.
+- Each request attempt that got an answer, with its HTTP status and
+  the endpoint's request id.
+- The stream's terminal event, with its reason or its message.
+- Each retry, with its delay and its cause, and a token refresh
+  after a 401.
+- Each tool call, with the name, the duration, the output size, the
+  truncation flag, and the tool's summary line. For `bash` the
+  summary carries the exit code.
+- Each approval decision.
+- Each turn outcome.
+
+At `debug`: the request body size, the SSE event types with their
+counts, and the steps of a token refresh. At `trace`: the request
+body in full, every SSE payload in full, and the conversation
+itself, message by message.
+
+The trace never holds the harness's own credentials: no bearer
+token, no API key, no auth-store content, at any level. A token
+refresh logs its status and not the token. Server text can echo a
+credential; each adapter redacts its own credential from an error
+body or a failure message before the text becomes an error. The file does hold what
+the session holds: at `info` the head of each `bash` command, and
+at `trace` the whole conversation. That is why the file is mode
+0600.
+
 ## Trust rules
 
 A project file travels with the repository, so it cannot raise
@@ -328,4 +393,5 @@ interface and set the default back to `true` on the same day.
 dogfood hit the fixed limit; the default rose from 32 to 128 on
 the same day. The context segment and `context_window` landed with
 M2.5 step 8e. The two-press quit, the exit line, and `--session`
-landed with M2.5 step 8f.
+landed with M2.5 step 8f. `DEMERZEL_LOG` landed on 2026-09-01,
+after a dogfood hit a server overload that nothing recorded.

@@ -626,19 +626,56 @@ async fn the_session_file_carries_the_measurement_seams() {
     assert_eq!(approvals.len(), 2);
     assert!(approvals.iter().all(|a| a["tool_use_id"].is_string()));
 
-    // Usage with the cached part, one record per model call.
+    // Usage with the cached part, one record per model call, with
+    // the call's clock.
     let usage = of("usage");
     assert_eq!(usage.len(), 3);
     for record in &usage {
         for field in ["input_tokens", "output_tokens", "cache_read_tokens"] {
             assert!(record[field].is_u64(), "usage lacks {field}");
         }
+        assert_clock(record);
     }
     assert_eq!(usage[0]["cache_read_tokens"], 2);
 
-    // Termination: the turn record closes the turn with its outcome.
+    // Wall time per tool call: one record per call, after the
+    // message that carries the result, with the result's size.
+    let tools = of("tool");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["name"], "read");
+    assert_eq!(tools[1]["name"], "bash");
+    for (record, use_block) in tools
+        .iter()
+        .zip(blocks.iter().filter(|b| b["type"] == "tool_use"))
+    {
+        assert_eq!(record["call_id"], use_block["id"]);
+        assert_eq!(record["is_error"], false);
+        assert_eq!(record["truncated"], false);
+        assert!(record["output_bytes"].as_u64().unwrap() > 0);
+        assert_clock(record);
+    }
+    let result_messages: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r["type"] == "message" && r["content"][0]["type"] == "tool_result")
+        .map(|(index, _)| index)
+        .collect();
+    for index in result_messages {
+        assert_eq!(records[index + 1]["type"], "tool", "record {index}");
+    }
+
+    // Termination: the turn record closes the turn with its outcome
+    // and the whole turn's clock.
     let turns = of("turn");
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0]["outcome"], "completed");
     assert!(turns[0].get("error").is_none());
+    assert_clock(turns[0]);
+}
+
+/// `at` parses as RFC 3339 and `duration_ms` is a count.
+fn assert_clock(record: &Value) {
+    let at = record["at"].as_str().expect("at");
+    humantime::parse_rfc3339(at).expect("rfc 3339");
+    assert!(record["duration_ms"].is_u64(), "{record}");
 }

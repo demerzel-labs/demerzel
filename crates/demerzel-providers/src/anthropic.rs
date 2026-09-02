@@ -12,8 +12,8 @@ use std::time::Duration;
 use demerzel_core::{ContentBlock, Effort, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
-use crate::retry::{backoff, retry_after, retry_delay};
-use crate::sse::{PayloadMapper, spawn_event_stream};
+use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
+use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
 /// Stable adapter id. Sealed payloads carry this id.
@@ -47,6 +47,9 @@ pub const NO_CREDENTIALS_HELP: &str =
 
 /// Pinned `anthropic-version` header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The request route under the base URL.
+const ROUTE: &str = "/v1/messages";
 
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
@@ -139,12 +142,19 @@ impl Provider for Anthropic {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
-        // Build the wire body eagerly and drop the request, so one
-        // copy of the history — not two — lives across the round trip.
-        let body = build_body(&request, &self.config);
+        // Build the wire body eagerly and drop the request. Serialized
+        // once, in place of the JSON tree: one packed copy of the
+        // history lives across the round trip, plus the bytes the
+        // client holds for the attempt in flight. The trace reads the
+        // size and the body from the same bytes.
+        let body = serde_json::to_vec(&build_body(&request, &self.config))
+            .expect("a JSON value serializes");
         drop(request);
         Box::pin(async move {
-            let url = format!("{}/v1/messages", self.config.base_url);
+            let url = format!("{}{ROUTE}", self.config.base_url);
+            let max_attempts = self.config.max_attempts;
+            log::debug!("request POST {} body_bytes={}", ROUTE, body.len());
+            log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut attempt: u32 = 0;
             let response = loop {
                 let builder = self
@@ -153,17 +163,35 @@ impl Provider for Anthropic {
                     .header("x-api-key", &self.api_key)
                     .header("anthropic-version", ANTHROPIC_VERSION)
                     .header("accept", "text/event-stream")
-                    .json(&body);
+                    .header("content-type", "application/json")
+                    .body(body.clone());
                 match builder.send().await {
                     Err(error) => {
                         attempt += 1;
-                        if attempt >= self.config.max_attempts {
+                        if attempt >= max_attempts {
+                            log::error!(
+                                "request failed after {attempt} of {max_attempts} attempts: \
+                                 network error: {error}"
+                            );
                             return Err(ProviderError::Network(error.to_string()));
                         }
-                        tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                        let delay = backoff(self.config.base_delay, attempt);
+                        log::info!(
+                            "retry in {}ms after network error: {error} (attempt {attempt} of \
+                             {max_attempts})",
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
                     }
                     Ok(response) => {
                         let status = response.status();
+                        log::info!(
+                            "POST {ROUTE} attempt {} of {max_attempts}: status {} \
+                             request-id={}",
+                            attempt + 1,
+                            status.as_u16(),
+                            request_id(&response)
+                        );
                         if status.is_success() {
                             break response;
                         }
@@ -177,7 +205,12 @@ impl Provider for Anthropic {
                         }
                         if status.as_u16() == 429 || status.is_server_error() {
                             attempt += 1;
-                            if attempt >= self.config.max_attempts {
+                            if attempt >= max_attempts {
+                                log::error!(
+                                    "request failed after {attempt} of {max_attempts} attempts: \
+                                     status {}",
+                                    status.as_u16()
+                                );
                                 return Err(if status.as_u16() == 429 {
                                     ProviderError::RateLimited {
                                         retry_after: retry_after(&response),
@@ -187,17 +220,30 @@ impl Provider for Anthropic {
                                 });
                             }
                             let delay = retry_delay(&response, self.config.base_delay, attempt);
+                            log::info!(
+                                "retry in {}ms after status {} (attempt {attempt} of \
+                                 {max_attempts})",
+                                delay.as_millis(),
+                                status.as_u16()
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        let text = response.text().await.unwrap_or_default();
+                        // The body is the server's text; it must not
+                        // echo the key into the record.
+                        let text =
+                            redact(&response.text().await.unwrap_or_default(), &self.api_key);
                         return Err(ProviderError::InvalidRequest(format!(
                             "status {status}: {text}"
                         )));
                     }
                 }
             };
-            Ok(spawn_event_stream(response, StreamState::default()))
+            let state = StreamState {
+                secret: self.api_key.clone(),
+                ..StreamState::default()
+            };
+            Ok(spawn_event_stream(response, state))
         })
     }
 }
@@ -364,6 +410,10 @@ struct StreamState {
     stop: Option<StopReason>,
     usage: Usage,
     terminal: bool,
+    counts: EventCounts,
+    /// The request's API key, so a failure message that echoes it is
+    /// redacted before it becomes an error.
+    secret: String,
 }
 
 impl PayloadMapper for StreamState {
@@ -378,6 +428,10 @@ impl PayloadMapper for StreamState {
     fn eof_error(&self) -> ProviderError {
         ProviderError::Protocol("stream ended before message_stop".to_string())
     }
+
+    fn counts(&self) -> &EventCounts {
+        &self.counts
+    }
 }
 
 /// Map one SSE payload to neutral events. Unknown payload types map to
@@ -389,7 +443,9 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             "sse payload is not JSON: {payload}"
         )))];
     };
-    match value["type"].as_str().unwrap_or("") {
+    let kind = value["type"].as_str().unwrap_or("");
+    state.counts.count(kind);
+    match kind {
         "message_start" => {
             let usage = &value["message"]["usage"];
             let count = |field: &str| usage[field].as_u64().unwrap_or(0);
@@ -575,6 +631,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             } else {
                 StopReason::EndTurn
             });
+            log::info!("stream ended: message_stop stop_reason={}", stop.as_str());
             vec![
                 Ok(StreamEvent::Usage(state.usage)),
                 Ok(StreamEvent::Done(stop)),
@@ -583,10 +640,17 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         "error" => {
             state.terminal = true;
             let error = &value["error"];
-            let message = error["message"].as_str().unwrap_or("error event");
+            let message = redact(
+                error["message"].as_str().unwrap_or("error event"),
+                &state.secret,
+            );
+            log::warn!(
+                "stream failed: error type={} message={message}",
+                error["type"].as_str().unwrap_or("-")
+            );
             let failure = match error["type"].as_str().unwrap_or("") {
                 "rate_limit_error" => ProviderError::RateLimited { retry_after: None },
-                _ => ProviderError::Server(message.to_string()),
+                _ => ProviderError::Server(message),
             };
             vec![Err(failure)]
         }

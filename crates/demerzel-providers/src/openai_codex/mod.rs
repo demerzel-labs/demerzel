@@ -12,8 +12,8 @@ use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
 use crate::auth::AuthStore;
-use crate::retry::{backoff, retry_after, retry_delay};
-use crate::sse::{PayloadMapper, spawn_event_stream};
+use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
+use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
 /// Stable adapter id. Sealed payloads carry this id.
@@ -24,6 +24,9 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Default model until per-role model routing arrives (M3).
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+/// The request route under the base URL.
+const ROUTE: &str = "/responses";
 
 /// The context windows of the models this adapter knows, in tokens.
 /// The numbers are the standard-session budgets from the Codex
@@ -93,15 +96,22 @@ impl Provider for OpenAiCodex {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
-        // Build the wire body eagerly and drop the request, so one
-        // copy of the history — not two — lives across the round trip.
-        let body = build_body(&request, self.config.reasoning.as_ref());
+        // Build the wire body eagerly and drop the request. Serialized
+        // once, in place of the JSON tree: one packed copy of the
+        // history lives across the round trip, plus the bytes the
+        // client holds for the attempt in flight. The trace reads the
+        // size and the body from the same bytes.
+        let body = serde_json::to_vec(&build_body(&request, self.config.reasoning.as_ref()))
+            .expect("a JSON value serializes");
         drop(request);
         Box::pin(async move {
-            let url = format!("{}/responses", self.config.base_url);
+            let url = format!("{}{ROUTE}", self.config.base_url);
+            let max_attempts = self.config.max_attempts;
+            log::debug!("request POST {} body_bytes={}", ROUTE, body.len());
+            log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut refreshed = false;
             let mut attempt: u32 = 0;
-            let response = loop {
+            let (response, token) = loop {
                 let (token, account_id) = {
                     let mut store = self.auth.lock().await;
                     let creds = store.ensure()?;
@@ -112,23 +122,41 @@ impl Provider for OpenAiCodex {
                     .post(&url)
                     .bearer_auth(&token)
                     .header("accept", "text/event-stream")
+                    .header("content-type", "application/json")
                     .header("originator", &self.config.originator)
-                    .json(&body);
+                    .body(body.clone());
                 if let Some(account_id) = &account_id {
                     builder = builder.header("chatgpt-account-id", account_id);
                 }
                 match builder.send().await {
                     Err(error) => {
                         attempt += 1;
-                        if attempt >= self.config.max_attempts {
+                        if attempt >= max_attempts {
+                            log::error!(
+                                "request failed after {attempt} of {max_attempts} attempts: \
+                                 network error: {error}"
+                            );
                             return Err(ProviderError::Network(error.to_string()));
                         }
-                        tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                        let delay = backoff(self.config.base_delay, attempt);
+                        log::info!(
+                            "retry in {}ms after network error: {error} (attempt {attempt} of \
+                             {max_attempts})",
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
                     }
                     Ok(response) => {
                         let status = response.status();
+                        log::info!(
+                            "POST {ROUTE} attempt {} of {max_attempts}: status {} \
+                             request-id={}",
+                            attempt + 1,
+                            status.as_u16(),
+                            request_id(&response)
+                        );
                         if status.is_success() {
-                            break response;
+                            break (response, token);
                         }
                         if status.as_u16() == 401 {
                             if refreshed {
@@ -137,12 +165,18 @@ impl Provider for OpenAiCodex {
                                 ));
                             }
                             refreshed = true;
+                            log::info!("refreshing the access token after status 401");
                             self.auth.lock().await.refresh(&self.http).await?;
                             continue;
                         }
                         if status.as_u16() == 429 || status.is_server_error() {
                             attempt += 1;
-                            if attempt >= self.config.max_attempts {
+                            if attempt >= max_attempts {
+                                log::error!(
+                                    "request failed after {attempt} of {max_attempts} attempts: \
+                                     status {}",
+                                    status.as_u16()
+                                );
                                 return Err(if status.as_u16() == 429 {
                                     ProviderError::RateLimited {
                                         retry_after: retry_after(&response),
@@ -152,17 +186,29 @@ impl Provider for OpenAiCodex {
                                 });
                             }
                             let delay = retry_delay(&response, self.config.base_delay, attempt);
+                            log::info!(
+                                "retry in {}ms after status {} (attempt {attempt} of \
+                                 {max_attempts})",
+                                delay.as_millis(),
+                                status.as_u16()
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        let text = response.text().await.unwrap_or_default();
+                        // The body is the server's text; it must not
+                        // echo the token into the record.
+                        let text = redact(&response.text().await.unwrap_or_default(), &token);
                         return Err(ProviderError::InvalidRequest(format!(
                             "status {status}: {text}"
                         )));
                     }
                 }
             };
-            Ok(spawn_event_stream(response, StreamState::default()))
+            let state = StreamState {
+                secret: token,
+                ..StreamState::default()
+            };
+            Ok(spawn_event_stream(response, state))
         })
     }
 }
@@ -267,6 +313,10 @@ struct StreamState {
     call_ids: HashMap<String, String>,
     /// A reasoning item opened; the next one starts a paragraph.
     saw_reasoning: bool,
+    counts: EventCounts,
+    /// The request's bearer token, so a failure message that echoes
+    /// it is redacted before it becomes an error.
+    secret: String,
 }
 
 impl PayloadMapper for StreamState {
@@ -281,6 +331,10 @@ impl PayloadMapper for StreamState {
     fn eof_error(&self) -> ProviderError {
         ProviderError::Protocol("stream ended before response.completed".to_string())
     }
+
+    fn counts(&self) -> &EventCounts {
+        &self.counts
+    }
 }
 
 /// Map one SSE payload to neutral events. Unknown payload types map to
@@ -292,7 +346,9 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             "sse payload is not JSON: {payload}"
         )))];
     };
-    match value["type"].as_str().unwrap_or("") {
+    let kind = value["type"].as_str().unwrap_or("");
+    state.counts.count(kind);
+    match kind {
         "response.output_text.delta" => text_delta(&value)
             .map(StreamEvent::TextDelta)
             .map(|e| vec![Ok(e)])
@@ -387,6 +443,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.completed" => {
             state.terminal = true;
+            log::info!("stream ended: response.completed");
             let stop = if state.saw_tool_call {
                 StopReason::ToolUse
             } else {
@@ -399,6 +456,12 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.incomplete" => {
             state.terminal = true;
+            log::info!(
+                "stream ended: response.incomplete reason={}",
+                value["response"]["incomplete_details"]["reason"]
+                    .as_str()
+                    .unwrap_or("-")
+            );
             // An incomplete response carries a usage block too; the
             // call at a token limit is the one whose context reading
             // matters most.
@@ -410,11 +473,18 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         "response.failed" => {
             state.terminal = true;
             let error = &value["response"]["error"];
-            let message = error["message"].as_str().unwrap_or("response.failed");
+            let message = redact(
+                error["message"].as_str().unwrap_or("response.failed"),
+                &state.secret,
+            );
+            log::warn!(
+                "stream failed: response.failed code={} message={message}",
+                error["code"].as_str().unwrap_or("-")
+            );
             let failure = if error["code"] == "rate_limit_exceeded" {
                 ProviderError::RateLimited { retry_after: None }
             } else {
-                ProviderError::Server(message.to_string())
+                ProviderError::Server(message)
             };
             vec![Err(failure)]
         }

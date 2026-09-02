@@ -440,15 +440,35 @@ Each step is one PR with its own verify line.
      provider's message cut at 1 KiB. A dropped turn future, a
      process exit mid-turn, and a session write failure write none,
      so a user turn without one was cut off. Readers skip the record,
-     so old binaries read new files. The file carries no clock beyond
-     the meta record's creation time, so wall time per turn stays the
-     runner's to measure, as it does for the cache bench.
+     so old binaries read new files.
   5. Cost: derived from the three usage parts and the model the meta
      record names. The harness carries no price table; prices change
      faster than releases, and the evaluation runner owns pricing.
   6. Final outcome: the task's final state belongs to the runner's
      state oracle. The harness's final outcome per turn is the turn
      record.
+  7. Wall time, since 2026-09-01. Before that date the file carried
+     no clock beyond the meta record's creation time. Now three
+     records carry `at`, the start in RFC 3339 UTC at millisecond
+     precision, and `duration_ms`, the wall time:
+     - The `usage` record: from the request send to the stream's
+       terminal event, retries included. A call whose stream sent
+       no usage writes no record, so its clock is in the debug
+       trace alone; the turn record still spans it.
+     - The `tool` record, new on that date, one per `tool_use` block
+       in the batch's order, appended after the user message that
+       carries the results:
+       `{"type":"tool","call_id":…,"name":…,"at":…,"duration_ms":…,"is_error":…,"output_bytes":…,"truncated":…}`.
+       The clock runs from the approval answer to the result, so the
+       wait at a prompt is not in it. A declined call records the
+       time to build its error result. `output_bytes` counts the
+       result text the model receives.
+     - The `turn` record: the whole user turn.
+     The engine measures both fields: the start on the system clock
+     and the duration on the monotonic clock. `meta.created` keeps
+     its second precision. The schema version stays 1: a file from
+     before the fields replays the same, with the fields absent, and
+     an old binary skips the `tool` record.
   The check is a test over a real session file
   (`the_session_file_carries_the_measurement_seams`).
 - Codex prompt-cache key — found in step 7, open. The `openai-codex`

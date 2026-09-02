@@ -142,6 +142,7 @@ async fn serializes_the_request_per_the_messages_contract() {
     assert_eq!(call.path, "/v1/messages");
     assert_eq!(call.api_key.as_deref(), Some("sk-test-key"));
     assert_eq!(call.anthropic_version.as_deref(), Some("2023-06-01"));
+    assert_eq!(call.content_type.as_deref(), Some("application/json"));
     assert_eq!(call.authorization, None);
 
     let body = &call.body;

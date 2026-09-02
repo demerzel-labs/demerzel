@@ -514,6 +514,7 @@ dependencies = [
  "demerzel-tui",
  "humantime",
  "libc",
+ "log",
  "reqwest",
  "rustyline",
  "serde_json",
@@ -529,6 +530,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "humantime",
+ "log",
  "serde",
  "serde_json",
  "tempfile",
@@ -557,6 +559,7 @@ dependencies = [
  "futures-core",
  "getrandom 0.3.4",
  "humantime",
+ "log",
  "reqwest",
  "serde",
  "serde_json",

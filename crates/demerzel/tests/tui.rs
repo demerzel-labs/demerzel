@@ -437,6 +437,16 @@ impl Pty {
         stems
     }
 
+    /// The debug-trace files this run wrote, under the data
+    /// directory.
+    fn log_files(&self) -> Vec<std::path::PathBuf> {
+        let logs = self._dirs.path().join("data/demerzel/logs");
+        let Ok(entries) = std::fs::read_dir(&logs) else {
+            return Vec::new();
+        };
+        entries.flatten().map(|entry| entry.path()).collect()
+    }
+
     /// Wait for a clean exit and return the raw output.
     fn wait_exit(self) -> Vec<u8> {
         let (status, raw) = self.wait_end();
@@ -645,6 +655,84 @@ async fn a_tui_session_boots_streams_and_exits_with_the_turn_time_on_the_usage_l
     // The exit path restored the main screen.
     assert!(text.contains("\x1b[?1049l"), "missing leave-alt-screen");
     assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_debug_trace_names_its_file_after_the_marker_and_logs_the_turn() {
+    let mock = MockServer::start(vec![text_turn("traced reply")], Vec::new()).await;
+    let mut pty = Pty::spawn_with_env(&mock.url(), &[], None, None, &[("DEMERZEL_LOG", "info")]);
+
+    pty.wait_for(READY);
+    pty.wait_for("log file:");
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("traced reply");
+    pty.wait_for("2 cached ·");
+    // The turn line lands with the turn's end and flushes at once;
+    // wait for it, and read the file before the exit takes the run's
+    // directories with it.
+    let logs = pty.log_files();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let log = loop {
+        let log = std::fs::read_to_string(&logs[0]).unwrap();
+        if log.lines().any(|line| line.contains("turn completed")) {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "no turn line in {log}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    // The path line sits between the marker and the alternate
+    // screen: the probe still finds the marker first, and the user
+    // sees the path on the main screen.
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let marker = text.find(READY).expect("ready marker");
+    let path_line = text.find("log file:").expect("path line");
+    let alt = text.find(ENTER_ALT_SCREEN).expect("alternate screen");
+    assert!(marker < path_line && path_line < alt, "{text:?}");
+
+    // One file for the run, under the data directory, with the call
+    // line, its duration, and the turn line.
+    let call = log
+        .lines()
+        .find(|line| line.contains("model call") && line.contains("provider="))
+        .unwrap_or_else(|| panic!("no call line in {log}"));
+    assert!(call.contains("duration_ms="), "{call}");
+    assert!(call.contains("stop=end_turn"), "{call}");
+    let turn = log
+        .lines()
+        .find(|line| line.contains("turn completed"))
+        .unwrap();
+    assert!(turn.contains("duration_ms="), "{turn}");
+    assert!(log.contains("session created"), "{log}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_names_the_log_file_after_the_marker() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty = Pty::spawn_with_env(
+        &mock.url(),
+        &["--plain"],
+        None,
+        None,
+        &[("DEMERZEL_LOG", "info")],
+    );
+
+    pty.wait_for(READY);
+    pty.wait_for("log file:");
+    // Ctrl-D reaches the line editor only once it reads: sent before
+    // the prompt, the EOF is lost on Linux and the session stays.
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let marker = text.find(READY).expect("ready marker");
+    let path_line = text.find("log file:").expect("path line");
+    assert!(marker < path_line, "{text:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1928,6 +2016,9 @@ async fn a_theme_name_with_no_theme_stops_the_run() {
         }
         assert!(Instant::now() < deadline, "the run did not stop");
     };
+    // Collect what the exit path wrote after the last poll; the
+    // status can land before the tail crosses the PTY.
+    pty.poll_read();
     assert!(!status.success());
     let text = String::from_utf8_lossy(&pty.seen);
     assert!(

@@ -92,6 +92,18 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+impl ApprovalDecision {
+    /// The decision's serialized name, the spelling the `approval`
+    /// record and the trace share.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ApprovalDecision::Allow => "allow",
+            ApprovalDecision::AskUser => "ask_user",
+            ApprovalDecision::Deny => "deny",
+        }
+    }
+}
+
 impl ApprovalMode {
     /// Decide one tool call from its declared access class.
     pub fn decide(self, access: ToolAccess) -> ApprovalDecision {
@@ -310,6 +322,18 @@ mod tests {
             serde_json::to_value(ApprovalDecision::AskUser).unwrap(),
             serde_json::json!("ask_user")
         );
+        // The decision's name is its serialized form, for every
+        // variant: the record and the trace spell it the same.
+        for decision in [
+            ApprovalDecision::Allow,
+            ApprovalDecision::AskUser,
+            ApprovalDecision::Deny,
+        ] {
+            assert_eq!(
+                serde_json::to_value(decision).unwrap(),
+                serde_json::json!(decision.as_str())
+            );
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod git;
 pub mod login;
 mod preview;
 pub mod repl;
+pub mod trace;
 pub mod tui;
 
 use std::path::{Path, PathBuf};
