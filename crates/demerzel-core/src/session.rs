@@ -53,7 +53,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// 3339 in UTC at millisecond precision. `meta.created` keeps the
 /// second precision it has had since schema 1; the session id carries
 /// the creation millisecond.
-pub fn timestamp(at: SystemTime) -> String {
+fn timestamp(at: SystemTime) -> String {
     humantime::format_rfc3339_millis(at).to_string()
 }
 
@@ -1088,6 +1088,19 @@ mod tests {
                 error: Some("server error: 503".into()),
                 at: Some("2026-09-01T10:00:01.000Z".into()),
                 duration_ms: Some(3),
+            },
+            // The clock fields absent: the mirror must elide them the
+            // same way, or an old-shape record would not round-trip.
+            SessionRecord::Usage {
+                usage: Usage::default(),
+                at: None,
+                duration_ms: None,
+            },
+            SessionRecord::Turn {
+                outcome: "aborted".into(),
+                error: None,
+                at: None,
+                duration_ms: None,
             },
         ];
         for record in &records {

@@ -352,8 +352,38 @@ async fn retries_a_server_error_with_backoff() {
     ));
 }
 
+/// A `log` sink that keeps every line, so a test can read what the
+/// adapter would write to the debug trace. One per test binary:
+/// the facade takes one logger, and the tests share it.
+struct Capture(std::sync::Mutex<Vec<String>>);
+
+static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+
+impl log::Log for Capture {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", record.target(), record.args()));
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install the capture at the fullest level; a second call is a
+/// no-op, so every test can ask for it.
+fn capture_log() {
+    let _ = log::set_logger(&CAPTURE);
+    log::set_max_level(log::LevelFilter::Trace);
+}
+
 #[tokio::test]
 async fn refreshes_once_on_401_and_persists_the_new_token() {
+    capture_log();
     let dir = tempfile::tempdir().unwrap();
     let store_path = write_store(dir.path(), "stale-token");
     let mock = MockServer::start(
@@ -391,10 +421,30 @@ async fn refreshes_once_on_401_and_persists_the_new_token() {
         Some("Bearer fresh-token")
     );
 
+    assert_eq!(
+        received[2].content_type.as_deref(),
+        Some("application/json")
+    );
+
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
     assert_eq!(saved["openai_codex"]["access_token"], "fresh-token");
     assert_eq!(saved["openai_codex"]["refresh_token"], "fresh-refresh");
+
+    // The refresh path logged its steps and none of the four tokens
+    // it handled: the trace's credential promise on the one path
+    // the binary-level test cannot reach.
+    let lines = CAPTURE.0.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|line| line.contains("token refresh")),
+        "{lines:?}"
+    );
+    for secret in ["stale-token", "fresh-token", "refresh-1", "fresh-refresh"] {
+        assert!(
+            !lines.iter().any(|line| line.contains(secret)),
+            "{secret} in {lines:?}"
+        );
+    }
 }
 
 #[tokio::test]

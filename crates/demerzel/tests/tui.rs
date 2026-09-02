@@ -668,11 +668,20 @@ async fn the_debug_trace_names_its_file_after_the_marker_and_logs_the_turn() {
     pty.send(b"hello\r");
     pty.wait_for("traced reply");
     pty.wait_for("2 cached ·");
-    // The turn line flushed with the turn; read the file before the
-    // exit takes the run's directories with it.
+    // The turn line lands with the turn's end and flushes at once;
+    // wait for it, and read the file before the exit takes the run's
+    // directories with it.
     let logs = pty.log_files();
     assert_eq!(logs.len(), 1, "{logs:?}");
-    let log = std::fs::read_to_string(&logs[0]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let log = loop {
+        let log = std::fs::read_to_string(&logs[0]).unwrap();
+        if log.lines().any(|line| line.contains("turn completed")) {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "no turn line in {log}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
     pty.send(CTRL_D);
     let raw = pty.wait_exit();
 
@@ -689,16 +698,38 @@ async fn the_debug_trace_names_its_file_after_the_marker_and_logs_the_turn() {
     // line, its duration, and the turn line.
     let call = log
         .lines()
-        .find(|line| line.contains("model call 1:"))
+        .find(|line| line.contains("model call") && line.contains("provider="))
         .unwrap_or_else(|| panic!("no call line in {log}"));
     assert!(call.contains("duration_ms="), "{call}");
     assert!(call.contains("stop=end_turn"), "{call}");
-    assert!(
-        log.lines()
-            .any(|line| line.contains("turn completed duration_ms=")),
-        "{log}"
+    let turn = log
+        .lines()
+        .find(|line| line.contains("turn completed"))
+        .unwrap();
+    assert!(turn.contains("duration_ms="), "{turn}");
+    assert!(log.contains("session created"), "{log}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_names_the_log_file_after_the_marker() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty = Pty::spawn_with_env(
+        &mock.url(),
+        &["--plain"],
+        None,
+        None,
+        &[("DEMERZEL_LOG", "info")],
     );
-    assert!(log.contains("session created id="), "{log}");
+
+    pty.wait_for(READY);
+    pty.wait_for("log file:");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let marker = text.find(READY).expect("ready marker");
+    let path_line = text.find("log file:").expect("path line");
+    assert!(marker < path_line, "{text:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -98,14 +98,6 @@ impl Cli {
 
 fn main() {
     let cli = Cli::parse();
-    // The debug trace opens first, so every later step can emit.
-    let log_file = match trace::init() {
-        Ok(path) => path,
-        Err(message) => {
-            eprintln!("demerzel: {message}");
-            exit(1);
-        }
-    };
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -118,14 +110,20 @@ fn main() {
         Some(Command::Login { provider }) => exit(run_login(&cli, provider.as_deref(), &cwd)),
         None => {}
     }
-    let mut config = match run_config(&cli, cwd) {
+    // The debug trace covers a session run; `doctor` and `login`
+    // write none. It opens before the config resolves, so every
+    // later step can emit.
+    if let Err(message) = trace::init() {
+        eprintln!("demerzel: {message}");
+        exit(1);
+    }
+    let config = match run_config(&cli, cwd) {
         Ok(config) => config,
         Err(message) => {
             eprintln!("demerzel: {message}");
             exit(1);
         }
     };
-    config.log_file = log_file;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -147,7 +145,7 @@ fn main() {
     }
 
     // A one-shot run has no ready marker: the path line comes first.
-    if let Some(path) = &config.log_file {
+    if let Some(path) = trace::path() {
         eprintln!("{}", trace::path_line(path));
     }
     let prompt = cli.prompt.expect("checked above");

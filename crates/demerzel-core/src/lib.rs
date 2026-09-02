@@ -23,6 +23,5 @@ pub use provider::{
 };
 pub use session::{
     Replay, SCHEMA_VERSION, Session, SessionMeta, SessionRecord, SessionStore, Timing, replay,
-    timestamp,
 };
 pub use tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};

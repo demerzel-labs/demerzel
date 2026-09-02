@@ -5,7 +5,7 @@
 //! The backend is not a public API, so the parser ignores unknown
 //! events and fields instead of failing on them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::auth::AuthStore;
 use crate::retry::{backoff, request_id, retry_after, retry_delay};
-use crate::sse::{PayloadMapper, spawn_event_stream};
+use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
 /// Stable adapter id. Sealed payloads carry this id.
@@ -24,6 +24,9 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Default model until per-role model routing arrives (M3).
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+/// The request route under the base URL.
+const ROUTE: &str = "/responses";
 
 /// The context windows of the models this adapter knows, in tokens.
 /// The numbers are the standard-session budgets from the Codex
@@ -93,17 +96,17 @@ impl Provider for OpenAiCodex {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
-        // Build the wire body eagerly and drop the request, so one
-        // copy of the history — not two — lives across the round trip.
-        // Serialized once: every attempt sends the same bytes, and
-        // the trace reads the size and the body from them.
+        // Build the wire body eagerly and drop the request. Serialized once, in place of the JSON tree: one packed copy
+        // of the history lives across the round trip, plus the bytes
+        // the client holds for the attempt in flight. The trace reads
+        // the size and the body from the same bytes.
         let body = serde_json::to_vec(&build_body(&request, self.config.reasoning.as_ref()))
             .expect("a JSON value serializes");
         drop(request);
         Box::pin(async move {
-            let url = format!("{}/responses", self.config.base_url);
+            let url = format!("{}{ROUTE}", self.config.base_url);
             let max_attempts = self.config.max_attempts;
-            log::debug!("request POST {url} body_bytes={}", body.len());
+            log::debug!("request POST {} body_bytes={}", ROUTE, body.len());
             log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut refreshed = false;
             let mut attempt: u32 = 0;
@@ -145,7 +148,7 @@ impl Provider for OpenAiCodex {
                     Ok(response) => {
                         let status = response.status();
                         log::info!(
-                            "POST /responses attempt {} of {max_attempts}: status {} \
+                            "POST {ROUTE} attempt {} of {max_attempts}: status {} \
                              request-id={}",
                             attempt + 1,
                             status.as_u16(),
@@ -303,31 +306,7 @@ struct StreamState {
     call_ids: HashMap<String, String>,
     /// A reasoning item opened; the next one starts a paragraph.
     saw_reasoning: bool,
-    /// Events per wire type, for the debug trace. Counted only when
-    /// the trace runs at `debug`.
-    counts: BTreeMap<String, u32>,
-}
-
-impl StreamState {
-    /// Count one wire event for the trace; free when the trace is
-    /// below `debug`.
-    fn count(&mut self, kind: &str) {
-        if log::log_enabled!(log::Level::Debug) {
-            *self.counts.entry(kind.to_string()).or_default() += 1;
-        }
-    }
-
-    /// The per-type counts, one line, at the stream's end.
-    fn report(&self) {
-        if log::log_enabled!(log::Level::Debug) {
-            let counts: Vec<String> = self
-                .counts
-                .iter()
-                .map(|(kind, count)| format!("{kind}={count}"))
-                .collect();
-            log::debug!("sse events {}", counts.join(" "));
-        }
-    }
+    counts: EventCounts,
 }
 
 impl PayloadMapper for StreamState {
@@ -354,7 +333,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         )))];
     };
     let kind = value["type"].as_str().unwrap_or("");
-    state.count(kind);
+    state.counts.count(kind);
     match kind {
         "response.output_text.delta" => text_delta(&value)
             .map(StreamEvent::TextDelta)
@@ -450,7 +429,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.completed" => {
             state.terminal = true;
-            state.report();
+            state.counts.report();
             log::info!("stream ended: response.completed");
             let stop = if state.saw_tool_call {
                 StopReason::ToolUse
@@ -464,7 +443,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.incomplete" => {
             state.terminal = true;
-            state.report();
+            state.counts.report();
             log::info!(
                 "stream ended: response.incomplete reason={}",
                 value["response"]["incomplete_details"]["reason"]
@@ -481,7 +460,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.failed" => {
             state.terminal = true;
-            state.report();
+            state.counts.report();
             let error = &value["response"]["error"];
             let message = error["message"].as_str().unwrap_or("response.failed");
             log::warn!(

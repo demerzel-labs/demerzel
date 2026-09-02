@@ -30,7 +30,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     // The first line on stderr, before the alternate screen. The PTY
     // boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", config.model);
-    if let Some(path) = &config.log_file {
+    if let Some(path) = crate::trace::path() {
         eprintln!("{}", crate::trace::path_line(path));
     }
     let mut options = Options::default();

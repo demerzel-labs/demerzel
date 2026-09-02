@@ -60,6 +60,10 @@ pub struct SealedPayload {
 /// written into it. A provider without a write count reports zero.
 /// Cost derives from the three parts and the model; the harness
 /// carries no price table.
+///
+/// The session file's `usage` record flattens these fields beside
+/// its clock, so the names `at` and `duration_ms` are reserved by the
+/// record and cannot be counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
@@ -85,6 +89,20 @@ pub enum StopReason {
     /// completed.
     Refusal,
     Aborted,
+}
+
+impl StopReason {
+    /// The reason's serialized name, the one source for the
+    /// vocabulary the session file and the trace share.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => "tool_use",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::Refusal => "refusal",
+            StopReason::Aborted => "aborted",
+        }
+    }
 }
 
 #[cfg(test)]

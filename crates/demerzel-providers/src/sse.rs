@@ -9,12 +9,46 @@
 //! mapper; the reader task, abort handling, and channel plumbing stay
 //! in one place.
 
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_core::Stream;
 
 use crate::{EventStream, ProviderError, StreamEvent};
+
+/// Events per wire type, for the debug trace. Counted only when the
+/// trace runs at `debug`; below that the map stays empty and every
+/// call is one level check.
+#[derive(Default)]
+pub(crate) struct EventCounts(BTreeMap<String, u32>);
+
+impl EventCounts {
+    /// Count one wire event of type `kind`.
+    pub(crate) fn count(&mut self, kind: &str) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        match self.0.get_mut(kind) {
+            Some(count) => *count += 1,
+            None => {
+                self.0.insert(kind.to_string(), 1);
+            }
+        }
+    }
+
+    /// The per-type counts, one line, at the stream's end.
+    pub(crate) fn report(&self) {
+        if log::log_enabled!(log::Level::Debug) {
+            let counts: Vec<String> = self
+                .0
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect();
+            log::debug!("sse events {}", counts.join(" "));
+        }
+    }
+}
 
 /// Adapter-specific mapping from SSE payloads to neutral events.
 pub(crate) trait PayloadMapper: Send + 'static {

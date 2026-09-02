@@ -426,7 +426,7 @@ impl<'a> Engine<'a> {
                      duration_ms={} {tokens}",
                     self.provider.id(),
                     self.config.model,
-                    stop_name(stop),
+                    stop.as_str(),
                     timing.duration_ms()
                 );
             }
@@ -664,11 +664,7 @@ impl<'a> Engine<'a> {
                     log::info!(
                         "approval {name} call_id={id} mode={} decision={} answer={}",
                         self.policy.mode,
-                        match decision {
-                            ApprovalDecision::Allow => "allow",
-                            ApprovalDecision::Deny => "deny",
-                            ApprovalDecision::AskUser => "ask_user",
-                        },
+                        decision.as_str(),
                         if asked { answer_name } else { "-" }
                     );
                     self.session.append_approval(
@@ -782,17 +778,6 @@ impl ToolBatch {
 /// error can carry a whole server response; the file keeps its head,
 /// so one bad reply cannot grow every later replay.
 const MAX_TURN_ERROR_BYTES: usize = 1024;
-
-/// The stop reason's name for the trace, the session file's spelling.
-fn stop_name(stop: StopReason) -> &'static str {
-    match stop {
-        StopReason::EndTurn => "end_turn",
-        StopReason::ToolUse => "tool_use",
-        StopReason::MaxTokens => "max_tokens",
-        StopReason::Refusal => "refusal",
-        StopReason::Aborted => "aborted",
-    }
-}
 
 /// `text` cut to `cap` bytes at a char boundary.
 fn capped(text: &str, cap: usize) -> &str {
@@ -916,6 +901,8 @@ mod tests {
         scripts: Mutex<VecDeque<Vec<StreamEvent>>>,
         requests: Mutex<Vec<Request>>,
         caps: Capabilities,
+        /// A wait inside every call, so a test can bound the clock.
+        delay: Duration,
     }
 
     impl ScriptedProvider {
@@ -928,7 +915,13 @@ mod tests {
                     tool_calls: true,
                     ..Capabilities::default()
                 },
+                delay: Duration::ZERO,
             }
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
         }
 
         fn without_tool_calls(scripts: Vec<Vec<StreamEvent>>) -> Self {
@@ -953,6 +946,9 @@ mod tests {
 
         fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
             self.requests.lock().unwrap().push(request);
+            // A blocking wait: the noop waker never re-polls, and the
+            // call's clock must see the time pass.
+            std::thread::sleep(self.delay);
             let script = self
                 .scripts
                 .lock()
@@ -991,6 +987,11 @@ mod tests {
         }
 
         fn run_approved(&self, name: &str, input: Value) -> BoxFuture<'_, ToolOutput> {
+            // `{"sleep_ms": n}` holds the run for n milliseconds, so a
+            // test can bound the tool clock.
+            if let Some(millis) = input["sleep_ms"].as_u64() {
+                std::thread::sleep(Duration::from_millis(millis));
+            }
             let output = if self.access(name).is_some() {
                 ToolOutput::text(format!("{name} ran: {input}")).with_summary(format!("{name}: ok"))
             } else {
@@ -1134,20 +1135,31 @@ mod tests {
     #[test]
     fn usage_and_turn_records_carry_the_clock() {
         let dir = tempfile::tempdir().unwrap();
-        let provider = ScriptedProvider::new(vec![text_done("hi")]);
+        // The call takes 20 ms, so the clock must read at least that:
+        // a duration measured off the seam reads zero.
+        let provider =
+            ScriptedProvider::new(vec![text_done("hi")]).with_delay(Duration::from_millis(20));
         let tools = FakeTools;
         let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
 
+        let before = SystemTime::now();
         block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
 
         let records = records(&engine);
         let usage = records.iter().find(|r| r["type"] == "usage").unwrap();
         assert_clock(usage);
         assert_eq!(usage["input_tokens"], 7);
+        assert!(usage["duration_ms"].as_u64().unwrap() >= 15, "{usage}");
         let turn = records.iter().find(|r| r["type"] == "turn").unwrap();
         assert_clock(turn);
-        // The turn spans the call, so it lasts at least as long.
+        // The turn spans the call, so it lasts at least as long, and
+        // it started no later than the call did.
         assert!(turn["duration_ms"].as_u64() >= usage["duration_ms"].as_u64());
+        let turn_at = humantime::parse_rfc3339(turn["at"].as_str().unwrap()).unwrap();
+        let usage_at = humantime::parse_rfc3339(usage["at"].as_str().unwrap()).unwrap();
+        assert!(turn_at <= usage_at);
+        // Millisecond precision floors the start, so allow one.
+        assert!(turn_at + Duration::from_millis(1) >= before, "{turn}");
     }
 
     #[test]
@@ -1177,7 +1189,7 @@ mod tests {
                 },
                 StreamEvent::ToolCallEnd {
                     id: "call_1".into(),
-                    input: json!({"k": 1}),
+                    input: json!({"sleep_ms": 20}),
                 },
                 StreamEvent::ToolCallStart {
                     id: "call_2".into(),
@@ -1220,11 +1232,68 @@ mod tests {
             .unwrap();
         assert_eq!(ran["output_bytes"], content.len() as u64);
 
+        // The run took 20 ms, so the tool clock reads at least that.
+        assert!(ran["duration_ms"].as_u64().unwrap() >= 15, "{ran}");
+
         let refused = tools[1];
         assert_eq!(refused["call_id"], "call_2");
         assert_eq!(refused["name"], "write");
         assert_eq!(refused["is_error"], true);
         assert_clock(refused);
+    }
+
+    #[test]
+    fn an_aborted_batch_still_records_every_call() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three execute calls: the user allows the first, aborts at
+        // the second, and the third never asks.
+        let mut events = Vec::new();
+        for index in 1..=3 {
+            events.push(StreamEvent::ToolCallStart {
+                id: format!("call_{index}"),
+                name: "exec".into(),
+            });
+            events.push(StreamEvent::ToolCallEnd {
+                id: format!("call_{index}"),
+                input: json!({"n": index}),
+            });
+        }
+        events.push(StreamEvent::Done(StopReason::ToolUse));
+        let provider = ScriptedProvider::new(vec![events]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Ask, session_in(&dir));
+        let mut approver = ScriptedApprover(VecDeque::from([
+            ApprovalAnswer::Allow,
+            ApprovalAnswer::Abort,
+        ]));
+
+        let outcome = block_on(engine.user_turn("go".into(), &noop_sink(), &mut approver));
+        assert_eq!(outcome.unwrap(), TurnOutcome::Aborted);
+
+        // The result message, then three tool records, then the turn
+        // record: the invariant holds on an abort too.
+        let records = records(&engine);
+        let result_index = records
+            .iter()
+            .position(|r| r["type"] == "message" && r["content"][0]["type"] == "tool_result")
+            .unwrap();
+        let kinds: Vec<&str> = records[result_index + 1..]
+            .iter()
+            .map(|r| r["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["tool", "tool", "tool", "turn"]);
+        let tools: Vec<&Value> = records.iter().filter(|r| r["type"] == "tool").collect();
+        assert_eq!(tools[0]["call_id"], "call_1");
+        assert_eq!(tools[0]["is_error"], false);
+        assert_eq!(tools[1]["call_id"], "call_2");
+        assert_eq!(tools[1]["is_error"], true);
+        // The skipped call has a record with a zero-length run.
+        assert_eq!(tools[2]["call_id"], "call_3");
+        assert_eq!(tools[2]["is_error"], true);
+        assert_eq!(tools[2]["duration_ms"], 0);
+        for record in &tools {
+            assert_clock(record);
+        }
     }
 
     #[test]

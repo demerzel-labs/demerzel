@@ -92,6 +92,18 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+impl ApprovalDecision {
+    /// The decision's serialized name, the spelling the `approval`
+    /// record and the trace share.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ApprovalDecision::Allow => "allow",
+            ApprovalDecision::AskUser => "ask_user",
+            ApprovalDecision::Deny => "deny",
+        }
+    }
+}
+
 impl ApprovalMode {
     /// Decide one tool call from its declared access class.
     pub fn decide(self, access: ToolAccess) -> ApprovalDecision {

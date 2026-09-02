@@ -114,6 +114,7 @@ pub struct Received {
     pub account_id: Option<String>,
     pub api_key: Option<String>,
     pub anthropic_version: Option<String>,
+    pub content_type: Option<String>,
     pub body: Value,
 }
 
@@ -209,6 +210,7 @@ fn record(state: &ServerState, path: &str, headers: &HeaderMap, body: Value) {
         account_id: header("chatgpt-account-id"),
         api_key: header("x-api-key"),
         anthropic_version: header("anthropic-version"),
+        content_type: header("content-type"),
         body,
     });
 }

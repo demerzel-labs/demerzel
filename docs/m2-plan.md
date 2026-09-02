@@ -452,7 +452,9 @@ Each step is one PR with its own verify line.
      records carry `at`, the start in RFC 3339 UTC at millisecond
      precision, and `duration_ms`, the wall time:
      - The `usage` record: from the request send to the stream's
-       terminal event, retries included.
+       terminal event, retries included. A call whose stream sent
+       no usage writes no record, so its clock is in the debug
+       trace alone; the turn record still spans it.
      - The `tool` record, new on that date, one per `tool_use` block
        in the batch's order, appended after the user message that
        carries the results:

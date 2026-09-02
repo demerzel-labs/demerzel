@@ -6,14 +6,14 @@
 //! The parser still ignores unknown events and fields, so additive
 //! server changes never break a session.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Effort, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
 use crate::retry::{backoff, request_id, retry_after, retry_delay};
-use crate::sse::{PayloadMapper, spawn_event_stream};
+use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
 /// Stable adapter id. Sealed payloads carry this id.
@@ -47,6 +47,9 @@ pub const NO_CREDENTIALS_HELP: &str =
 
 /// Pinned `anthropic-version` header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The request route under the base URL.
+const ROUTE: &str = "/v1/messages";
 
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
@@ -139,17 +142,17 @@ impl Provider for Anthropic {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
-        // Build the wire body eagerly and drop the request, so one
-        // copy of the history — not two — lives across the round trip.
-        // Serialized once: every attempt sends the same bytes, and
-        // the trace reads the size and the body from them.
+        // Build the wire body eagerly and drop the request. Serialized once, in place of the JSON tree: one packed copy
+        // of the history lives across the round trip, plus the bytes
+        // the client holds for the attempt in flight. The trace reads
+        // the size and the body from the same bytes.
         let body = serde_json::to_vec(&build_body(&request, &self.config))
             .expect("a JSON value serializes");
         drop(request);
         Box::pin(async move {
-            let url = format!("{}/v1/messages", self.config.base_url);
+            let url = format!("{}{ROUTE}", self.config.base_url);
             let max_attempts = self.config.max_attempts;
-            log::debug!("request POST {url} body_bytes={}", body.len());
+            log::debug!("request POST {} body_bytes={}", ROUTE, body.len());
             log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut attempt: u32 = 0;
             let response = loop {
@@ -182,7 +185,7 @@ impl Provider for Anthropic {
                     Ok(response) => {
                         let status = response.status();
                         log::info!(
-                            "POST /v1/messages attempt {} of {max_attempts}: status {} \
+                            "POST {ROUTE} attempt {} of {max_attempts}: status {} \
                              request-id={}",
                             attempt + 1,
                             status.as_u16(),
@@ -399,31 +402,7 @@ struct StreamState {
     stop: Option<StopReason>,
     usage: Usage,
     terminal: bool,
-    /// Events per wire type, for the debug trace. Counted only when
-    /// the trace runs at `debug`.
-    counts: BTreeMap<String, u32>,
-}
-
-impl StreamState {
-    /// Count one wire event for the trace; free when the trace is
-    /// below `debug`.
-    fn count(&mut self, kind: &str) {
-        if log::log_enabled!(log::Level::Debug) {
-            *self.counts.entry(kind.to_string()).or_default() += 1;
-        }
-    }
-
-    /// The per-type counts, one line, at the stream's end.
-    fn report(&self) {
-        if log::log_enabled!(log::Level::Debug) {
-            let counts: Vec<String> = self
-                .counts
-                .iter()
-                .map(|(kind, count)| format!("{kind}={count}"))
-                .collect();
-            log::debug!("sse events {}", counts.join(" "));
-        }
-    }
+    counts: EventCounts,
 }
 
 impl PayloadMapper for StreamState {
@@ -450,7 +429,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         )))];
     };
     let kind = value["type"].as_str().unwrap_or("");
-    state.count(kind);
+    state.counts.count(kind);
     match kind {
         "message_start" => {
             let usage = &value["message"]["usage"];
@@ -632,13 +611,13 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "message_stop" => {
             state.terminal = true;
-            state.report();
+            state.counts.report();
             let stop = state.stop.unwrap_or(if state.saw_tool_call {
                 StopReason::ToolUse
             } else {
                 StopReason::EndTurn
             });
-            log::info!("stream ended: message_stop stop_reason={stop:?}");
+            log::info!("stream ended: message_stop stop_reason={}", stop.as_str());
             vec![
                 Ok(StreamEvent::Usage(state.usage)),
                 Ok(StreamEvent::Done(stop)),
@@ -646,7 +625,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "error" => {
             state.terminal = true;
-            state.report();
+            state.counts.report();
             let error = &value["error"];
             let message = error["message"].as_str().unwrap_or("error event");
             log::warn!(
