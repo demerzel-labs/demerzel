@@ -20,17 +20,23 @@
 //! Every turn that returns closes with a turn record in the session
 //! file: the outcome, or `error` with the provider's message. A
 //! dropped turn writes none, so a turn without one was cut off.
+//!
+//! The engine holds the clock for the session file's timing fields.
+//! It reads the system clock and starts a monotonic timer at each
+//! seam — the request send, the tool run, the user turn — and the
+//! usage, tool, and turn records carry the start and the wall time.
 
 use std::collections::HashMap;
 use std::future::poll_fn;
 use std::io;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, StreamEvent};
-use crate::session::{Session, SessionMeta};
+use crate::session::{Session, SessionMeta, Timing};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
 /// The fixed base system prompt for M1. Config replaces it in M3.
@@ -316,14 +322,19 @@ impl<'a> Engine<'a> {
         sink: &dyn EventSink,
         approver: &mut dyn Approver,
     ) -> Result<TurnOutcome, EngineError> {
+        let at = SystemTime::now();
+        let started = Instant::now();
         let result = self.run_turn(text, sink, approver).await;
+        let timing = Timing::new(at, started.elapsed());
         match &result {
-            Ok(outcome) => self.session.append_turn(outcome.as_str(), None)?,
+            Ok(outcome) => self.session.append_turn(outcome.as_str(), None, timing)?,
             Err(EngineError::Provider(error)) => {
                 let message = error.to_string();
-                let _ = self
-                    .session
-                    .append_turn("error", Some(capped(&message, MAX_TURN_ERROR_BYTES)));
+                let _ = self.session.append_turn(
+                    "error",
+                    Some(capped(&message, MAX_TURN_ERROR_BYTES)),
+                    timing,
+                );
             }
             Err(EngineError::Session(_)) => {}
         }
@@ -354,34 +365,51 @@ impl<'a> Engine<'a> {
             calls += 1;
 
             let request = self.assemble();
+            // The call's clock runs from the send to the terminal
+            // event, retries included: the wall time the user waited.
+            let at = SystemTime::now();
+            let started = Instant::now();
             let stream = self.provider.stream(request).await?;
             let ModelResponse {
                 message,
                 stop,
                 usage,
             } = collect_response(stream, sink).await?;
+            let timing = Timing::new(at, started.elapsed());
 
             if !message.content.is_empty() {
                 self.push(message.clone())?;
             }
             if let Some(usage) = usage {
-                self.session.append_usage(&usage)?;
+                self.session.append_usage(&usage, timing)?;
                 sink.event(EngineEvent::ModelUsage(usage));
             }
 
             match stop {
                 StopReason::ToolUse => {
-                    let (results, aborted) = self.run_tools(&message, sink, approver).await?;
-                    if results.is_empty() {
+                    let batch = self.run_tools(&message, sink, approver).await?;
+                    if batch.results.is_empty() {
                         return Err(EngineError::Provider(ProviderError::Protocol(
                             "the model stopped for tool use without a tool call".to_string(),
                         )));
                     }
                     self.push(Message {
                         role: Role::User,
-                        content: results,
+                        content: batch.results,
                     })?;
-                    if aborted {
+                    // The tool records follow the message that
+                    // carries the results, one per call in order.
+                    for call in &batch.calls {
+                        self.session.append_tool(
+                            &call.id,
+                            &call.name,
+                            call.timing,
+                            call.is_error,
+                            call.output_bytes,
+                            call.truncated,
+                        )?;
+                    }
+                    if batch.aborted {
                         return Ok(TurnOutcome::Aborted);
                     }
                 }
@@ -503,15 +531,16 @@ impl<'a> Engine<'a> {
     /// the host does not hold skips the policy: `run_approved` returns
     /// the unknown-tool error and nothing runs.
     ///
-    /// Returns the result blocks and whether the user stopped the
-    /// turn. On an abort, the refused call and every later call get
-    /// error results, so nothing dangles.
+    /// Returns the result blocks, whether the user stopped the turn,
+    /// and one [`ToolCall`] per result for the session's tool
+    /// records. On an abort, the refused call and every later call
+    /// get error results, so nothing dangles.
     async fn run_tools(
         &mut self,
         message: &Message,
         sink: &dyn EventSink,
         approver: &mut dyn Approver,
-    ) -> Result<(Vec<ContentBlock>, bool), EngineError> {
+    ) -> Result<ToolBatch, EngineError> {
         let calls: Vec<(String, String, Value)> = message
             .content
             .iter()
@@ -523,15 +552,22 @@ impl<'a> Engine<'a> {
             })
             .collect();
 
-        let mut results = Vec::with_capacity(calls.len());
-        let mut aborted = false;
+        let mut batch = ToolBatch {
+            results: Vec::with_capacity(calls.len()),
+            calls: Vec::with_capacity(calls.len()),
+            aborted: false,
+        };
         for (id, name, input) in calls {
-            if aborted {
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content: format!("the user stopped the turn; the {name} call did not run"),
-                    is_error: true,
-                });
+            if batch.aborted {
+                let output = ToolOutput::error(format!(
+                    "the user stopped the turn; the {name} call did not run"
+                ));
+                batch.answer(
+                    id,
+                    name,
+                    output,
+                    Timing::new(SystemTime::now(), Duration::ZERO),
+                );
                 continue;
             }
             sink.event(EngineEvent::ToolRun {
@@ -539,8 +575,10 @@ impl<'a> Engine<'a> {
                 name: &name,
                 input: &input,
             });
-            let output = match self.tools.access(&name) {
-                None => self.tools.run_approved(&name, input).await,
+            // Decide first, then run on the clock: the wait at an
+            // approval prompt is the user's time, not the tool's.
+            let verdict = match self.tools.access(&name) {
+                None => Verdict::Run,
                 Some(access) => {
                     let decision = self.policy.decide(&ApprovalRequest {
                         tool: &name,
@@ -579,21 +617,28 @@ impl<'a> Engine<'a> {
                         });
                     }
                     if approved {
-                        self.tools.run_approved(&name, input).await
+                        Verdict::Run
                     } else if decision == ApprovalDecision::Deny {
-                        ToolOutput::error(format!(
+                        Verdict::Refuse(format!(
                             "the approval mode refuses the {name} tool in this session"
                         ))
                     } else if answer == ApprovalAnswer::Abort {
-                        aborted = true;
-                        ToolOutput::error(format!(
+                        batch.aborted = true;
+                        Verdict::Refuse(format!(
                             "the user stopped the turn; the {name} call did not run"
                         ))
                     } else {
-                        ToolOutput::error(approver.deny_message(&name))
+                        Verdict::Refuse(approver.deny_message(&name))
                     }
                 }
             };
+            let at = SystemTime::now();
+            let started = Instant::now();
+            let output = match verdict {
+                Verdict::Run => self.tools.run_approved(&name, input).await,
+                Verdict::Refuse(message) => ToolOutput::error(message),
+            };
+            let timing = Timing::new(at, started.elapsed());
             sink.event(EngineEvent::ToolEnd {
                 id: &id,
                 name: &name,
@@ -601,13 +646,54 @@ impl<'a> Engine<'a> {
                 is_error: output.is_error,
                 output: &output.content,
             });
-            results.push(ContentBlock::ToolResult {
-                tool_use_id: id,
-                content: output.content,
-                is_error: output.is_error,
-            });
+            batch.answer(id, name, output, timing);
         }
-        Ok((results, aborted))
+        Ok(batch)
+    }
+}
+
+/// Whether a tool call runs, after the policy and the user answered.
+enum Verdict {
+    Run,
+    /// The call does not run; the model gets this error text.
+    Refuse(String),
+}
+
+/// One answered tool call, for its `tool` session record.
+struct ToolCall {
+    id: String,
+    name: String,
+    timing: Timing,
+    is_error: bool,
+    output_bytes: u64,
+    truncated: bool,
+}
+
+/// The answers to one batch of tool calls: the result blocks for the
+/// next user message, and the call records that follow it.
+struct ToolBatch {
+    results: Vec<ContentBlock>,
+    calls: Vec<ToolCall>,
+    aborted: bool,
+}
+
+impl ToolBatch {
+    /// Answer one call with its output: the result block for the
+    /// model, and the record for the file.
+    fn answer(&mut self, id: String, name: String, output: ToolOutput, timing: Timing) {
+        self.calls.push(ToolCall {
+            id: id.clone(),
+            name,
+            timing,
+            is_error: output.is_error,
+            output_bytes: output.content.len() as u64,
+            truncated: output.truncated,
+        });
+        self.results.push(ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: output.content,
+            is_error: output.is_error,
+        });
     }
 }
 
@@ -936,6 +1022,117 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// Every record in the session file, parsed, in file order.
+    fn records(engine: &Engine<'_>) -> Vec<Value> {
+        let raw = std::fs::read_to_string(engine.session().path()).unwrap();
+        raw.lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect()
+    }
+
+    /// `at` parses as RFC 3339 and `duration_ms` is a count.
+    fn assert_clock(record: &Value) {
+        let at = record["at"].as_str().expect("at");
+        humantime::parse_rfc3339(at).expect("rfc 3339");
+        assert!(record["duration_ms"].is_u64(), "{record}");
+    }
+
+    #[test]
+    fn usage_and_turn_records_carry_the_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("hi")]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+
+        let records = records(&engine);
+        let usage = records.iter().find(|r| r["type"] == "usage").unwrap();
+        assert_clock(usage);
+        assert_eq!(usage["input_tokens"], 7);
+        let turn = records.iter().find(|r| r["type"] == "turn").unwrap();
+        assert_clock(turn);
+        // The turn spans the call, so it lasts at least as long.
+        assert!(turn["duration_ms"].as_u64() >= usage["duration_ms"].as_u64());
+    }
+
+    #[test]
+    fn a_failed_turn_record_carries_the_clock_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![vec![StreamEvent::Done(StopReason::ToolUse)]]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::Auto, session_in(&dir));
+
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap_err();
+
+        let records = records(&engine);
+        let turn = records.iter().find(|r| r["type"] == "turn").unwrap();
+        assert_eq!(turn["outcome"], "error");
+        assert_clock(turn);
+    }
+
+    #[test]
+    fn each_tool_call_gets_a_record_after_the_result_message() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two calls in one batch: one runs, one the mode refuses.
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamEvent::ToolCallStart {
+                    id: "call_1".into(),
+                    name: "note".into(),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call_1".into(),
+                    input: json!({"k": 1}),
+                },
+                StreamEvent::ToolCallStart {
+                    id: "call_2".into(),
+                    name: "write".into(),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call_2".into(),
+                    input: json!({}),
+                },
+                StreamEvent::Done(StopReason::ToolUse),
+            ],
+            text_done("done"),
+        ]);
+        let tools = FakeTools;
+        let mut engine = engine(&provider, &tools, ApprovalMode::ReadOnly, session_in(&dir));
+
+        block_on(engine.user_turn("go".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+
+        let records = records(&engine);
+        // The result message, then one tool record per call, in the
+        // batch's order.
+        let result_index = records
+            .iter()
+            .position(|r| r["type"] == "message" && r["content"][0]["type"] == "tool_result")
+            .unwrap();
+        let tools: Vec<&Value> = records.iter().filter(|r| r["type"] == "tool").collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(records[result_index + 1]["type"], "tool");
+        assert_eq!(records[result_index + 2]["type"], "tool");
+
+        let ran = tools[0];
+        assert_eq!(ran["call_id"], "call_1");
+        assert_eq!(ran["name"], "note");
+        assert_eq!(ran["is_error"], false);
+        assert_eq!(ran["truncated"], false);
+        assert_clock(ran);
+        // The byte count is the result text the model receives.
+        let content = records[result_index]["content"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert_eq!(ran["output_bytes"], content.len() as u64);
+
+        let refused = tools[1];
+        assert_eq!(refused["call_id"], "call_2");
+        assert_eq!(refused["name"], "write");
+        assert_eq!(refused["is_error"], true);
+        assert_clock(refused);
     }
 
     #[test]

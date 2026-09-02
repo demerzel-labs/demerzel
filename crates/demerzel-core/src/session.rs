@@ -18,20 +18,26 @@
 //! The file is also the measurement trace for one session: the meta
 //! records carry the environment (project directory, provider,
 //! model), the messages carry every tool step, the usage records
-//! carry the token counts with the cached parts, and the turn records
+//! carry the token counts with the cached parts, the tool records
+//! carry each call's clock and result size, and the turn records
 //! carry how each user turn ended. A user turn opens with a user
 //! message that holds a text block; the turn record that follows
 //! before the next one closes it. A turn without one was cut off:
 //! a dropped turn future (Ctrl-C in the interfaces), a process exit
-//! mid-turn, or a session write failure. The file carries no clock
-//! beyond the meta record's creation time; wall time per turn is the
-//! caller's to measure.
+//! mid-turn, or a session write failure.
+//!
+//! The clock: every usage, tool, and turn record carries `at`, the
+//! event's start on the system clock, and `duration_ms`, its wall
+//! time on the monotonic clock. The engine measures both at the
+//! seam — the request send, the tool dispatch, the turn — so the
+//! file says when each call ran and how long it took. A file from
+//! before the clock fields replays the same; the fields are absent.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +48,36 @@ use crate::provider::Effort;
 
 /// Version of the session-file schema, written into every meta record.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// The clock format of the `usage`, `tool`, and `turn` records: RFC
+/// 3339 in UTC at millisecond precision. `meta.created` keeps the
+/// second precision it has had since schema 1; the session id carries
+/// the creation millisecond.
+pub fn timestamp(at: SystemTime) -> String {
+    humantime::format_rfc3339_millis(at).to_string()
+}
+
+/// When an event started and how long it took: the clock of one
+/// usage, tool, or turn record. The start comes from the system
+/// clock and the duration from the monotonic clock, so a clock step
+/// mid-event moves `at` and not `duration`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    pub at: SystemTime,
+    pub duration: Duration,
+}
+
+impl Timing {
+    pub fn new(at: SystemTime, duration: Duration) -> Self {
+        Self { at, duration }
+    }
+
+    /// The duration in whole milliseconds; a duration past the
+    /// 64-bit range saturates.
+    pub fn duration_ms(self) -> u64 {
+        u64::try_from(self.duration.as_millis()).unwrap_or(u64::MAX)
+    }
+}
 
 /// The metadata record that opens every session file. A resume, a
 /// model switch, an effort switch, and an approval switch append a
@@ -119,16 +155,51 @@ pub enum SessionRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer: Option<String>,
     },
-    Usage(Usage),
+    /// The token counts of one model call, with the call's clock:
+    /// `at` is when the request went out, and `duration_ms` is the
+    /// wall time from the send to the stream's terminal event. Both
+    /// are absent in a file from before the fields, and readers keep
+    /// such a file.
+    Usage {
+        #[serde(flatten)]
+        usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    /// One tool call the engine answered, appended after the user
+    /// message that carries the call's result: one record per
+    /// `tool_use` block, in the batch's order. `at` is when the run
+    /// started and `duration_ms` is its wall time; the wait at an
+    /// approval prompt is not in it, and a call the policy, the user,
+    /// or an abort declined records the time to build its error
+    /// result. `output_bytes` counts the result text the model
+    /// receives, and `truncated` says whether a size limit cut it.
+    Tool {
+        call_id: String,
+        name: String,
+        at: String,
+        duration_ms: u64,
+        is_error: bool,
+        output_bytes: u64,
+        truncated: bool,
+    },
     /// How one user turn ended. `outcome` is one of `completed`,
     /// `max_tokens`, `refused`, `call_limit`, `aborted`, or `error`;
     /// the first five are the engine's turn outcomes by their
     /// `as_str` names, and `error` marks a provider failure, with the
-    /// message in `error`, cut at 1 KiB.
+    /// message in `error`, cut at 1 KiB. `at` is when the turn
+    /// started and `duration_ms` is the whole user turn's wall time;
+    /// both are absent in a file from before the fields.
     Turn {
         outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     /// A record type from a newer schema. Replay skips it, so old
     /// binaries read new files. The harness never writes this variant.
@@ -154,11 +225,31 @@ enum RecordRef<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         answer: Option<&'a str>,
     },
-    Usage(&'a Usage),
+    Usage {
+        #[serde(flatten)]
+        usage: &'a Usage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    Tool {
+        call_id: &'a str,
+        name: &'a str,
+        at: &'a str,
+        duration_ms: u64,
+        is_error: bool,
+        output_bytes: u64,
+        truncated: bool,
+    },
     Turn {
         outcome: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
 }
 
@@ -342,10 +433,42 @@ impl Session {
                 approved: *approved,
                 answer: answer.as_deref(),
             },
-            SessionRecord::Usage(usage) => RecordRef::Usage(usage),
-            SessionRecord::Turn { outcome, error } => RecordRef::Turn {
+            SessionRecord::Usage {
+                usage,
+                at,
+                duration_ms,
+            } => RecordRef::Usage {
+                usage,
+                at: at.as_deref(),
+                duration_ms: *duration_ms,
+            },
+            SessionRecord::Tool {
+                call_id,
+                name,
+                at,
+                duration_ms,
+                is_error,
+                output_bytes,
+                truncated,
+            } => RecordRef::Tool {
+                call_id,
+                name,
+                at,
+                duration_ms: *duration_ms,
+                is_error: *is_error,
+                output_bytes: *output_bytes,
+                truncated: *truncated,
+            },
+            SessionRecord::Turn {
+                outcome,
+                error,
+                at,
+                duration_ms,
+            } => RecordRef::Turn {
                 outcome,
                 error: error.as_deref(),
+                at: at.as_deref(),
+                duration_ms: *duration_ms,
             },
             // Replay-only marker; there is nothing to write.
             SessionRecord::Unknown => return Ok(()),
@@ -385,14 +508,54 @@ impl Session {
         })
     }
 
-    pub fn append_usage(&mut self, usage: &Usage) -> io::Result<()> {
-        self.append_ref(&RecordRef::Usage(usage))
+    /// Record one model call's token counts with its clock. See
+    /// [`SessionRecord::Usage`].
+    pub fn append_usage(&mut self, usage: &Usage, timing: Timing) -> io::Result<()> {
+        let at = timestamp(timing.at);
+        self.append_ref(&RecordRef::Usage {
+            usage,
+            at: Some(&at),
+            duration_ms: Some(timing.duration_ms()),
+        })
     }
 
-    /// Close one user turn with its outcome. See
+    /// Record one answered tool call. See [`SessionRecord::Tool`].
+    pub fn append_tool(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        timing: Timing,
+        is_error: bool,
+        output_bytes: u64,
+        truncated: bool,
+    ) -> io::Result<()> {
+        let at = timestamp(timing.at);
+        self.append_ref(&RecordRef::Tool {
+            call_id,
+            name,
+            at: &at,
+            duration_ms: timing.duration_ms(),
+            is_error,
+            output_bytes,
+            truncated,
+        })
+    }
+
+    /// Close one user turn with its outcome and its clock. See
     /// [`SessionRecord::Turn`] for the outcome vocabulary.
-    pub fn append_turn(&mut self, outcome: &str, error: Option<&str>) -> io::Result<()> {
-        self.append_ref(&RecordRef::Turn { outcome, error })
+    pub fn append_turn(
+        &mut self,
+        outcome: &str,
+        error: Option<&str>,
+        timing: Timing,
+    ) -> io::Result<()> {
+        let at = timestamp(timing.at);
+        self.append_ref(&RecordRef::Turn {
+            outcome,
+            error,
+            at: Some(&at),
+            duration_ms: Some(timing.duration_ms()),
+        })
     }
 
     fn append_ref(&mut self, record: &RecordRef<'_>) -> io::Result<()> {
@@ -524,7 +687,8 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
             }
             SessionRecord::Message(message) => out.messages.push(message),
             SessionRecord::Approval { .. }
-            | SessionRecord::Usage(_)
+            | SessionRecord::Usage { .. }
+            | SessionRecord::Tool { .. }
             | SessionRecord::Turn { .. } => {}
             SessionRecord::Unknown => {}
         }
@@ -654,12 +818,15 @@ mod tests {
             .append_message(&text_message(Role::Assistant, "hello"))
             .unwrap();
         session
-            .append_usage(&Usage {
-                input_tokens: 10,
-                output_tokens: 2,
-                cache_read_tokens: 0,
-                cache_creation_tokens: 0,
-            })
+            .append_usage(
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+                Timing::new(SystemTime::now(), Duration::from_millis(5)),
+            )
             .unwrap();
 
         let replay = replay(session.path()).unwrap();
@@ -696,25 +863,59 @@ mod tests {
         assert_eq!(value["tool_use_id"], "call_9");
         assert_eq!(value["approved"], true);
 
-        let usage = SessionRecord::Usage(Usage::default());
+        let usage = SessionRecord::Usage {
+            usage: Usage::default(),
+            at: Some("2026-09-01T10:00:00.123Z".into()),
+            duration_ms: Some(1500),
+        };
         let value = serde_json::to_value(&usage).unwrap();
         assert_eq!(value["type"], "usage");
+        // The token counts sit flat on the record, beside the clock.
         assert_eq!(value["input_tokens"], 0);
+        assert_eq!(value["at"], "2026-09-01T10:00:00.123Z");
+        assert_eq!(value["duration_ms"], 1500);
+
+        let tool = SessionRecord::Tool {
+            call_id: "call_9".into(),
+            name: "bash".into(),
+            at: "2026-09-01T10:00:01.000Z".into(),
+            duration_ms: 42,
+            is_error: false,
+            output_bytes: 17,
+            truncated: false,
+        };
+        let value = serde_json::to_value(&tool).unwrap();
+        assert_eq!(value["type"], "tool");
+        assert_eq!(value["call_id"], "call_9");
+        assert_eq!(value["name"], "bash");
+        assert_eq!(value["at"], "2026-09-01T10:00:01.000Z");
+        assert_eq!(value["duration_ms"], 42);
+        assert_eq!(value["is_error"], false);
+        assert_eq!(value["output_bytes"], 17);
+        assert_eq!(value["truncated"], false);
 
         let turn = SessionRecord::Turn {
             outcome: "completed".into(),
             error: None,
+            at: Some("2026-09-01T10:00:00.000Z".into()),
+            duration_ms: Some(2000),
         };
         let value = serde_json::to_value(&turn).unwrap();
         assert_eq!(value["type"], "turn");
         assert_eq!(value["outcome"], "completed");
         assert!(value.get("error").is_none());
+        assert_eq!(value["at"], "2026-09-01T10:00:00.000Z");
+        assert_eq!(value["duration_ms"], 2000);
         let failed = SessionRecord::Turn {
             outcome: "error".into(),
             error: Some("rate limited".into()),
+            at: None,
+            duration_ms: None,
         };
         let value = serde_json::to_value(&failed).unwrap();
         assert_eq!(value["error"], "rate limited");
+        assert!(value.get("at").is_none());
+        assert!(value.get("duration_ms").is_none());
 
         // The borrowed append path serializes the identical shape.
         let dir = tempfile::tempdir().unwrap();
@@ -847,19 +1048,36 @@ mod tests {
                 approved: None,
                 answer: None,
             },
-            SessionRecord::Usage(Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                cache_read_tokens: 3,
-                cache_creation_tokens: 4,
-            }),
+            SessionRecord::Usage {
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_read_tokens: 3,
+                    cache_creation_tokens: 4,
+                },
+                at: Some("2026-09-01T10:00:00.123Z".into()),
+                duration_ms: Some(7),
+            },
+            SessionRecord::Tool {
+                call_id: "call_3".into(),
+                name: "read".into(),
+                at: "2026-09-01T10:00:00.130Z".into(),
+                duration_ms: 1,
+                is_error: true,
+                output_bytes: 9,
+                truncated: true,
+            },
             SessionRecord::Turn {
                 outcome: "completed".into(),
                 error: None,
+                at: Some("2026-09-01T10:00:00.000Z".into()),
+                duration_ms: Some(140),
             },
             SessionRecord::Turn {
                 outcome: "error".into(),
                 error: Some("server error: 503".into()),
+                at: Some("2026-09-01T10:00:01.000Z".into()),
+                duration_ms: Some(3),
             },
         ];
         for record in &records {
@@ -895,6 +1113,124 @@ mod tests {
 
         let replayed = replay(session.path()).unwrap();
         assert_eq!(replayed.messages.len(), 1);
+    }
+
+    #[test]
+    fn records_from_before_the_clock_fields_still_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.jsonl");
+        // The shapes a build before the clock fields wrote: usage
+        // with the counts alone, and a turn with its outcome alone.
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"meta\",\"schema\":1,\"cwd\":\"/x\",\"provider\":\"p\",\"model\":\"m\",\"created\":\"2026-08-07T00:00:00Z\"}\n",
+                "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}\n",
+                "{\"type\":\"usage\",\"input_tokens\":10,\"output_tokens\":2,\"cache_read_tokens\":1,\"cache_creation_tokens\":0}\n",
+                "{\"type\":\"turn\",\"outcome\":\"completed\"}\n",
+            ),
+        )
+        .unwrap();
+        let replayed = replay(&path).unwrap();
+        assert_eq!(replayed.messages.len(), 1);
+
+        // The old records parse into the current variants with the
+        // clock fields absent, so a reader of the typed records sees
+        // one shape.
+        let usage: SessionRecord = serde_json::from_str(
+            "{\"type\":\"usage\",\"input_tokens\":10,\"output_tokens\":2,\"cache_read_tokens\":1,\"cache_creation_tokens\":0}",
+        )
+        .unwrap();
+        assert_eq!(
+            usage,
+            SessionRecord::Usage {
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cache_read_tokens: 1,
+                    cache_creation_tokens: 0,
+                },
+                at: None,
+                duration_ms: None,
+            }
+        );
+        let turn: SessionRecord =
+            serde_json::from_str("{\"type\":\"turn\",\"outcome\":\"completed\"}").unwrap();
+        assert_eq!(
+            turn,
+            SessionRecord::Turn {
+                outcome: "completed".into(),
+                error: None,
+                at: None,
+                duration_ms: None,
+            }
+        );
+        // A usage record from before the cache-write count still
+        // reads: the counts default, the clock stays absent.
+        let sparse: SessionRecord =
+            serde_json::from_str("{\"type\":\"usage\",\"input_tokens\":3}").unwrap();
+        assert!(matches!(
+            sparse,
+            SessionRecord::Usage {
+                usage: Usage {
+                    input_tokens: 3,
+                    cache_creation_tokens: 0,
+                    ..
+                },
+                at: None,
+                duration_ms: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn the_clock_fields_round_trip_and_the_timestamp_is_rfc3339_millis() {
+        let at = UNIX_EPOCH + Duration::from_millis(1_788_256_800_123);
+        assert_eq!(timestamp(at), "2026-09-01T10:00:00.123Z");
+        let timing = Timing::new(at, Duration::from_micros(1_500_400));
+        assert_eq!(timing.duration_ms(), 1500);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::at(dir.path());
+        let mut session = store
+            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .unwrap();
+        session.append_usage(&Usage::default(), timing).unwrap();
+        session
+            .append_tool("call_1", "read", timing, false, 12, false)
+            .unwrap();
+        session.append_turn("completed", None, timing).unwrap();
+        let text = std::fs::read_to_string(session.path()).unwrap();
+        let records: Vec<SessionRecord> = text
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            records,
+            [
+                SessionRecord::Usage {
+                    usage: Usage::default(),
+                    at: Some("2026-09-01T10:00:00.123Z".into()),
+                    duration_ms: Some(1500),
+                },
+                SessionRecord::Tool {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    at: "2026-09-01T10:00:00.123Z".into(),
+                    duration_ms: 1500,
+                    is_error: false,
+                    output_bytes: 12,
+                    truncated: false,
+                },
+                SessionRecord::Turn {
+                    outcome: "completed".into(),
+                    error: None,
+                    at: Some("2026-09-01T10:00:00.123Z".into()),
+                    duration_ms: Some(1500),
+                },
+            ]
+        );
     }
 
     #[test]
