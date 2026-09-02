@@ -87,6 +87,19 @@ pub(crate) fn session_note(session: Option<(&str, &std::path::Path)>) -> String 
     }
 }
 
+/// The line both interfaces print on stderr when a run that opened a
+/// session ends: the session's id and the command that resumes it.
+/// `-c` when the session is the project's latest, the common case;
+/// `--session <id>` when a newer one exists, so the line never names
+/// a command that opens another session.
+pub(crate) fn exit_line(id: &str, latest: bool) -> String {
+    if latest {
+        format!("session {id} · resume with demerzel -c")
+    } else {
+        format!("session {id} · resume with demerzel --session {id}")
+    }
+}
+
 /// What one command asks the interface to do.
 pub(crate) enum Effect {
     /// End the session.
@@ -335,6 +348,18 @@ mod tests {
             panic!("expected the unknown reply");
         };
         assert!(note.contains("/help"));
+    }
+
+    #[test]
+    fn the_exit_line_names_the_command_that_opens_the_session() {
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(
+            exit_line(id, true),
+            "session 01ARZ3NDEKTSV4RRFFQ69G5FAV · resume with demerzel -c"
+        );
+        let older = exit_line(id, false);
+        assert!(older.starts_with("session 01ARZ3NDEKTSV4RRFFQ69G5FAV · "));
+        assert!(older.ends_with(&format!("--session {id}")), "{older}");
     }
 
     #[test]

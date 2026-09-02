@@ -3,8 +3,10 @@
 //!
 //! Ctrl-C rules carry over from the REPL: at the prompt it clears the
 //! line, during a turn it aborts the turn by dropping its future, and
-//! at an approval question it stops the turn. Ctrl-D on an empty line
-//! ends the session.
+//! at an approval question it stops the turn. On an empty line it
+//! asks once — the status shows the quit hint for a span — and a
+//! second press inside the span ends the session. Ctrl-D on an empty
+//! line ends the session at once.
 //!
 //! The transcript follows the bottom until the user scrolls up: the
 //! wheel when capture is on, PageUp, and PageDown browse; End and a
@@ -51,7 +53,7 @@ use crate::select;
 use crate::terminal::Guard;
 use crate::theme::{Depth, Palette};
 use crate::transcript::{Kind, Transcript};
-use crate::{Options, PROMPT, Submission, TurnFuture};
+use crate::{Options, PROMPT, QUIT_SPAN, Submission, TurnFuture};
 
 /// Shortest span between two frames. Wakes inside the span mark the
 /// interface dirty; the frame timer draws at the deadline. This caps
@@ -183,6 +185,11 @@ struct App {
     approvals: mpsc::UnboundedReceiver<ApprovalRequest>,
     approval_tx: mpsc::UnboundedSender<ApprovalRequest>,
     sigint: Signal,
+    /// Set while the quit hint shows: the deadline for the second
+    /// Ctrl-C. The loop wakes once at it to take the hint down; at
+    /// idle nothing else wakes. The status reads it before each
+    /// frame, so the hint shows exactly while a press would quit.
+    quit_asked: Option<Instant>,
     /// Transcript viewport height from the last frame: the page unit.
     page: u16,
     /// State changed since the last frame.
@@ -220,6 +227,7 @@ impl App {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: 0,
+                quit_hint: false,
             },
             palette: Palette::new(&options.theme, Depth::from_env()),
             mode: Mode::Edit,
@@ -232,6 +240,7 @@ impl App {
             approvals,
             approval_tx,
             sigint,
+            quit_asked: None,
             page: 0,
             dirty: true,
             // Seeded in the past, so the first draw runs at once.
@@ -273,6 +282,16 @@ impl App {
                     None => Action::Exit,
                 },
                 _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => {
+                    Action::None
+                }
+                // A disabled branch still builds its future: the
+                // stand-in deadline is a field read, not a clock call.
+                _ = tokio::time::sleep_until(self.quit_asked.unwrap_or(self.last_draw)),
+                    if self.quit_asked.is_some() =>
+                {
+                    // The span ran out: the hint goes, and the next
+                    // press asks again.
+                    self.withdraw_quit();
                     Action::None
                 }
             };
@@ -524,6 +543,8 @@ impl App {
             }
             Event::Paste(text) => {
                 if matches!(self.mode, Mode::Edit) {
+                    // Text in the box: a press now clears, not quits.
+                    self.withdraw_quit();
                     self.editor.insert_str(&normalize_paste(&text));
                     self.dirty = true;
                 }
@@ -587,6 +608,12 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent, phase: Phase) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Any key but Ctrl-C takes the quit question back: the two
+        // presses must follow each other.
+        if !(ctrl && key.code == KeyCode::Char('c')) {
+            self.withdraw_quit();
+        }
         // The browse keys work at every prompt, the approval question
         // included: the call under question may sit above the window.
         match key.code {
@@ -618,7 +645,6 @@ impl App {
         if matches!(self.mode, Mode::Approval { .. }) {
             return self.approval_key(key);
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
         let newline = key
             .modifiers
@@ -749,15 +775,36 @@ impl App {
         Action::None
     }
 
-    /// The Ctrl-C rules. An external SIGINT lands here too.
+    /// The Ctrl-C rules. An external SIGINT lands here too. At the
+    /// prompt a press clears a box with text. On an empty box it asks
+    /// once — the status shows the hint — and a second press inside
+    /// [`QUIT_SPAN`] ends the session, so a stray press never does.
     fn ctrl_c(&mut self, phase: Phase) -> Action {
         match phase {
             Phase::Idle => {
-                self.editor.take();
                 self.history.reset();
+                if !self.editor.is_empty() {
+                    // A clear, not a press toward the quit. The text's
+                    // arrival withdrew the question already.
+                    self.editor.take();
+                    return Action::None;
+                }
+                if self.quit_asked.is_some_and(|until| Instant::now() < until) {
+                    return Action::Exit;
+                }
+                self.quit_asked = Some(Instant::now() + QUIT_SPAN);
+                self.dirty = true;
                 Action::None
             }
             Phase::Turn => Action::AbortTurn,
+        }
+    }
+
+    /// Take the quit question back: the hint goes with the next
+    /// frame.
+    fn withdraw_quit(&mut self) {
+        if self.quit_asked.take().is_some() {
+            self.dirty = true;
         }
     }
 
@@ -767,6 +814,9 @@ impl App {
         if !self.dirty || Instant::now() < self.last_draw + FRAME {
             return Ok(());
         }
+        // One state, read here: the hint shows while the question
+        // stands.
+        self.status.quit_hint = self.quit_asked.is_some();
         let Self {
             guard,
             transcript,

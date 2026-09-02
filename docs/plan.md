@@ -44,6 +44,7 @@ same flags; docs use `dmz` in examples and `demerzel` in prose.
 dmz                       # interactive session in the current project
 dmz "explain this error"  # one-shot prompt, prints answer, exits
 dmz -c                    # continue the last session in this project
+dmz --session <id>        # continue one session by its id
 dmz --model gpt-…         # model/provider override for this invocation
 dmz doctor                # providers, credentials, tools — presence, not values
 ```

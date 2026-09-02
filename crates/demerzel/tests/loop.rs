@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use demerzel::{AuthPaths, RunConfig, run_one_shot};
+use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, run_one_shot};
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, NoPrompt, Role,
     Session, SessionStore, TurnOutcome, replay,
@@ -474,7 +474,7 @@ async fn one_shot_continue_resumes_the_latest_session() {
     });
 
     run_one_shot(&config, "one".into(), &noop).await.unwrap();
-    config.continue_last = true;
+    config.resume = Resume::Latest;
     run_one_shot(&config, "two".into(), &noop).await.unwrap();
 
     // One session file, holding both turns.
@@ -493,6 +493,83 @@ async fn one_shot_continue_resumes_the_latest_session() {
     let second_body = bed.mock.received()[1].body.to_string();
     assert!(second_body.contains("first"));
     assert!(second_body.contains("one"));
+}
+
+#[tokio::test]
+async fn one_shot_session_resumes_by_id_and_a_missing_id_stops_the_run() {
+    let bed = Bed::start(vec![
+        text_turn("first"),
+        text_turn("second"),
+        text_turn("third"),
+    ])
+    .await;
+    let mut config = RunConfig::new(bed.project.path().to_path_buf());
+    config.model = "test-model".into();
+    config.data_root = Some(bed.data.path().join("store"));
+    config.base_url = Some(bed.mock.url());
+    config.auth = Some(AuthPaths {
+        store: auth_path(bed.data.path()),
+        codex_cli: None,
+    });
+
+    // Two fresh sessions; the first is the older one.
+    run_one_shot(&config, "one".into(), &noop).await.unwrap();
+    run_one_shot(&config, "two".into(), &noop).await.unwrap();
+    let store = SessionStore::at(bed.data.path().join("store"));
+    let mut ids: Vec<String> = std::fs::read_dir(store.sessions_dir(bed.project.path()))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_stem().unwrap().to_string_lossy().into_owned()
+        })
+        .collect();
+    ids.sort();
+    let [older, newer] = ids.as_slice() else {
+        panic!("two sessions, got {ids:?}");
+    };
+
+    // By id: the older session continues, not the latest.
+    config.resume = Resume::Id(older.clone());
+    run_one_shot(&config, "three".into(), &noop).await.unwrap();
+    let third = bed.mock.received()[2].body.to_string();
+    assert!(third.contains("one") && !third.contains("two"), "{third}");
+    let replayed = replay(&store.find(bed.project.path(), older).unwrap().unwrap()).unwrap();
+    assert_eq!(replayed.messages.len(), 4);
+    assert_eq!(
+        store
+            .latest(bed.project.path())
+            .unwrap()
+            .unwrap()
+            .file_stem()
+            .unwrap(),
+        newer.as_str()
+    );
+
+    // The exit line asks which command opens a session: `-c` opens
+    // the latest one only.
+    let runtime = Runtime::new(config.clone()).unwrap();
+    assert!(!runtime.is_latest_session(older));
+    assert!(runtime.is_latest_session(newer));
+
+    // A missing id stops the run at boot: no request goes out. A
+    // path-shaped id is a missing id.
+    for id in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "../../outside", ""] {
+        config.resume = Resume::Id(id.to_string());
+        let error = run_one_shot(&config, "four".into(), &noop)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, RunError::Config(message) if message.contains(id)),
+            "{error}"
+        );
+    }
+    assert_eq!(bed.mock.received().len(), 3);
+    assert_eq!(
+        std::fs::read_dir(store.sessions_dir(bed.project.path()))
+            .unwrap()
+            .count(),
+        2
+    );
 }
 
 /// The measurement seams of the evaluation contract, as the session

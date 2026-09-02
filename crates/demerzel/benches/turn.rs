@@ -103,7 +103,7 @@ impl Bed {
         let settings = demerzel::SessionSettings::from_config(config);
         let (session, history) = self
             .runtime
-            .open_session(config.continue_last, &settings)
+            .open_session(&config.resume, &settings)
             .unwrap();
         let mut engine = self.runtime.engine(session, history, &settings);
         let start = Instant::now();

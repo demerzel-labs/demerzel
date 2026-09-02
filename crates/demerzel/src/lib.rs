@@ -13,7 +13,7 @@ mod preview;
 pub mod repl;
 pub mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
@@ -29,6 +29,21 @@ pub use demerzel_tui::{Theme, Thinking};
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
 pub const READY_MARKER: &str = "demerzel ready";
+
+/// Which session a run opens at its first prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Resume {
+    /// A fresh session.
+    #[default]
+    Fresh,
+    /// The latest session in the project, `-c`. With none, a fresh
+    /// one.
+    Latest,
+    /// The session with this id in the project, `--session <id>`.
+    /// With no such file the run stops at boot with a clear error.
+    Id(String),
+}
 
 /// The session knobs the interfaces own: `/model`, `/effort`, and
 /// `/approval` switch them mid-session, so they travel apart from
@@ -73,8 +88,8 @@ pub struct RunConfig {
     pub provider: String,
     pub model: String,
     pub approval: ApprovalMode,
-    /// Continue the latest session in this project.
-    pub continue_last: bool,
+    /// Which session the first prompt opens.
+    pub resume: Resume,
     /// Session data root override; `None` uses the XDG default.
     pub data_root: Option<PathBuf>,
     /// Endpoint override; `None` uses the Codex default.
@@ -112,7 +127,7 @@ impl RunConfig {
             provider: config::DEFAULT_PROVIDER.to_string(),
             model: openai_codex::DEFAULT_MODEL.to_string(),
             approval: ApprovalMode::ReadOnly,
-            continue_last: false,
+            resume: Resume::Fresh,
             data_root: None,
             base_url: None,
             effort: config::DEFAULT_EFFORT,
@@ -162,6 +177,12 @@ impl Runtime {
             Some(root) => SessionStore::at(root),
             None => SessionStore::open_default()?,
         };
+        // A named session must exist at boot, not at the first
+        // prompt: one stat, and the run stops before the interface
+        // opens or a request goes out.
+        if let Resume::Id(id) = &config.resume {
+            find_session(&store, &config.project_dir, id)?;
+        }
 
         let registry = Registry::full(&config.project_dir);
         let mut read_only_registry = Registry::full(&config.project_dir);
@@ -244,18 +265,24 @@ impl Runtime {
         }
     }
 
-    /// Open the session for this run: the latest one when `resume`
-    /// asks for it and one matches this project, else a fresh one.
-    /// Resume appends a fresh meta record, so the file names the
-    /// model and provider that continue it. The interfaces own the
-    /// session model — `/model` switches it — so it arrives as an
-    /// argument.
+    /// Open the session for this run: the one `resume` names when it
+    /// exists and matches this project, else a fresh one — except
+    /// that a session named by id must exist and match, or the open
+    /// fails. Resume appends a fresh meta record, so the file names
+    /// the model and provider that continue it. The interfaces own
+    /// the session model — `/model` switches it — so it arrives as
+    /// an argument.
     pub fn open_session(
         &self,
-        resume: bool,
+        resume: &Resume,
         settings: &SessionSettings,
     ) -> Result<(Session, Vec<Message>), RunError> {
-        if resume && let Some(path) = self.store.latest(&self.config.project_dir)? {
+        let path = match resume {
+            Resume::Fresh => None,
+            Resume::Latest => self.store.latest(&self.config.project_dir)?,
+            Resume::Id(id) => Some(find_session(&self.store, &self.config.project_dir, id)?),
+        };
+        if let Some(path) = path {
             let (mut session, replay) = Session::resume(&path)?;
             // A hash collision in the project directory name is the
             // only way another project's file lands here; refuse to
@@ -280,6 +307,11 @@ impl Runtime {
                 ))?;
                 return Ok((session, replay.messages));
             }
+            if let Resume::Id(id) = resume {
+                return Err(RunError::Config(format!(
+                    "session `{id}` belongs to another project"
+                )));
+            }
         }
         let session = self.store.create(
             &self.config.project_dir,
@@ -289,6 +321,18 @@ impl Runtime {
             settings.approval,
         )?;
         Ok((session, Vec::new()))
+    }
+
+    /// Whether `id` names the project's latest session, the one `-c`
+    /// opens. The exit line asks at the end of a run, so it names a
+    /// command that opens the session it names; a store it cannot
+    /// read answers no, and the line falls back to the id.
+    pub fn is_latest_session(&self, id: &str) -> bool {
+        self.store
+            .latest(&self.config.project_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|path| path.file_stem().is_some_and(|stem| stem == id))
     }
 
     /// The context window of `model`, in tokens: the
@@ -340,10 +384,18 @@ impl Runtime {
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
         let settings = SessionSettings::from_config(&self.config);
-        let (session, history) = self.open_session(self.config.continue_last, &settings)?;
+        let (session, history) = self.open_session(&self.config.resume, &settings)?;
         let mut engine = self.engine(session, history, &settings);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
+}
+
+/// The session file `id` names in the project, or the clear error
+/// `--session` promises: no file, no run.
+fn find_session(store: &SessionStore, project: &Path, id: &str) -> Result<PathBuf, RunError> {
+    store
+        .find(project, id)?
+        .ok_or_else(|| RunError::Config(format!("no session `{id}` in this project")))
 }
 
 /// Build a runtime and run one prompt. A repeated caller builds one

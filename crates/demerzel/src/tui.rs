@@ -14,14 +14,16 @@ use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, S
 use serde_json::Value;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line, model_note,
+    session_note,
 };
 use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
-use crate::{READY_MARKER, RunConfig, RunError, Runtime, SessionSettings};
+use crate::{READY_MARKER, Resume, RunConfig, RunError, Runtime, SessionSettings};
 
 /// Run the full-screen interface to completion. The caller owns the
-/// tokio runtime.
+/// tokio runtime. A run that opened a session prints the exit line
+/// on stderr after the screen restores, on every exit path.
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
     let mode = config.approval;
@@ -31,7 +33,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let mut options = Options::default();
     options.history_path = config.history_path.clone();
     options.banner = Some(format!(
-        "{} ({mode}) — /help lists the commands; /exit or Ctrl-D ends the session",
+        "{} ({mode}) — /help lists the commands; /exit, Ctrl-D, or Ctrl-C twice ends the session",
         config.model
     ));
     options.model = config.model.clone();
@@ -62,13 +64,18 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         runtime: &runtime,
         engine: None,
         settings: SessionSettings::from_config(config),
-        resume: config.continue_last,
+        resume: config.resume.clone(),
+        opened: None,
         project_dir,
         branch,
     };
-    demerzel_tui::run(&mut driver, options)
-        .await
-        .map_err(RunError::Io)
+    let result = demerzel_tui::run(&mut driver, options).await;
+    // The interface gave the screen back; the line lands on the
+    // shell's own stream, whatever ended the session.
+    if let Some(id) = &driver.opened {
+        eprintln!("{}", exit_line(id, runtime.is_latest_session(id)));
+    }
+    result.map_err(RunError::Io)
 }
 
 struct TuiDriver<'r> {
@@ -79,9 +86,12 @@ struct TuiDriver<'r> {
     /// The session settings: `/model`, `/effort`, and `/approval`
     /// (with Shift-Tab) switch them.
     settings: SessionSettings,
-    /// Whether the next open resumes the latest session. `/new`
-    /// clears it.
-    resume: bool,
+    /// Which session the next open resumes. `/new` makes it a fresh
+    /// one.
+    resume: Resume,
+    /// The id of the last session this run opened, for the exit
+    /// line. `/new` drops the engine, not this.
+    opened: Option<String>,
     /// The project directory, resolved: the branch read walks up
     /// from it.
     project_dir: PathBuf,
@@ -140,7 +150,7 @@ impl Driver for TuiDriver<'_> {
             Some(Effect::Note(note)) => return Submission::Note(note),
             Some(Effect::NewSession) => {
                 self.engine = None;
-                self.resume = false;
+                self.resume = Resume::Fresh;
                 events.session_changed();
                 return Submission::Note(NEW_SESSION_NOTE.to_string());
             }
@@ -204,8 +214,9 @@ impl Driver for TuiDriver<'_> {
                 events.status(patch);
             }
             if self.engine.is_none() {
-                match self.runtime.open_session(self.resume, &self.settings) {
+                match self.runtime.open_session(&self.resume, &self.settings) {
                     Ok((session, history)) => {
+                        self.opened = Some(session.id().to_string());
                         events.session_changed();
                         if !history.is_empty() {
                             events.notice(format!(

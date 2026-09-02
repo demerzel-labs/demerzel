@@ -250,11 +250,44 @@ The full-screen interface has these keys:
 - Shift-Tab cycles the approval mode: `ask`, `auto`, `read-only`,
   and back. While the completion popup is open, Shift-Tab selects
   the previous command instead.
-- Ctrl-C clears the input box. During a turn, Ctrl-C stops the
-  turn. Ctrl-D on an empty input box ends the session.
+- Ctrl-C clears the input box. On an empty input box, Ctrl-C asks
+  once. See Quit and resume. During a turn, Ctrl-C stops the turn.
+  Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
   them again.
 - Ctrl-T opens the newest thinking block and closes it again.
+
+## Quit and resume
+
+Ctrl-C on an empty input box asks once. The status shows `press
+Ctrl-C again to quit` for three seconds. A second press inside that
+span ends the session. Any other key takes the question back. A
+press on a box with text clears the box and asks nothing. Ctrl-D
+and `/exit` end the session at once. The plain interface keeps the
+two-press rule and prints the hint on stderr. There, a press on a
+line with text discards the line and asks too.
+
+An interactive run that opened a session prints one line on stderr
+when it ends. The line comes after the screen restores:
+
+```text
+session 01ARZ3NDEKTSV4RRFFQ69G5FAV · resume with demerzel -c
+```
+
+A run that opened no session prints nothing. A one-shot run prints
+nothing. When a newer session exists in the project, the line names
+`--session <id>` instead of `-c`. The command it names always opens
+this session.
+
+Two flags resume a session. Both look in the current project only:
+
+- `-c`, `--continue` opens the latest session. With none, it opens
+  a fresh one.
+- `--session <id>` opens the session with that id. An id with no
+  file stops the run with an error.
+
+The two flags exclude each other. `/session` shows the open
+session's id and file.
 
 ## Trust rules
 
@@ -294,4 +327,5 @@ interface and set the default back to `true` on the same day.
 `max_model_calls` landed on 2026-08-30, after a code-review
 dogfood hit the fixed limit; the default rose from 32 to 128 on
 the same day. The context segment and `context_window` landed with
-M2.5 step 8e.
+M2.5 step 8e. The two-press quit, the exit line, and `--session`
+landed with M2.5 step 8f.

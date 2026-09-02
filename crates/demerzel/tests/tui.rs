@@ -19,6 +19,9 @@ const READY: &str = "demerzel ready";
 // No trailing space: the frame diff skips cells that stay blank.
 const PROMPT: &str = "❯";
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
+const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
+/// The status after one Ctrl-C on an empty input box.
+const QUIT_HINT: &str = "press Ctrl-C again to quit";
 const CTRL_C: &[u8] = b"\x03";
 const CTRL_D: &[u8] = b"\x04";
 const END: &[u8] = b"\x1b[F";
@@ -36,6 +39,10 @@ const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
+/// One wheel notch down. At the bottom of a short transcript it
+/// changes nothing on screen, but it wakes a draw, and it is not a
+/// key: the quit question stands through it.
+const WHEEL_DOWN: &[u8] = b"\x1b[<65;10;10M";
 /// Mouse reporting mode 1002 — buttons, the wheel, and the pointer
 /// while a button is down — the first sequence capture turns on.
 /// The mode is the only sign of capture a PTY can observe, so the
@@ -339,20 +346,27 @@ impl Pty {
     /// the last match and it. A repaint before this makes the span
     /// the whole screen, so the check covers what is on it.
     fn absent_until(&mut self, marker: &str, until: &str) {
+        self.all_absent_until(&[marker], until);
+    }
+
+    /// [`Pty::absent_until`] for several markers over one span.
+    fn all_absent_until(&mut self, markers: &[&str], until: &str) {
         let from = self.cursor;
         self.wait_for(until);
-        let needle: String = marker.chars().filter(|ch| *ch != ' ').collect();
         let stripped = strip_escapes(&self.seen);
         let haystack: Vec<u8> = stripped
             .iter()
             .copied()
             .filter(|byte| *byte != b' ')
             .collect();
-        assert!(
-            find_after(&haystack[..self.cursor], from, needle.as_bytes()).is_none(),
-            "{marker:?} showed before {until:?}; stripped output: {:?}",
-            String::from_utf8_lossy(&stripped),
-        );
+        for marker in markers {
+            let needle: String = marker.chars().filter(|ch| *ch != ' ').collect();
+            assert!(
+                find_after(&haystack[..self.cursor], from, needle.as_bytes()).is_none(),
+                "{marker:?} showed before {until:?}; stripped output: {:?}",
+                String::from_utf8_lossy(&stripped),
+            );
+        }
     }
 
     fn poll_read(&mut self) {
@@ -381,7 +395,10 @@ impl Pty {
 
     /// Change the window size. The frame diff writes only changed
     /// cells, so an assertion on an in-place update — the status bar —
-    /// needs the full repaint the next draw runs after a resize.
+    /// needs the full repaint the next draw runs after a resize. The
+    /// child has no controlling terminal, so no signal announces the
+    /// change: the next draw sees it, and a key or a wheel notch must
+    /// wake one.
     fn resize(&self, cols: u16, rows: u16) {
         let size = libc::winsize {
             ws_row: rows,
@@ -421,15 +438,22 @@ impl Pty {
     }
 
     /// Wait for a clean exit and return the raw output.
-    fn wait_exit(mut self) -> Vec<u8> {
+    fn wait_exit(self) -> Vec<u8> {
+        let (status, raw) = self.wait_end();
+        assert!(status.success(), "exit status: {status:?}");
+        raw
+    }
+
+    /// Wait for the process to end and return its status and the raw
+    /// output.
+    fn wait_end(mut self) -> (std::process::ExitStatus, Vec<u8>) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             self.poll_read();
             if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success(), "exit status: {status:?}");
                 // Collect what the shutdown path still wrote.
                 self.poll_read();
-                return std::mem::take(&mut self.seen);
+                return (status, std::mem::take(&mut self.seen));
             }
             assert!(Instant::now() < deadline, "the session did not exit");
         }
@@ -578,6 +602,14 @@ fn contains_marker(raw: &[u8], marker: &str) -> bool {
         .filter(|byte| *byte != b' ')
         .collect();
     find_after(&haystack, 0, &needle).is_some()
+}
+
+/// The output after the interface left the alternate screen, with
+/// the escape sequences stripped: where the exit line lands.
+fn after_restore(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw).into_owned();
+    let restore = text.rfind(LEAVE_ALT_SCREEN).expect("leave-alt-screen");
+    String::from_utf8_lossy(&strip_escapes(&text.as_bytes()[restore..])).into_owned()
 }
 
 /// The offset after the first match at or past `from`.
@@ -922,6 +954,159 @@ async fn ctrl_c_aborts_a_turn_and_the_session_continues() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_twice_on_an_empty_box_ends_the_session_with_the_exit_line() {
+    let mock = MockServer::start(vec![text_turn("kept reply")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("kept reply");
+    pty.wait_for("2 cached ·");
+    // A press on a box with text clears the box and asks nothing:
+    // the repaint after the resize shows an empty box and the
+    // segments, not the hint.
+    pty.send(b"draft");
+    pty.wait_for("draft");
+    pty.send(CTRL_C);
+    pty.resize(100, 29);
+    pty.send(WHEEL_DOWN);
+    pty.all_absent_until(&[QUIT_HINT, "draft"], "─ ask ─ effort");
+    // On the empty box the first press asks, on the status; the
+    // second ends the session.
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    let sessions = pty.session_files();
+    pty.send(CTRL_C);
+    let raw = pty.wait_exit();
+
+    // The exit line follows the screen restore and names the open
+    // session, which `-c` resumes.
+    assert_eq!(sessions.len(), 1);
+    let after = after_restore(&raw);
+    assert!(
+        after.contains(&format!(
+            "session {} · resume with demerzel -c",
+            sessions[0]
+        )),
+        "{after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_ctrl_c_times_out_and_the_session_stays() {
+    let mock = MockServer::start(vec![text_turn("still here")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    // Past the span the hint goes, and a press asks again instead of
+    // ending the session.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    pty.resize(100, 29);
+    pty.send(WHEEL_DOWN);
+    pty.absent_until(QUIT_HINT, "─ ask ─ effort");
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    // A typed key takes the question back, and the session goes on.
+    pty.send(b"h");
+    pty.resize(100, 30);
+    pty.send(WHEEL_DOWN);
+    pty.absent_until(QUIT_HINT, "─ ask ─ effort");
+    pty.send(b"ello\r");
+    pty.wait_for("still here");
+    pty.wait_for("2 cached ·");
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    // Ctrl-D prints the exit line too.
+    let after = after_restore(&raw);
+    assert!(after.contains("resume with demerzel -c"), "{after:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pasted_line_takes_the_quit_question_back() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    // Text arrives by paste: the question goes with it. The press
+    // after it clears the box, and the next press asks again — with
+    // the question still standing, it would end the session.
+    pty.send(b"\x1b[200~pasted\x1b[201~");
+    pty.wait_for("pasted");
+    pty.send(CTRL_C);
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.send(CTRL_C);
+    let raw = pty.wait_exit();
+    assert!(!after_restore(&raw).contains("resume with"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_command_keeps_the_exit_line_for_the_opened_session() {
+    let mock = MockServer::start(vec![text_turn("first reply")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("first reply");
+    pty.wait_for("2 cached ·");
+    pty.send(b"/new\r");
+    pty.wait_for("fresh session");
+    let sessions = pty.session_files();
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.send(CTRL_C);
+    let raw = pty.wait_exit();
+
+    // The run opened one session and dropped it; the line still
+    // names it, and `-c` opens it.
+    assert_eq!(sessions.len(), 1);
+    let after = after_restore(&raw);
+    assert!(
+        after.contains(&format!(
+            "session {} · resume with demerzel -c",
+            sessions[0]
+        )),
+        "{after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_session_id_stops_the_run_before_the_screen_opens() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let pty = Pty::spawn(&mock.url(), &["--session", id]);
+    let (status, raw) = pty.wait_end();
+
+    assert!(!status.success(), "exit status: {status:?}");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.contains(id), "{text:?}");
+    assert!(!text.contains(READY), "{text:?}");
+    assert!(!text.contains(ENTER_ALT_SCREEN), "{text:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_with_no_session_quits_on_two_presses_and_prints_no_exit_line() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.send(CTRL_C);
+    let sessions = pty.session_files();
+    let raw = pty.wait_exit();
+
+    assert!(sessions.is_empty());
+    let after = after_restore(&raw);
+    assert!(!after.contains("resume with"), "{after:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_plain_flag_keeps_the_line_interface() {
     let mock = MockServer::start(vec![text_turn("plain reply")], Vec::new()).await;
     let mut pty = Pty::spawn(&mock.url(), &["--plain"]);
@@ -940,6 +1125,37 @@ async fn the_plain_flag_keeps_the_line_interface() {
     assert!(
         !text.contains(ENTER_ALT_SCREEN),
         "--plain must not switch screens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_quits_on_two_presses_with_the_exit_line() {
+    let mock = MockServer::start(vec![text_turn("plain reply")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &["--plain"]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("plain reply");
+    pty.wait_for(PROMPT);
+    // The first press discards the typed line and asks, on stderr;
+    // the second ends the session.
+    pty.send(b"draft");
+    pty.wait_for("draft");
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.wait_for(PROMPT);
+    let sessions = pty.session_files();
+    pty.send(CTRL_C);
+    let raw = pty.wait_exit();
+
+    assert_eq!(sessions.len(), 1);
+    let text = String::from_utf8_lossy(&strip_escapes(&raw)).into_owned();
+    assert!(
+        text.contains(&format!(
+            "session {} · resume with demerzel -c",
+            sessions[0]
+        )),
+        "{text:?}"
     );
 }
 
