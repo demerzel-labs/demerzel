@@ -297,9 +297,10 @@ session's id and file.
 
 `DEMERZEL_LOG=<level>` turns the debug trace on for one run. The
 levels are `error`, `warn`, `info`, `debug`, and `trace`. The
-variable has no config key and no flag: a diagnostic is a variable.
-An unset or empty variable turns the trace off. A value that is not
-a level stops the run with an error.
+variable has no config key and no flag: a diagnostic switch belongs
+in the environment, not in a config file. An unset or empty variable
+turns the trace off. A value that is not a level stops the run with
+an error.
 
 The trace covers a session run: a one-shot prompt, the plain
 interface, and the full screen. `doctor` and `login` write no
@@ -314,25 +315,29 @@ the user owns the `logs` directory.
 
 Each line holds one event: `<time> <LEVEL> <target> <message>`. The
 time is RFC 3339 UTC at millisecond precision. A message never spans
-lines. A line at `info` or above reaches the disk as it lands. The
+lines. A line at `info` or above leaves the buffer as it lands. The
 file holds the harness's own events only, not a dependency's.
 
-Each level adds events:
+Each level adds events. At `info`:
 
-- `info`: the session create and resume, with the id and the path.
-  Each model call, with the provider, the model, the effort, the
-  stop reason, the duration, and the usage. Each request attempt
-  that got an answer, with its HTTP status and the endpoint's
-  request id. The stream's terminal event, with its reason or its
-  message. Each retry, with its delay and its cause. Each tool
-  call, with the name, the duration, the output size, the
-  truncation flag, and the tool's summary line; for `bash` the
-  summary carries the exit code. Each approval decision. Each turn
-  outcome.
-- `debug`: the request body size, the SSE event types with their
-  counts, and a token refresh.
-- `trace`: the request body in full, every SSE payload in full, and
-  the conversation itself, message by message.
+- The session create and resume, with the id and the path.
+- Each model call, with the provider, the model, the effort, the
+  stop reason, the duration, and the usage.
+- Each request attempt that got an answer, with its HTTP status and
+  the endpoint's request id.
+- The stream's terminal event, with its reason or its message.
+- Each retry, with its delay and its cause, and a token refresh
+  after a 401.
+- Each tool call, with the name, the duration, the output size, the
+  truncation flag, and the tool's summary line. For `bash` the
+  summary carries the exit code.
+- Each approval decision.
+- Each turn outcome.
+
+At `debug`: the request body size, the SSE event types with their
+counts, and the steps of a token refresh. At `trace`: the request
+body in full, every SSE payload in full, and the conversation
+itself, message by message.
 
 The trace never holds the harness's own credentials: no bearer
 token, no API key, no auth-store content, at any level. A token

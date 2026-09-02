@@ -322,6 +322,18 @@ mod tests {
             serde_json::to_value(ApprovalDecision::AskUser).unwrap(),
             serde_json::json!("ask_user")
         );
+        // The decision's name is its serialized form, for every
+        // variant: the record and the trace spell it the same.
+        for decision in [
+            ApprovalDecision::Allow,
+            ApprovalDecision::AskUser,
+            ApprovalDecision::Deny,
+        ] {
+            assert_eq!(
+                serde_json::to_value(decision).unwrap(),
+                serde_json::json!(decision.as_str())
+            );
+        }
     }
 
     #[test]

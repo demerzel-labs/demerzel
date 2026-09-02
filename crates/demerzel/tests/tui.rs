@@ -2013,6 +2013,9 @@ async fn a_theme_name_with_no_theme_stops_the_run() {
         }
         assert!(Instant::now() < deadline, "the run did not stop");
     };
+    // Collect what the exit path wrote after the last poll; the
+    // status can land before the tail crosses the PTY.
+    pty.poll_read();
     assert!(!status.success());
     let text = String::from_utf8_lossy(&pty.seen);
     assert!(

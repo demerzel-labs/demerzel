@@ -354,7 +354,9 @@ async fn retries_a_server_error_with_backoff() {
 
 /// A `log` sink that keeps every line, so a test can read what the
 /// adapter would write to the debug trace. One per test binary:
-/// the facade takes one logger, and the tests share it.
+/// the facade takes one logger, and the tests share it, so the
+/// buffer holds the lines of every test that ran before the read
+/// and a scan over it covers them all.
 struct Capture(std::sync::Mutex<Vec<String>>);
 
 static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));

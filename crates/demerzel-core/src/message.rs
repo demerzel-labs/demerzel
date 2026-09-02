@@ -183,4 +183,17 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(Role::User).unwrap(), json!("user"));
     }
+
+    #[test]
+    fn a_stop_reason_name_is_its_serialized_form() {
+        for stop in [
+            StopReason::EndTurn,
+            StopReason::ToolUse,
+            StopReason::MaxTokens,
+            StopReason::Refusal,
+            StopReason::Aborted,
+        ] {
+            assert_eq!(serde_json::to_value(stop).unwrap(), json!(stop.as_str()));
+        }
+    }
 }

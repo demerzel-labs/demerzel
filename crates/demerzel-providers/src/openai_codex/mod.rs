@@ -96,10 +96,11 @@ impl Provider for OpenAiCodex {
     }
 
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
-        // Build the wire body eagerly and drop the request. Serialized once, in place of the JSON tree: one packed copy
-        // of the history lives across the round trip, plus the bytes
-        // the client holds for the attempt in flight. The trace reads
-        // the size and the body from the same bytes.
+        // Build the wire body eagerly and drop the request. Serialized
+        // once, in place of the JSON tree: one packed copy of the
+        // history lives across the round trip, plus the bytes the
+        // client holds for the attempt in flight. The trace reads the
+        // size and the body from the same bytes.
         let body = serde_json::to_vec(&build_body(&request, self.config.reasoning.as_ref()))
             .expect("a JSON value serializes");
         drop(request);
