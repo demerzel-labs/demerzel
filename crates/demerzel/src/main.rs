@@ -145,9 +145,7 @@ fn main() {
     }
 
     // A one-shot run has no ready marker: the path line comes first.
-    if let Some(path) = trace::path() {
-        eprintln!("{}", trace::path_line(path));
-    }
+    trace::announce();
     let prompt = cli.prompt.expect("checked above");
     let max_model_calls = config.max_model_calls;
     let outcome = runtime.block_on(async {
@@ -203,8 +201,13 @@ fn main() {
     trace::flush();
 }
 
-/// End the process after the debug trace wrote out its buffer.
+/// End the process after the debug trace wrote out its buffer. A
+/// failed boot names the file too, so the trace of a run that never
+/// reached its interface is not a secret.
 fn exit(code: i32) -> ! {
+    if code != 0 {
+        trace::announce();
+    }
     trace::flush();
     std::process::exit(code)
 }

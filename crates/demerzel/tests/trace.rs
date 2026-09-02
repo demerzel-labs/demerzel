@@ -266,6 +266,51 @@ async fn the_debug_level_adds_the_body_size_and_the_event_counts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_names_its_file_and_keeps_the_token_out_at_error_level() {
+    // A 400 ends the turn; the mock's error body echoes the bearer
+    // header, the way a careless proxy can.
+    let mock = MockServer::start(vec![MockResponse::error(400)], Vec::new()).await;
+    let run = one_shot(&mock.url(), Some("error"), "go");
+    assert_eq!(run.output.status.code(), Some(1));
+    // The failed run still names its file.
+    assert!(run.stderr().contains("log file: "), "{}", run.stderr());
+    let log = run.log();
+    // `error` alone holds the failure: the turn's error line with the
+    // status, and nothing from the levels below.
+    let turn = one_line_with(&log, &["turn error", "status 400"]);
+    assert_eq!(level_of(turn), "ERROR");
+    for line in log.lines() {
+        assert_eq!(level_of(line), "ERROR", "{line}");
+    }
+    // The echo lands redacted.
+    assert!(log.contains("[redacted]"), "{log}");
+    assert!(!log.contains(ACCESS_TOKEN), "{log}");
+    // A boot that fails before the interface — here, no credentials
+    // in an empty data directory — names the file too.
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let dirs = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_demerzel"));
+    command
+        .arg("go")
+        .args(["--base-url", &mock.url()])
+        .current_dir(dirs.path())
+        .env("HOME", dirs.path())
+        .env("XDG_CONFIG_HOME", dirs.path().join("config"))
+        .env("XDG_DATA_HOME", dirs.path().join("data"))
+        .env("DEMERZEL_LOG", "info")
+        .env_remove("ANTHROPIC_API_KEY");
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("log file: "), "{stderr}");
+    let logs: Vec<_> = std::fs::read_dir(dirs.path().join("data/demerzel/logs"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(logs.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unset_variable_writes_nothing() {
     let mock = MockServer::start(vec![codex::text_turn("quiet")], Vec::new()).await;
     let run = one_shot(&mock.url(), None, "go");

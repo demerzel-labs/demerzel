@@ -327,19 +327,28 @@ impl<'a> Engine<'a> {
         let result = self.run_turn(text, sink, approver).await;
         let timing = Timing::new(at, started.elapsed());
         match &result {
+            // The record first, the line second: a line that says
+            // completed must not stand over a file that does not.
             Ok(outcome) => {
+                if let Err(error) = self.session.append_turn(outcome.as_str(), None, timing) {
+                    log::error!(
+                        "turn {} recorded no turn record: session={error}",
+                        outcome.as_str()
+                    );
+                    return Err(error.into());
+                }
                 log::info!(
                     "turn {} duration_ms={}",
                     outcome.as_str(),
                     timing.duration_ms()
                 );
-                self.session.append_turn(outcome.as_str(), None, timing)?;
             }
             Err(EngineError::Provider(error)) => {
                 let message = error.to_string();
-                log::warn!(
-                    "turn error duration_ms={} error={message}",
-                    timing.duration_ms()
+                log::error!(
+                    "turn error duration_ms={} error={}",
+                    timing.duration_ms(),
+                    capped(&message, MAX_TURN_ERROR_BYTES)
                 );
                 let _ = self.session.append_turn(
                     "error",
@@ -401,10 +410,11 @@ impl<'a> Engine<'a> {
                 Err(error) => {
                     log::warn!(
                         "model call {calls} failed: provider={} model={} effort={effort} \
-                         duration_ms={} error={error}",
+                         duration_ms={} error={}",
                         self.provider.id(),
                         self.config.model,
-                        timing.duration_ms()
+                        timing.duration_ms(),
+                        capped(&error.to_string(), MAX_TURN_ERROR_BYTES)
                     );
                     return Err(error);
                 }

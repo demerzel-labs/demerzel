@@ -306,19 +306,25 @@ The trace covers a session run: a one-shot prompt, the plain
 interface, and the full screen. `doctor` and `login` write no
 trace. The trace writes one file per run:
 `$XDG_DATA_HOME/demerzel/logs/<run-start>-<pid>.log`. The run start
-is in RFC 3339. The run creates the file at boot. One line on stderr
-names the file: `log file: <path>`. In the interfaces the line
-follows the ready marker. The file is the one sink in every mode,
-because the full-screen interface cannot write to stderr behind the
-alternate screen. The file has mode 0600. The trace removes no file:
-the user owns the `logs` directory.
+is in RFC 3339. The run creates the file at boot; a name that exists
+gets a numbered suffix, so two runs never share a file. One line on
+stderr names the file: `log file: <path>`. In the interfaces the line
+follows the ready marker. A run that stops before its interface
+names the file on its way out. The file is the one sink in every
+mode, because the full-screen interface cannot write to stderr
+behind the alternate screen. The file has mode 0600. The file stops
+at 256 MiB, with a last line that says so. The trace removes no
+file: the user owns the `logs` directory.
 
 Each line holds one event: `<time> <LEVEL> <target> <message>`. The
 time is RFC 3339 UTC at millisecond precision. A message never spans
 lines. A line at `info` or above leaves the buffer as it lands. The
 file holds the harness's own events only, not a dependency's.
 
-Each level adds events. At `info`:
+Each level adds events. At `error`: a turn that ends in a provider
+failure, with the message, and a request that failed on its last
+attempt. At `warn`: a model call that failed, a stream that failed
+or ended early. At `info`:
 
 - The session create and resume, with the id and the path.
 - Each model call, with the provider, the model, the effort, the
@@ -341,7 +347,9 @@ itself, message by message.
 
 The trace never holds the harness's own credentials: no bearer
 token, no API key, no auth-store content, at any level. A token
-refresh logs its status and not the token. The file does hold what
+refresh logs its status and not the token. Server text can echo a
+credential; each adapter redacts its own credential from an error
+body or a failure message before the text becomes an error. The file does hold what
 the session holds: at `info` the head of each `bash` command, and
 at `trace` the whole conversation. That is why the file is mode
 0600.

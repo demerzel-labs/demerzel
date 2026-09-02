@@ -258,9 +258,16 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     if reply.status != 200 {
         let status =
             StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // The body echoes the request's credential header, the way a
+        // careless proxy can: an adapter must redact it.
+        let echo = headers
+            .get("authorization")
+            .or_else(|| headers.get("x-api-key"))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
         let mut response = (
             status,
-            json!({"error": {"message": "scripted error"}}).to_string(),
+            json!({"error": {"message": format!("scripted error for {echo}")}}).to_string(),
         )
             .into_response();
         if let Some(seconds) = reply.retry_after {

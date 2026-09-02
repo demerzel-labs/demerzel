@@ -450,6 +450,26 @@ async fn refreshes_once_on_401_and_persists_the_new_token() {
 }
 
 #[tokio::test]
+async fn a_server_echo_of_the_token_is_redacted_from_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // The mock's error body echoes the bearer header, the way a
+    // careless proxy can; a 400 does not retry, so the body becomes
+    // the error text the engine records and logs.
+    let mock = MockServer::start(vec![MockResponse::error(400)], vec![]).await;
+    let provider = provider_for(&mock, write_store(dir.path(), "token-1"));
+
+    let error = provider
+        .stream(request(Vec::new(), Vec::new()))
+        .await
+        .err()
+        .expect("a 400 fails the call");
+    let text = error.to_string();
+    assert!(text.contains("status 400"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(!text.contains("token-1"), "{text}");
+}
+
+#[tokio::test]
 async fn gives_up_after_max_attempts_on_rate_limits() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockServer::start(

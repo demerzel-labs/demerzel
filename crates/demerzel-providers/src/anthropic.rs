@@ -12,7 +12,7 @@ use std::time::Duration;
 use demerzel_core::{ContentBlock, Effort, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
-use crate::retry::{backoff, request_id, retry_after, retry_delay};
+use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
 use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -169,7 +169,7 @@ impl Provider for Anthropic {
                     Err(error) => {
                         attempt += 1;
                         if attempt >= max_attempts {
-                            log::warn!(
+                            log::error!(
                                 "request failed after {attempt} of {max_attempts} attempts: \
                                  network error: {error}"
                             );
@@ -206,7 +206,7 @@ impl Provider for Anthropic {
                         if status.as_u16() == 429 || status.is_server_error() {
                             attempt += 1;
                             if attempt >= max_attempts {
-                                log::warn!(
+                                log::error!(
                                     "request failed after {attempt} of {max_attempts} attempts: \
                                      status {}",
                                     status.as_u16()
@@ -229,14 +229,21 @@ impl Provider for Anthropic {
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        let text = response.text().await.unwrap_or_default();
+                        // The body is the server's text; it must not
+                        // echo the key into the record.
+                        let text =
+                            redact(&response.text().await.unwrap_or_default(), &self.api_key);
                         return Err(ProviderError::InvalidRequest(format!(
                             "status {status}: {text}"
                         )));
                     }
                 }
             };
-            Ok(spawn_event_stream(response, StreamState::default()))
+            let state = StreamState {
+                secret: self.api_key.clone(),
+                ..StreamState::default()
+            };
+            Ok(spawn_event_stream(response, state))
         })
     }
 }
@@ -404,6 +411,9 @@ struct StreamState {
     usage: Usage,
     terminal: bool,
     counts: EventCounts,
+    /// The request's API key, so a failure message that echoes it is
+    /// redacted before it becomes an error.
+    secret: String,
 }
 
 impl PayloadMapper for StreamState {
@@ -417,6 +427,10 @@ impl PayloadMapper for StreamState {
 
     fn eof_error(&self) -> ProviderError {
         ProviderError::Protocol("stream ended before message_stop".to_string())
+    }
+
+    fn counts(&self) -> &EventCounts {
+        &self.counts
     }
 }
 
@@ -612,7 +626,6 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "message_stop" => {
             state.terminal = true;
-            state.counts.report();
             let stop = state.stop.unwrap_or(if state.saw_tool_call {
                 StopReason::ToolUse
             } else {
@@ -626,16 +639,18 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "error" => {
             state.terminal = true;
-            state.counts.report();
             let error = &value["error"];
-            let message = error["message"].as_str().unwrap_or("error event");
+            let message = redact(
+                error["message"].as_str().unwrap_or("error event"),
+                &state.secret,
+            );
             log::warn!(
                 "stream failed: error type={} message={message}",
                 error["type"].as_str().unwrap_or("-")
             );
             let failure = match error["type"].as_str().unwrap_or("") {
                 "rate_limit_error" => ProviderError::RateLimited { retry_after: None },
-                _ => ProviderError::Server(message.to_string()),
+                _ => ProviderError::Server(message),
             };
             vec![Err(failure)]
         }

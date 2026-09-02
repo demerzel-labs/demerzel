@@ -12,7 +12,7 @@ use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
 use crate::auth::AuthStore;
-use crate::retry::{backoff, request_id, retry_after, retry_delay};
+use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
 use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -111,7 +111,7 @@ impl Provider for OpenAiCodex {
             log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut refreshed = false;
             let mut attempt: u32 = 0;
-            let response = loop {
+            let (response, token) = loop {
                 let (token, account_id) = {
                     let mut store = self.auth.lock().await;
                     let creds = store.ensure()?;
@@ -132,7 +132,7 @@ impl Provider for OpenAiCodex {
                     Err(error) => {
                         attempt += 1;
                         if attempt >= max_attempts {
-                            log::warn!(
+                            log::error!(
                                 "request failed after {attempt} of {max_attempts} attempts: \
                                  network error: {error}"
                             );
@@ -156,7 +156,7 @@ impl Provider for OpenAiCodex {
                             request_id(&response)
                         );
                         if status.is_success() {
-                            break response;
+                            break (response, token);
                         }
                         if status.as_u16() == 401 {
                             if refreshed {
@@ -172,7 +172,7 @@ impl Provider for OpenAiCodex {
                         if status.as_u16() == 429 || status.is_server_error() {
                             attempt += 1;
                             if attempt >= max_attempts {
-                                log::warn!(
+                                log::error!(
                                     "request failed after {attempt} of {max_attempts} attempts: \
                                      status {}",
                                     status.as_u16()
@@ -195,14 +195,20 @@ impl Provider for OpenAiCodex {
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        let text = response.text().await.unwrap_or_default();
+                        // The body is the server's text; it must not
+                        // echo the token into the record.
+                        let text = redact(&response.text().await.unwrap_or_default(), &token);
                         return Err(ProviderError::InvalidRequest(format!(
                             "status {status}: {text}"
                         )));
                     }
                 }
             };
-            Ok(spawn_event_stream(response, StreamState::default()))
+            let state = StreamState {
+                secret: token,
+                ..StreamState::default()
+            };
+            Ok(spawn_event_stream(response, state))
         })
     }
 }
@@ -308,6 +314,9 @@ struct StreamState {
     /// A reasoning item opened; the next one starts a paragraph.
     saw_reasoning: bool,
     counts: EventCounts,
+    /// The request's bearer token, so a failure message that echoes
+    /// it is redacted before it becomes an error.
+    secret: String,
 }
 
 impl PayloadMapper for StreamState {
@@ -321,6 +330,10 @@ impl PayloadMapper for StreamState {
 
     fn eof_error(&self) -> ProviderError {
         ProviderError::Protocol("stream ended before response.completed".to_string())
+    }
+
+    fn counts(&self) -> &EventCounts {
+        &self.counts
     }
 }
 
@@ -430,7 +443,6 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.completed" => {
             state.terminal = true;
-            state.counts.report();
             log::info!("stream ended: response.completed");
             let stop = if state.saw_tool_call {
                 StopReason::ToolUse
@@ -444,7 +456,6 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.incomplete" => {
             state.terminal = true;
-            state.counts.report();
             log::info!(
                 "stream ended: response.incomplete reason={}",
                 value["response"]["incomplete_details"]["reason"]
@@ -461,9 +472,11 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "response.failed" => {
             state.terminal = true;
-            state.counts.report();
             let error = &value["response"]["error"];
-            let message = error["message"].as_str().unwrap_or("response.failed");
+            let message = redact(
+                error["message"].as_str().unwrap_or("response.failed"),
+                &state.secret,
+            );
             log::warn!(
                 "stream failed: response.failed code={} message={message}",
                 error["code"].as_str().unwrap_or("-")
@@ -471,7 +484,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             let failure = if error["code"] == "rate_limit_exceeded" {
                 ProviderError::RateLimited { retry_after: None }
             } else {
-                ProviderError::Server(message.to_string())
+                ProviderError::Server(message)
             };
             vec![Err(failure)]
         }

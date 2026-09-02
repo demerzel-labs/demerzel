@@ -21,6 +21,10 @@
 //! flush as they land; `debug` and `trace` lines buffer, and
 //! [`flush`] empties the buffer at exit and on a panic.
 //!
+//! Every run gets a fresh file: `create_new` refuses a name that
+//! exists, so a reused pid inside one second gets a numbered suffix.
+//! The file stops at [`MAX_FILE_BYTES`]; a last line says so.
+//!
 //! The file is mode 0600: at `trace` it holds the request bodies and
 //! the conversation, and at `info` a tool summary holds the head of
 //! a command. It never holds the harness's own credentials — no
@@ -33,6 +37,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -49,7 +54,16 @@ const LEVEL_NAMES: &str = "error, warn, info, debug, trace";
 /// these records and drops every other crate's.
 const OWN_TARGETS: &str = "demerzel";
 
+/// The most one file takes. At `trace` every model call writes the
+/// whole history again, so a long session grows near-quadratically;
+/// past the cap the sink writes one last line and drops the rest.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 static SINK: OnceLock<FileSink> = OnceLock::new();
+
+/// Set once the path line went to stderr, so every exit path can
+/// name the file and none names it twice.
+static ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
 /// The file sink: one line per event, flushed per line at `info` and
 /// above. The lock serializes writers; the engine and the interfaces
@@ -57,7 +71,15 @@ static SINK: OnceLock<FileSink> = OnceLock::new();
 struct FileSink {
     level: LevelFilter,
     path: PathBuf,
-    file: Mutex<BufWriter<File>>,
+    file: Mutex<Output>,
+}
+
+/// The open file with its byte count, behind the sink's lock.
+struct Output {
+    writer: BufWriter<File>,
+    written: u64,
+    /// The cap was hit; nothing more is written.
+    capped: bool,
 }
 
 impl Log for FileSink {
@@ -75,24 +97,43 @@ impl Log for FileSink {
             record.target(),
             record.args(),
         );
-        let mut file = self
+        let mut output = self
             .file
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        if output.capped {
+            return;
+        }
         // A write failure has nowhere to report; the trace is a
         // diagnostic, and the run goes on without it.
-        let _ = file.write_all(line.as_bytes());
+        let _ = output.writer.write_all(line.as_bytes());
+        output.written += line.len() as u64;
+        if output.written >= MAX_FILE_BYTES {
+            output.capped = true;
+            let last = format_line(
+                SystemTime::now(),
+                Level::Warn,
+                "demerzel",
+                &format_args!(
+                    "trace cap reached at {} bytes; later events are dropped",
+                    output.written
+                ),
+            );
+            let _ = output.writer.write_all(last.as_bytes());
+            let _ = output.writer.flush();
+            return;
+        }
         if record.level() <= Level::Info {
-            let _ = file.flush();
+            let _ = output.writer.flush();
         }
     }
 
     fn flush(&self) {
-        let mut file = self
+        let mut output = self
             .file
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _ = file.flush();
+        let _ = output.writer.flush();
     }
 }
 
@@ -152,25 +193,44 @@ pub fn init() -> Result<Option<PathBuf>, String> {
         .join("logs");
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
-    let path = dir.join(format!(
-        "{}-{}.log",
+    // A fresh file every run: `create_new` refuses a name that exists,
+    // so a reused pid inside one second gets a suffix instead of a
+    // merged file, and an old file's mode never carries over.
+    let stem = format!(
+        "{}-{}",
         humantime::format_rfc3339_seconds(SystemTime::now()),
         std::process::id()
-    ));
+    );
     let mut options = OpenOptions::new();
-    options.create(true).append(true);
+    options.create_new(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let file = options
-        .open(&path)
-        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let (path, file) = (1u32..)
+        .map(|attempt| {
+            let name = if attempt == 1 {
+                format!("{stem}.log")
+            } else {
+                format!("{stem}-{attempt}.log")
+            };
+            dir.join(name)
+        })
+        .find_map(|path| match options.open(&path) {
+            Ok(file) => Some(Ok((path, file))),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+            Err(error) => Some(Err(format!("cannot open {}: {error}", path.display()))),
+        })
+        .expect("an unbounded name sequence finds a free name")?;
     let sink = FileSink {
         level,
         path: path.clone(),
-        file: Mutex::new(BufWriter::new(file)),
+        file: Mutex::new(Output {
+            writer: BufWriter::new(file),
+            written: 0,
+            capped: false,
+        }),
     };
     if SINK.set(sink).is_err() {
         return Err("the debug trace is already open".to_string());
@@ -203,6 +263,17 @@ pub fn path() -> Option<&'static Path> {
 /// after the ready marker; a one-shot run prints it first.
 pub fn path_line(path: &Path) -> String {
     format!("log file: {}", path.display())
+}
+
+/// Print the path line once. The interfaces call it after the ready
+/// marker, a one-shot run first, and a failed boot on its way out, so
+/// a run that never reached its interface still names its file.
+pub fn announce() {
+    if let Some(path) = path()
+        && !ANNOUNCED.swap(true, Ordering::Relaxed)
+    {
+        eprintln!("{}", path_line(path));
+    }
 }
 
 /// Write out the buffered `debug` and `trace` lines. Call it before

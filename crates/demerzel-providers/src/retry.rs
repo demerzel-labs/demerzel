@@ -2,6 +2,16 @@
 
 use std::time::Duration;
 
+/// `text` with every copy of `secret` replaced by `[redacted]`. Server
+/// text — an error body, a failure message — can echo the request's
+/// own credential; it must not reach the session file or the trace.
+pub(crate) fn redact(text: &str, secret: &str) -> String {
+    if secret.is_empty() || !text.contains(secret) {
+        return text.to_string();
+    }
+    text.replace(secret, "[redacted]")
+}
+
 /// The endpoint's request id for one response, for the debug trace:
 /// `x-request-id` or `request-id`, whichever the endpoint sent, or
 /// `-` when neither came back.

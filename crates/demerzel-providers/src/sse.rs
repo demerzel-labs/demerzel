@@ -60,6 +60,10 @@ pub(crate) trait PayloadMapper: Send + 'static {
 
     /// The error for a stream that ends before the terminal event.
     fn eof_error(&self) -> ProviderError;
+
+    /// The per-type event counts, reported when the stream ends by
+    /// any path: the terminal event, an early end, a network failure.
+    fn counts(&self) -> &EventCounts;
 }
 
 struct ChannelStream(tokio::sync::mpsc::Receiver<Result<StreamEvent, ProviderError>>);
@@ -98,12 +102,14 @@ pub(crate) fn spawn_event_stream(
                             }
                         }
                         if mapper.terminal() {
+                            mapper.counts().report();
                             return;
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(error) => {
+                    mapper.counts().report();
                     log::warn!("stream failed: network error: {error}");
                     let _ = tx
                         .send(Err(ProviderError::Network(error.to_string())))
@@ -113,6 +119,7 @@ pub(crate) fn spawn_event_stream(
             }
         }
         if !mapper.terminal() {
+            mapper.counts().report();
             log::warn!("stream ended before the terminal event");
             let _ = tx.send(Err(mapper.eof_error())).await;
         }
