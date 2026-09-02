@@ -14,7 +14,8 @@ use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, S
 use serde_json::Value;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line, model_note,
+    session_note,
 };
 use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
@@ -64,14 +65,15 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         engine: None,
         settings: SessionSettings::from_config(config),
         resume: config.resume.clone(),
+        opened: None,
         project_dir,
         branch,
     };
     let result = demerzel_tui::run(&mut driver, options).await;
     // The interface gave the screen back; the line lands on the
     // shell's own stream, whatever ended the session.
-    if let Some(engine) = &driver.engine {
-        eprintln!("{}", runtime.exit_line(engine.session()));
+    if let Some(id) = &driver.opened {
+        eprintln!("{}", exit_line(id, runtime.is_latest_session(id)));
     }
     result.map_err(RunError::Io)
 }
@@ -87,6 +89,9 @@ struct TuiDriver<'r> {
     /// Which session the next open resumes. `/new` makes it a fresh
     /// one.
     resume: Resume,
+    /// The id of the last session this run opened, for the exit
+    /// line. `/new` drops the engine, not this.
+    opened: Option<String>,
     /// The project directory, resolved: the branch read walks up
     /// from it.
     project_dir: PathBuf,
@@ -211,6 +216,7 @@ impl Driver for TuiDriver<'_> {
             if self.engine.is_none() {
                 match self.runtime.open_session(&self.resume, &self.settings) {
                     Ok((session, history)) => {
+                        self.opened = Some(session.id().to_string());
                         events.session_changed();
                         if !history.is_empty() {
                             events.notice(format!(

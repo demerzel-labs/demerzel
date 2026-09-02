@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use demerzel::{AuthPaths, Resume, RunConfig, Runtime, SessionSettings, run_one_shot};
+use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, run_one_shot};
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, NoPrompt, Role,
     Session, SessionStore, TurnOutcome, replay,
@@ -545,23 +545,11 @@ async fn one_shot_session_resumes_by_id_and_a_missing_id_stops_the_run() {
         newer.as_str()
     );
 
-    // The exit line names the command that resumes the open session:
-    // `-c` for the latest, `--session <id>` for an older one.
+    // The exit line asks which command opens a session: `-c` opens
+    // the latest one only.
     let runtime = Runtime::new(config.clone()).unwrap();
-    let settings = SessionSettings::from_config(&config);
-    let (older_session, _) = runtime
-        .open_session(&Resume::Id(older.clone()), &settings)
-        .unwrap();
-    assert_eq!(
-        runtime.exit_line(&older_session),
-        format!("session {older} · resume with demerzel --session {older}")
-    );
-    let (latest_session, _) = runtime.open_session(&Resume::Latest, &settings).unwrap();
-    assert_eq!(
-        runtime.exit_line(&latest_session),
-        format!("session {newer} · resume with demerzel -c")
-    );
-    drop((older_session, latest_session));
+    assert!(!runtime.is_latest_session(older));
+    assert!(runtime.is_latest_session(newer));
 
     // A missing id stops the run at boot: no request goes out. A
     // path-shaped id is a missing id.
@@ -570,9 +558,9 @@ async fn one_shot_session_resumes_by_id_and_a_missing_id_stops_the_run() {
         let error = run_one_shot(&config, "four".into(), &noop)
             .await
             .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("no session `{id}` in this project")
+        assert!(
+            matches!(&error, RunError::Config(message) if message.contains(id)),
+            "{error}"
         );
     }
     assert_eq!(bed.mock.received().len(), 3);

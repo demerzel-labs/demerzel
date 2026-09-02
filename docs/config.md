@@ -267,16 +267,17 @@ and `/exit` end the session at once. The plain interface keeps the
 two-press rule and prints the hint on stderr. There, a press on a
 line with text discards the line and asks too.
 
-A run that opened a session prints one line on stderr when it ends.
-The line comes after the screen restores:
+An interactive run that opened a session prints one line on stderr
+when it ends. The line comes after the screen restores:
 
 ```text
 session 01ARZ3NDEKTSV4RRFFQ69G5FAV · resume with demerzel -c
 ```
 
-A run that opened no session prints nothing. When a newer session
-exists in the project, the line names `--session <id>` instead of
-`-c`. The command it names always opens this session.
+A run that opened no session prints nothing. A one-shot run prints
+nothing. When a newer session exists in the project, the line names
+`--session <id>` instead of `-c`. The command it names always opens
+this session.
 
 Two flags resume a session. Both look in the current project only:
 

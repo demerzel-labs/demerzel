@@ -187,7 +187,8 @@ struct App {
     sigint: Signal,
     /// Set while the quit hint shows: the deadline for the second
     /// Ctrl-C. The loop wakes once at it to take the hint down; at
-    /// idle nothing else wakes.
+    /// idle nothing else wakes. The status reads it before each
+    /// frame, so the hint shows exactly while a press would quit.
     quit_asked: Option<Instant>,
     /// Transcript viewport height from the last frame: the page unit.
     page: u16,
@@ -283,12 +284,14 @@ impl App {
                 _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => {
                     Action::None
                 }
-                _ = tokio::time::sleep_until(self.quit_asked.unwrap_or_else(Instant::now)),
+                // A disabled branch still builds its future: the
+                // stand-in deadline is a field read, not a clock call.
+                _ = tokio::time::sleep_until(self.quit_asked.unwrap_or(self.last_draw)),
                     if self.quit_asked.is_some() =>
                 {
                     // The span ran out: the hint goes, and the next
                     // press asks again.
-                    self.disarm_quit();
+                    self.withdraw_quit();
                     Action::None
                 }
             };
@@ -540,6 +543,8 @@ impl App {
             }
             Event::Paste(text) => {
                 if matches!(self.mode, Mode::Edit) {
+                    // Text in the box: a press now clears, not quits.
+                    self.withdraw_quit();
                     self.editor.insert_str(&normalize_paste(&text));
                     self.dirty = true;
                 }
@@ -607,7 +612,7 @@ impl App {
         // Any key but Ctrl-C takes the quit question back: the two
         // presses must follow each other.
         if !(ctrl && key.code == KeyCode::Char('c')) {
-            self.disarm_quit();
+            self.withdraw_quit();
         }
         // The browse keys work at every prompt, the approval question
         // included: the call under question may sit above the window.
@@ -779,24 +784,27 @@ impl App {
             Phase::Idle => {
                 self.history.reset();
                 if !self.editor.is_empty() {
+                    // A clear, not a press toward the quit: the
+                    // question goes with the text.
                     self.editor.take();
+                    self.withdraw_quit();
                     return Action::None;
                 }
                 if self.quit_asked.is_some_and(|until| Instant::now() < until) {
                     return Action::Exit;
                 }
                 self.quit_asked = Some(Instant::now() + QUIT_SPAN);
-                self.status.quit_hint = true;
+                self.dirty = true;
                 Action::None
             }
             Phase::Turn => Action::AbortTurn,
         }
     }
 
-    /// Take the quit question back: the hint goes.
-    fn disarm_quit(&mut self) {
+    /// Take the quit question back: the hint goes with the next
+    /// frame.
+    fn withdraw_quit(&mut self) {
         if self.quit_asked.take().is_some() {
-            self.status.quit_hint = false;
             self.dirty = true;
         }
     }
@@ -807,6 +815,9 @@ impl App {
         if !self.dirty || Instant::now() < self.last_draw + FRAME {
             return Ok(());
         }
+        // One state, read here: the hint shows while the question
+        // stands.
+        self.status.quit_hint = self.quit_asked.is_some();
         let Self {
             guard,
             transcript,

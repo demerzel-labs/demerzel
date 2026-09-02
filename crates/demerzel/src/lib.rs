@@ -32,6 +32,7 @@ pub const READY_MARKER: &str = "demerzel ready";
 
 /// Which session a run opens at its first prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Resume {
     /// A fresh session.
     #[default]
@@ -322,24 +323,16 @@ impl Runtime {
         Ok((session, Vec::new()))
     }
 
-    /// The line an interface prints on stderr when a run with an open
-    /// session ends: the session's id and the command that resumes
-    /// it. `-c` when the session is the project's latest, the common
-    /// case; `--session <id>` when a newer one exists, so the line
-    /// never names a command that opens another session.
-    pub fn exit_line(&self, session: &Session) -> String {
-        let id = session.id();
-        let latest = self
-            .store
+    /// Whether `id` names the project's latest session, the one `-c`
+    /// opens. The exit line asks at the end of a run, so it names a
+    /// command that opens the session it names; a store it cannot
+    /// read answers no, and the line falls back to the id.
+    pub fn is_latest_session(&self, id: &str) -> bool {
+        self.store
             .latest(&self.config.project_dir)
             .ok()
             .flatten()
-            .is_some_and(|path| path.file_stem().is_some_and(|stem| stem == id));
-        if latest {
-            format!("session {id} · resume with demerzel -c")
-        } else {
-            format!("session {id} · resume with demerzel --session {id}")
-        }
+            .is_some_and(|path| path.file_stem().is_some_and(|stem| stem == id))
     }
 
     /// The context window of `model`, in tokens: the

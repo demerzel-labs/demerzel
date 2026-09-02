@@ -26,7 +26,8 @@ use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, model_note, session_note,
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line, model_note,
+    session_note,
 };
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, Resume, RunConfig, RunError, Runtime, SessionSettings};
@@ -392,6 +393,10 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     // press. Any line takes it back. The press discards a typed line
     // too, so a stray press costs the line, never the session.
     let mut quit_asked: Option<Instant> = None;
+    // The id of the last session this run opened, for the exit line.
+    // `/new` drops the engine, not this.
+    let mut opened: Option<String> = None;
+    let mut result = Ok(());
     loop {
         match reader.read(demerzel_tui::PROMPT, true).await {
             ReadOutcome::Line(line) => {
@@ -455,7 +460,14 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = runtime.open_session(&resume, &settings)?;
+                    let (session, history) = match runtime.open_session(&resume, &settings) {
+                        Ok(opened) => opened,
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    };
+                    opened = Some(session.id().to_string());
                     if !history.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
@@ -487,10 +499,10 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     }
     // The line lands after the last prompt, whatever ended the
     // session; a run that opened no session prints nothing.
-    if let Some(engine) = &engine {
-        eprintln!("{}", runtime.exit_line(engine.session()));
+    if let Some(id) = &opened {
+        eprintln!("{}", exit_line(id, runtime.is_latest_session(id)));
     }
-    Ok(())
+    result
 }
 
 /// One user turn. Ctrl-C drops the turn future; the engine and the

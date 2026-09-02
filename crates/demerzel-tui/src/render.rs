@@ -77,9 +77,9 @@ pub(crate) struct Status {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
-    /// One Ctrl-C on an empty box asked whether to quit: the status
-    /// shows [`QUIT_HINT`] alone until the span runs out or a key
-    /// answers.
+    /// One Ctrl-C on an empty box asked whether to quit, and the
+    /// question stands: the status shows [`QUIT_HINT`] alone. The
+    /// loop sets it from its deadline before each frame.
     pub quit_hint: bool,
 }
 

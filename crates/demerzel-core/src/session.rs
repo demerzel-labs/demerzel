@@ -243,11 +243,18 @@ impl SessionStore {
     }
 
     /// The session file with this id in the project, or `None` when
-    /// no file has the id. An id is letters and digits; anything else
-    /// — a path, an empty string — names no file, so a `--session`
-    /// argument cannot reach outside the project's directory.
+    /// no file has the id. An id has the shape `create` mints: 26
+    /// digits and capital letters. Anything else — a path, a
+    /// lowercase spelling, an empty string — names no file, so a
+    /// `--session` argument cannot reach outside the project's
+    /// directory, and a case-insensitive file system answers the
+    /// same as a case-sensitive one.
     pub fn find(&self, project: &Path, id: &str) -> io::Result<Option<PathBuf>> {
-        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        let shaped = id.len() == SESSION_ID_LEN
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase());
+        if !shaped {
             return Ok(None);
         }
         let path = self.sessions_dir(project).join(format!("{id}.jsonl"));
@@ -561,6 +568,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Crockford base32, the ULID alphabet.
 const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// Characters in a session id: 128 bits in base32.
+const SESSION_ID_LEN: usize = 26;
+
 const ENTROPY_MASK: u128 = (1 << 80) - 1;
 
 /// The last issued id as `(millis, entropy)`, so ids stay strictly
@@ -594,8 +604,8 @@ fn new_session_id() -> String {
         (millis, entropy)
     };
     let value = (millis << 80) | entropy;
-    let mut id = String::with_capacity(26);
-    for shift in (0..26).rev() {
+    let mut id = String::with_capacity(SESSION_ID_LEN);
+    for shift in (0..SESSION_ID_LEN).rev() {
         let index = ((value >> (shift * 5)) & 0x1F) as usize;
         id.push(ULID_ALPHABET[index] as char);
     }
@@ -935,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn find_names_one_session_by_id_and_refuses_a_path() {
+    fn find_names_one_session_by_id_and_refuses_every_other_shape() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
@@ -949,19 +959,28 @@ mod tests {
         let session = store
             .create(&project, "p", "m", None, ApprovalMode::Ask)
             .unwrap();
-        let found = store.find(&project, session.id()).unwrap().unwrap();
+        let id = session.id().to_string();
+        let found = store.find(&project, &id).unwrap().unwrap();
         assert_eq!(found, session.path());
         // Not a session id: no file, whatever the path would name.
+        // The planted file sits three levels above the sessions
+        // directory, where a path-shaped id would reach.
         std::fs::write(dir.path().join("outside.jsonl"), "").unwrap();
-        for id in [
+        let lowercase = id.to_ascii_lowercase();
+        let short = &id[..SESSION_ID_LEN - 1];
+        let long = format!("{id}0");
+        for other in [
             "",
-            "../../outside",
+            "../../../outside",
             "../outside",
             ".",
             "a/b",
             "01ARZ3.jsonl",
+            lowercase.as_str(),
+            short,
+            long.as_str(),
         ] {
-            assert!(store.find(&project, id).unwrap().is_none(), "{id:?}");
+            assert!(store.find(&project, other).unwrap().is_none(), "{other:?}");
         }
     }
 
