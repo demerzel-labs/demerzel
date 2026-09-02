@@ -437,6 +437,16 @@ impl Pty {
         stems
     }
 
+    /// The debug-trace files this run wrote, under the data
+    /// directory.
+    fn log_files(&self) -> Vec<std::path::PathBuf> {
+        let logs = self._dirs.path().join("data/demerzel/logs");
+        let Ok(entries) = std::fs::read_dir(&logs) else {
+            return Vec::new();
+        };
+        entries.flatten().map(|entry| entry.path()).collect()
+    }
+
     /// Wait for a clean exit and return the raw output.
     fn wait_exit(self) -> Vec<u8> {
         let (status, raw) = self.wait_end();
@@ -645,6 +655,50 @@ async fn a_tui_session_boots_streams_and_exits_with_the_turn_time_on_the_usage_l
     // The exit path restored the main screen.
     assert!(text.contains("\x1b[?1049l"), "missing leave-alt-screen");
     assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_debug_trace_names_its_file_after_the_marker_and_logs_the_turn() {
+    let mock = MockServer::start(vec![text_turn("traced reply")], Vec::new()).await;
+    let mut pty = Pty::spawn_with_env(&mock.url(), &[], None, None, &[("DEMERZEL_LOG", "info")]);
+
+    pty.wait_for(READY);
+    pty.wait_for("log file:");
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("traced reply");
+    pty.wait_for("2 cached ·");
+    // The turn line flushed with the turn; read the file before the
+    // exit takes the run's directories with it.
+    let logs = pty.log_files();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    let log = std::fs::read_to_string(&logs[0]).unwrap();
+    pty.send(CTRL_D);
+    let raw = pty.wait_exit();
+
+    // The path line sits between the marker and the alternate
+    // screen: the probe still finds the marker first, and the user
+    // sees the path on the main screen.
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let marker = text.find(READY).expect("ready marker");
+    let path_line = text.find("log file:").expect("path line");
+    let alt = text.find(ENTER_ALT_SCREEN).expect("alternate screen");
+    assert!(marker < path_line && path_line < alt, "{text:?}");
+
+    // One file for the run, under the data directory, with the call
+    // line, its duration, and the turn line.
+    let call = log
+        .lines()
+        .find(|line| line.contains("model call 1:"))
+        .unwrap_or_else(|| panic!("no call line in {log}"));
+    assert!(call.contains("duration_ms="), "{call}");
+    assert!(call.contains("stop=end_turn"), "{call}");
+    assert!(
+        log.lines()
+            .any(|line| line.contains("turn completed duration_ms=")),
+        "{log}"
+    );
+    assert!(log.contains("session created id="), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,6 +1,18 @@
-//! Backoff helpers shared by the adapters.
+//! Backoff and response-header helpers shared by the adapters.
 
 use std::time::Duration;
+
+/// The endpoint's request id for one response, for the debug trace:
+/// `x-request-id` or `request-id`, whichever the endpoint sent, or
+/// `-` when neither came back.
+pub(crate) fn request_id(response: &reqwest::Response) -> &str {
+    let headers = response.headers();
+    headers
+        .get("x-request-id")
+        .or_else(|| headers.get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+}
 
 /// Exponential backoff: `base`, `2*base`, `4*base`, ...
 pub(crate) fn backoff(base: Duration, attempt: u32) -> Duration {

@@ -330,6 +330,11 @@ impl SessionStore {
         session.append_meta(&SessionMeta::now(
             project, provider, model, effort, approval,
         ))?;
+        log::info!(
+            "session created id={} path={}",
+            session.id,
+            session.path.display()
+        );
         Ok(session)
     }
 
@@ -585,6 +590,11 @@ impl Session {
             .as_ref()
             .map(|meta| PathBuf::from(&meta.cwd))
             .unwrap_or_default();
+        log::info!(
+            "session resumed id={id} path={} messages={}",
+            path.display(),
+            replay.messages.len()
+        );
         Ok((
             Self {
                 id,

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use demerzel::config::{self, Flags};
 use demerzel::repl::{self, Renderer};
+use demerzel::trace;
 use demerzel::{Resume, RunConfig, Runtime, doctor, login};
 use demerzel_core::{ApprovalMode, Effort, TurnOutcome};
 
@@ -97,27 +98,34 @@ impl Cli {
 
 fn main() {
     let cli = Cli::parse();
+    // The debug trace opens first, so every later step can emit.
+    let log_file = match trace::init() {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("demerzel: {message}");
+            exit(1);
+        }
+    };
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
             eprintln!("demerzel: cannot read the working directory: {error}");
-            std::process::exit(1);
+            exit(1);
         }
     };
     match &cli.command {
-        Some(Command::Doctor) => std::process::exit(doctor::run(&cwd, &cli.flags())),
-        Some(Command::Login { provider }) => {
-            std::process::exit(run_login(&cli, provider.as_deref(), &cwd))
-        }
+        Some(Command::Doctor) => exit(doctor::run(&cwd, &cli.flags())),
+        Some(Command::Login { provider }) => exit(run_login(&cli, provider.as_deref(), &cwd)),
         None => {}
     }
-    let config = match run_config(&cli, cwd) {
+    let mut config = match run_config(&cli, cwd) {
         Ok(config) => config,
         Err(message) => {
             eprintln!("demerzel: {message}");
-            std::process::exit(1);
+            exit(1);
         }
     };
+    config.log_file = log_file;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -132,11 +140,16 @@ fn main() {
         };
         if let Err(error) = result {
             eprintln!("demerzel: {error}");
-            std::process::exit(1);
+            exit(1);
         }
+        trace::flush();
         return;
     }
 
+    // A one-shot run has no ready marker: the path line comes first.
+    if let Some(path) = &config.log_file {
+        eprintln!("{}", trace::path_line(path));
+    }
     let prompt = cli.prompt.expect("checked above");
     let max_model_calls = config.max_model_calls;
     let outcome = runtime.block_on(async {
@@ -160,35 +173,42 @@ fn main() {
     match outcome {
         None => {
             eprintln!("demerzel: aborted");
-            std::process::exit(130);
+            exit(130);
         }
         Some(Ok(TurnOutcome::Completed)) => {}
         Some(Ok(TurnOutcome::MaxTokens)) => {
             eprintln!(
                 "demerzel: the model hit a token limit — the output cap or the context window"
             );
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::CallLimit)) => {
             eprintln!(
                 "demerzel: the turn hit the model-call limit ({max_model_calls} model calls)"
             );
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::Refused)) => {
             eprintln!("demerzel: the model refused the request");
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(TurnOutcome::Aborted)) => {
             eprintln!("demerzel: stopped at an approval prompt");
-            std::process::exit(1);
+            exit(1);
         }
         Some(Ok(_)) => {}
         Some(Err(error)) => {
             eprintln!("demerzel: {error}");
-            std::process::exit(1);
+            exit(1);
         }
     }
+    trace::flush();
+}
+
+/// End the process after the debug trace wrote out its buffer.
+fn exit(code: i32) -> ! {
+    trace::flush();
+    std::process::exit(code)
 }
 
 /// The full screen needs a real terminal on both ends and a terminal
@@ -242,7 +262,7 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
             eprintln!("demerzel: login aborted");
             // Exit while the runtime lives. Dropping it would wait
             // for a parked stdin read that only Enter can end.
-            std::process::exit(130);
+            exit(130);
         }
         Some(Ok(())) => 0,
         Some(Err(error)) => {

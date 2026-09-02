@@ -11,6 +11,7 @@ mod git;
 pub mod login;
 mod preview;
 pub mod repl;
+pub mod trace;
 pub mod tui;
 
 use std::path::{Path, PathBuf};
@@ -116,6 +117,9 @@ pub struct RunConfig {
     pub thinking: Thinking,
     /// The colors of the full-screen interface.
     pub theme: Theme,
+    /// The debug trace's file, when `DEMERZEL_LOG` is set. The
+    /// interfaces name it on stderr after the ready marker.
+    pub log_file: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -139,6 +143,7 @@ impl RunConfig {
             markdown: true,
             thinking: Thinking::default(),
             theme: Theme::default(),
+            log_file: None,
         }
     }
 }

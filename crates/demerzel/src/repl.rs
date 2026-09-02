@@ -379,6 +379,9 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
     let mode = runtime.config().approval;
     // The first line on stderr. The PTY boot probe waits for it.
     eprintln!("{READY_MARKER} — {} ({mode})", runtime.config().model);
+    if let Some(path) = &runtime.config().log_file {
+        eprintln!("{}", crate::trace::path_line(path));
+    }
     eprintln!("Type a prompt. /exit, Ctrl-D, or Ctrl-C twice ends the session.");
 
     // Every session opens on the first submitted prompt — `-c` too —

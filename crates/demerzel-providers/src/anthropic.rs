@@ -6,13 +6,13 @@
 //! The parser still ignores unknown events and fields, so additive
 //! server changes never break a session.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Effort, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Value, json};
 
-use crate::retry::{backoff, retry_after, retry_delay};
+use crate::retry::{backoff, request_id, retry_after, retry_delay};
 use crate::sse::{PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -141,10 +141,16 @@ impl Provider for Anthropic {
     fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
         // Build the wire body eagerly and drop the request, so one
         // copy of the history — not two — lives across the round trip.
-        let body = build_body(&request, &self.config);
+        // Serialized once: every attempt sends the same bytes, and
+        // the trace reads the size and the body from them.
+        let body = serde_json::to_vec(&build_body(&request, &self.config))
+            .expect("a JSON value serializes");
         drop(request);
         Box::pin(async move {
             let url = format!("{}/v1/messages", self.config.base_url);
+            let max_attempts = self.config.max_attempts;
+            log::debug!("request POST {url} body_bytes={}", body.len());
+            log::trace!("request body {}", String::from_utf8_lossy(&body));
             let mut attempt: u32 = 0;
             let response = loop {
                 let builder = self
@@ -153,17 +159,35 @@ impl Provider for Anthropic {
                     .header("x-api-key", &self.api_key)
                     .header("anthropic-version", ANTHROPIC_VERSION)
                     .header("accept", "text/event-stream")
-                    .json(&body);
+                    .header("content-type", "application/json")
+                    .body(body.clone());
                 match builder.send().await {
                     Err(error) => {
                         attempt += 1;
-                        if attempt >= self.config.max_attempts {
+                        if attempt >= max_attempts {
+                            log::warn!(
+                                "request failed after {attempt} of {max_attempts} attempts: \
+                                 network error: {error}"
+                            );
                             return Err(ProviderError::Network(error.to_string()));
                         }
-                        tokio::time::sleep(backoff(self.config.base_delay, attempt)).await;
+                        let delay = backoff(self.config.base_delay, attempt);
+                        log::info!(
+                            "retry in {}ms after network error: {error} (attempt {attempt} of \
+                             {max_attempts})",
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
                     }
                     Ok(response) => {
                         let status = response.status();
+                        log::info!(
+                            "POST /v1/messages attempt {} of {max_attempts}: status {} \
+                             request-id={}",
+                            attempt + 1,
+                            status.as_u16(),
+                            request_id(&response)
+                        );
                         if status.is_success() {
                             break response;
                         }
@@ -177,7 +201,12 @@ impl Provider for Anthropic {
                         }
                         if status.as_u16() == 429 || status.is_server_error() {
                             attempt += 1;
-                            if attempt >= self.config.max_attempts {
+                            if attempt >= max_attempts {
+                                log::warn!(
+                                    "request failed after {attempt} of {max_attempts} attempts: \
+                                     status {}",
+                                    status.as_u16()
+                                );
                                 return Err(if status.as_u16() == 429 {
                                     ProviderError::RateLimited {
                                         retry_after: retry_after(&response),
@@ -187,6 +216,12 @@ impl Provider for Anthropic {
                                 });
                             }
                             let delay = retry_delay(&response, self.config.base_delay, attempt);
+                            log::info!(
+                                "retry in {}ms after status {} (attempt {attempt} of \
+                                 {max_attempts})",
+                                delay.as_millis(),
+                                status.as_u16()
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -364,6 +399,31 @@ struct StreamState {
     stop: Option<StopReason>,
     usage: Usage,
     terminal: bool,
+    /// Events per wire type, for the debug trace. Counted only when
+    /// the trace runs at `debug`.
+    counts: BTreeMap<String, u32>,
+}
+
+impl StreamState {
+    /// Count one wire event for the trace; free when the trace is
+    /// below `debug`.
+    fn count(&mut self, kind: &str) {
+        if log::log_enabled!(log::Level::Debug) {
+            *self.counts.entry(kind.to_string()).or_default() += 1;
+        }
+    }
+
+    /// The per-type counts, one line, at the stream's end.
+    fn report(&self) {
+        if log::log_enabled!(log::Level::Debug) {
+            let counts: Vec<String> = self
+                .counts
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect();
+            log::debug!("sse events {}", counts.join(" "));
+        }
+    }
 }
 
 impl PayloadMapper for StreamState {
@@ -389,7 +449,9 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
             "sse payload is not JSON: {payload}"
         )))];
     };
-    match value["type"].as_str().unwrap_or("") {
+    let kind = value["type"].as_str().unwrap_or("");
+    state.count(kind);
+    match kind {
         "message_start" => {
             let usage = &value["message"]["usage"];
             let count = |field: &str| usage[field].as_u64().unwrap_or(0);
@@ -570,11 +632,13 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "message_stop" => {
             state.terminal = true;
+            state.report();
             let stop = state.stop.unwrap_or(if state.saw_tool_call {
                 StopReason::ToolUse
             } else {
                 StopReason::EndTurn
             });
+            log::info!("stream ended: message_stop stop_reason={stop:?}");
             vec![
                 Ok(StreamEvent::Usage(state.usage)),
                 Ok(StreamEvent::Done(stop)),
@@ -582,8 +646,13 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
         }
         "error" => {
             state.terminal = true;
+            state.report();
             let error = &value["error"];
             let message = error["message"].as_str().unwrap_or("error event");
+            log::warn!(
+                "stream failed: error type={} message={message}",
+                error["type"].as_str().unwrap_or("-")
+            );
             let failure = match error["type"].as_str().unwrap_or("") {
                 "rate_limit_error" => ProviderError::RateLimited { retry_after: None },
                 _ => ProviderError::Server(message.to_string()),

@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use axum::Router;
@@ -123,6 +124,9 @@ struct ServerState {
     /// Cycle the response script forever and record nothing. The
     /// Layer-2 benchmarks run unbounded iteration counts.
     cycle: bool,
+    /// Numbers the `x-request-id` header on every model-route reply,
+    /// the way the live endpoints tag a response.
+    replies: AtomicU64,
 }
 
 /// A running mock server. Dropping the handle stops the server task.
@@ -157,6 +161,7 @@ impl MockServer {
             token_responses: Mutex::new(token_responses.into()),
             received: Mutex::new(Vec::new()),
             cycle,
+            replies: AtomicU64::new(0),
         });
         let app = Router::new()
             .route("/responses", post(handle_responses))
@@ -247,6 +252,7 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock script exhausted").into_response();
     };
+    let request_id = format!("mock-{}", state.replies.fetch_add(1, Ordering::Relaxed) + 1);
     if reply.status != 200 {
         let status =
             StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -261,6 +267,10 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
                 seconds.to_string().parse().expect("digits are a header"),
             );
         }
+        response.headers_mut().insert(
+            "x-request-id",
+            request_id.parse().expect("a plain id is a header"),
+        );
         return response;
     }
     let mut sse = String::new();
@@ -277,6 +287,7 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
+        .header("x-request-id", request_id)
         .body(body)
         .expect("build sse response")
 }

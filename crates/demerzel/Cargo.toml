@@ -18,6 +18,7 @@ demerzel-tools = { workspace = true }
 demerzel-tui = { workspace = true }
 humantime = { workspace = true }
 libc = { workspace = true }
+log = { workspace = true }
 reqwest = { workspace = true }
 rustyline = { workspace = true, features = ["with-file-history"] }
 serde_json = { workspace = true }

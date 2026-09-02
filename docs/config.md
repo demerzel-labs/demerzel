@@ -63,6 +63,7 @@ error = "bright-red"
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
 | `tui.theme` | — | — | `terminal` |
+| — | — | `DEMERZEL_LOG` | unset: no trace |
 
 In one layer, a `[providers.<id>]` value is more specific than the
 top-level key, so it wins. A top-level `model` in a layer that names
@@ -289,6 +290,46 @@ Two flags resume a session. Both look in the current project only:
 The two flags exclude each other. `/session` shows the open
 session's id and file.
 
+## The debug trace
+
+`DEMERZEL_LOG=<level>` turns the debug trace on for one run. The
+levels are `error`, `warn`, `info`, `debug`, and `trace`. The
+variable has no config key and no flag: a diagnostic is a variable.
+An unset or empty variable turns the trace off. A value that is not
+a level stops the run with an error.
+
+The trace writes one file per run:
+`$XDG_DATA_HOME/demerzel/logs/<run-start>-<pid>.log`. The run start
+is in RFC 3339. The run creates the file at boot. One line on stderr
+names the file: `log file: <path>`. In the interfaces the line
+follows the ready marker. The file is the one sink in every mode,
+because the full-screen interface cannot write to stderr behind the
+alternate screen. The file has mode 0600.
+
+Each line holds one event: `<time> <LEVEL> <target> <message>`. The
+time is RFC 3339 UTC at millisecond precision. A message never spans
+lines. A line at `info` or above reaches the disk as it lands.
+
+Each level adds events:
+
+- `info`: the session create and resume, with the id and the path.
+  Each model call, with the provider, the model, the effort, the
+  stop reason, the duration, and the usage. Each request attempt,
+  with its HTTP status and the endpoint's request id. The stream's
+  terminal event, with its reason or its message. Each retry, with
+  its delay and its cause. Each tool call, with the name, the
+  duration, the output size, the truncation flag, and the tool's
+  summary line; for `bash` the summary carries the exit code. Each
+  approval decision. Each turn outcome.
+- `debug`: the request body size, the SSE event types with their
+  counts, and a token refresh.
+- `trace`: the request body in full, every SSE payload in full, and
+  the conversation itself, message by message.
+
+The trace never holds a credential: no bearer token, no API key, no
+auth-store content, at any level. A token refresh logs its status
+and not the token.
+
 ## Trust rules
 
 A project file travels with the repository, so it cannot raise
@@ -328,4 +369,5 @@ interface and set the default back to `true` on the same day.
 dogfood hit the fixed limit; the default rose from 32 to 128 on
 the same day. The context segment and `context_window` landed with
 M2.5 step 8e. The two-press quit, the exit line, and `--session`
-landed with M2.5 step 8f.
+landed with M2.5 step 8f. `DEMERZEL_LOG` landed on 2026-09-01,
+after a dogfood hit a server overload that nothing recorded.

@@ -333,9 +333,11 @@ impl AuthStore {
     /// file is newer; otherwise runs the OAuth refresh flow.
     pub async fn refresh(&mut self, http: &reqwest::Client) -> Result<(), ProviderError> {
         if self.codex_cli_file_is_newer() {
+            log::debug!("token refresh: re-import from the newer login file");
             self.import_from_codex_cli()?;
             return Ok(());
         }
+        log::debug!("token refresh: POST the refresh grant");
         let creds = self
             .creds
             .as_ref()
@@ -351,6 +353,7 @@ impl AuthStore {
             .send()
             .await
             .map_err(|e| ProviderError::Network(format!("token refresh: {e}")))?;
+        log::debug!("token refresh: status {}", response.status().as_u16());
         if !response.status().is_success() {
             return Err(ProviderError::Auth(format!(
                 "token refresh failed with status {}",

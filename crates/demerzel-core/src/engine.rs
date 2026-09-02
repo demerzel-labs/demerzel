@@ -327,16 +327,32 @@ impl<'a> Engine<'a> {
         let result = self.run_turn(text, sink, approver).await;
         let timing = Timing::new(at, started.elapsed());
         match &result {
-            Ok(outcome) => self.session.append_turn(outcome.as_str(), None, timing)?,
+            Ok(outcome) => {
+                log::info!(
+                    "turn {} duration_ms={}",
+                    outcome.as_str(),
+                    timing.duration_ms()
+                );
+                self.session.append_turn(outcome.as_str(), None, timing)?;
+            }
             Err(EngineError::Provider(error)) => {
                 let message = error.to_string();
+                log::warn!(
+                    "turn error duration_ms={} error={message}",
+                    timing.duration_ms()
+                );
                 let _ = self.session.append_turn(
                     "error",
                     Some(capped(&message, MAX_TURN_ERROR_BYTES)),
                     timing,
                 );
             }
-            Err(EngineError::Session(_)) => {}
+            Err(EngineError::Session(error)) => {
+                log::error!(
+                    "turn error duration_ms={} session={error}",
+                    timing.duration_ms()
+                );
+            }
         }
         result
     }
@@ -369,13 +385,51 @@ impl<'a> Engine<'a> {
             // event, retries included: the wall time the user waited.
             let at = SystemTime::now();
             let started = Instant::now();
-            let stream = self.provider.stream(request).await?;
+            let response = async {
+                let stream = self.provider.stream(request).await?;
+                collect_response(stream, sink).await
+            }
+            .await;
+            let timing = Timing::new(at, started.elapsed());
+            let effort = self.config.effort.map_or("default", Effort::as_str);
             let ModelResponse {
                 message,
                 stop,
                 usage,
-            } = collect_response(stream, sink).await?;
-            let timing = Timing::new(at, started.elapsed());
+            } = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    log::warn!(
+                        "model call {calls} failed: provider={} model={} effort={effort} \
+                         duration_ms={} error={error}",
+                        self.provider.id(),
+                        self.config.model,
+                        timing.duration_ms()
+                    );
+                    return Err(error);
+                }
+            };
+            if log::log_enabled!(log::Level::Info) {
+                let tokens = match usage {
+                    Some(usage) => format!(
+                        "input_tokens={} output_tokens={} cache_read_tokens={} \
+                         cache_creation_tokens={}",
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_creation_tokens
+                    ),
+                    None => "usage=none".to_string(),
+                };
+                log::info!(
+                    "model call {calls}: provider={} model={} effort={effort} stop={} \
+                     duration_ms={} {tokens}",
+                    self.provider.id(),
+                    self.config.model,
+                    stop_name(stop),
+                    timing.duration_ms()
+                );
+            }
 
             if !message.content.is_empty() {
                 self.push(message.clone())?;
@@ -485,6 +539,12 @@ impl<'a> Engine<'a> {
     /// Append one message to the session file and the history, in that
     /// order, so the file never lags the prompt.
     fn push(&mut self, message: Message) -> Result<(), EngineError> {
+        // The conversation itself, at trace only: the docs say the
+        // file holds it at that level.
+        log::trace!(
+            "message {}",
+            serde_json::to_string(&message).unwrap_or_default()
+        );
         self.session.append_message(&message)?;
         self.history.push(message);
         Ok(())
@@ -601,6 +661,16 @@ impl<'a> Engine<'a> {
                         ApprovalAnswer::Abort => "abort",
                     };
                     let asked = matches!(decision, ApprovalDecision::AskUser);
+                    log::info!(
+                        "approval {name} call_id={id} mode={} decision={} answer={}",
+                        self.policy.mode,
+                        match decision {
+                            ApprovalDecision::Allow => "allow",
+                            ApprovalDecision::Deny => "deny",
+                            ApprovalDecision::AskUser => "ask_user",
+                        },
+                        if asked { answer_name } else { "-" }
+                    );
                     self.session.append_approval(
                         &name,
                         self.policy.mode,
@@ -639,6 +709,17 @@ impl<'a> Engine<'a> {
                 Verdict::Refuse(message) => ToolOutput::error(message),
             };
             let timing = Timing::new(at, started.elapsed());
+            // The summary carries the tool's own outcome line — for
+            // bash, the exit code.
+            log::info!(
+                "tool {name} call_id={id} duration_ms={} is_error={} output_bytes={} \
+                 truncated={} summary={:?}",
+                timing.duration_ms(),
+                output.is_error,
+                output.content.len(),
+                output.truncated,
+                output.summary.as_deref().unwrap_or("-")
+            );
             sink.event(EngineEvent::ToolEnd {
                 id: &id,
                 name: &name,
@@ -701,6 +782,17 @@ impl ToolBatch {
 /// error can carry a whole server response; the file keeps its head,
 /// so one bad reply cannot grow every later replay.
 const MAX_TURN_ERROR_BYTES: usize = 1024;
+
+/// The stop reason's name for the trace, the session file's spelling.
+fn stop_name(stop: StopReason) -> &'static str {
+    match stop {
+        StopReason::EndTurn => "end_turn",
+        StopReason::ToolUse => "tool_use",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::Refusal => "refusal",
+        StopReason::Aborted => "aborted",
+    }
+}
 
 /// `text` cut to `cap` bytes at a char boundary.
 fn capped(text: &str, cap: usize) -> &str {

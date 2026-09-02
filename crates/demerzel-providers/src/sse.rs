@@ -57,6 +57,7 @@ pub(crate) fn spawn_event_stream(
             match chunk {
                 Ok(Some(bytes)) => {
                     for payload in parser.push(&bytes) {
+                        log::trace!("sse payload {payload}");
                         for event in mapper.map(&payload) {
                             if tx.send(event).await.is_err() {
                                 return;
@@ -69,6 +70,7 @@ pub(crate) fn spawn_event_stream(
                 }
                 Ok(None) => break,
                 Err(error) => {
+                    log::warn!("stream failed: network error: {error}");
                     let _ = tx
                         .send(Err(ProviderError::Network(error.to_string())))
                         .await;
@@ -77,6 +79,7 @@ pub(crate) fn spawn_event_stream(
             }
         }
         if !mapper.terminal() {
+            log::warn!("stream ended before the terminal event");
             let _ = tx.send(Err(mapper.eof_error())).await;
         }
     });
