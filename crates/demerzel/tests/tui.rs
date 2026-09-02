@@ -39,6 +39,10 @@ const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const KEYBOARD_PUSH: &str = "\x1b[>1u";
 /// One wheel notch up, as a terminal reports it with SGR mouse mode.
 const WHEEL_UP: &[u8] = b"\x1b[<64;10;10M";
+/// One wheel notch down. At the bottom of a short transcript it
+/// changes nothing on screen, but it wakes a draw, and it is not a
+/// key: the quit question stands through it.
+const WHEEL_DOWN: &[u8] = b"\x1b[<65;10;10M";
 /// Mouse reporting mode 1002 — buttons, the wheel, and the pointer
 /// while a button is down — the first sequence capture turns on.
 /// The mode is the only sign of capture a PTY can observe, so the
@@ -391,7 +395,10 @@ impl Pty {
 
     /// Change the window size. The frame diff writes only changed
     /// cells, so an assertion on an in-place update — the status bar —
-    /// needs the full repaint the next draw runs after a resize.
+    /// needs the full repaint the next draw runs after a resize. The
+    /// child has no controlling terminal, so no signal announces the
+    /// change: the next draw sees it, and a key or a wheel notch must
+    /// wake one.
     fn resize(&self, cols: u16, rows: u16) {
         let size = libc::winsize {
             ws_row: rows,
@@ -962,6 +969,7 @@ async fn ctrl_c_twice_on_an_empty_box_ends_the_session_with_the_exit_line() {
     pty.wait_for("draft");
     pty.send(CTRL_C);
     pty.resize(100, 29);
+    pty.send(WHEEL_DOWN);
     pty.all_absent_until(&[QUIT_HINT, "draft"], "─ ask ─ effort");
     // On the empty box the first press asks, on the status; the
     // second ends the session.
@@ -996,12 +1004,14 @@ async fn a_lone_ctrl_c_times_out_and_the_session_stays() {
     // ending the session.
     tokio::time::sleep(Duration::from_millis(3500)).await;
     pty.resize(100, 29);
+    pty.send(WHEEL_DOWN);
     pty.absent_until(QUIT_HINT, "─ ask ─ effort");
     pty.send(CTRL_C);
     pty.wait_for(QUIT_HINT);
     // A typed key takes the question back, and the session goes on.
     pty.send(b"h");
     pty.resize(100, 30);
+    pty.send(WHEEL_DOWN);
     pty.absent_until(QUIT_HINT, "─ ask ─ effort");
     pty.send(b"ello\r");
     pty.wait_for("still here");
@@ -1022,16 +1032,12 @@ async fn a_pasted_line_takes_the_quit_question_back() {
     pty.wait_for(PROMPT);
     pty.send(CTRL_C);
     pty.wait_for(QUIT_HINT);
-    // Text arrives by paste: the question goes with it, and a press
-    // now clears the box.
+    // Text arrives by paste: the question goes with it. The press
+    // after it clears the box, and the next press asks again — with
+    // the question still standing, it would end the session.
     pty.send(b"\x1b[200~pasted\x1b[201~");
-    pty.resize(100, 29);
-    pty.absent_until(QUIT_HINT, "─ ask ─ effort");
+    pty.wait_for("pasted");
     pty.send(CTRL_C);
-    pty.resize(100, 30);
-    pty.all_absent_until(&[QUIT_HINT, "pasted"], "─ ask ─ effort");
-    // Two presses on the empty box end the run; it opened no session,
-    // so no line.
     pty.send(CTRL_C);
     pty.wait_for(QUIT_HINT);
     pty.send(CTRL_C);

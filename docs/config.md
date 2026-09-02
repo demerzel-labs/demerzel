@@ -251,7 +251,7 @@ The full-screen interface has these keys:
   and back. While the completion popup is open, Shift-Tab selects
   the previous command instead.
 - Ctrl-C clears the input box. On an empty input box, Ctrl-C asks
-  once; see Quit and resume. During a turn, Ctrl-C stops the turn.
+  once. See Quit and resume. During a turn, Ctrl-C stops the turn.
   Ctrl-D on an empty input box ends the session.
 - Ctrl-O expands every tool card to its kept output and collapses
   them again.

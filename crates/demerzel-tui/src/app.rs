@@ -784,10 +784,9 @@ impl App {
             Phase::Idle => {
                 self.history.reset();
                 if !self.editor.is_empty() {
-                    // A clear, not a press toward the quit: the
-                    // question goes with the text.
+                    // A clear, not a press toward the quit. The text's
+                    // arrival withdrew the question already.
                     self.editor.take();
-                    self.withdraw_quit();
                     return Action::None;
                 }
                 if self.quit_asked.is_some_and(|until| Instant::now() < until) {
