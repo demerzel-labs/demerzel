@@ -23,6 +23,8 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
+use demerzel_core::Usage;
+
 use crate::markdown::Face;
 
 /// Bytes of one tool output the interface keeps: the tail, after
@@ -33,10 +35,13 @@ pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 /// previews lower; this bounds the public path.
 pub const MAX_PREVIEW_BYTES: usize = 8 * 1024;
 
-/// Raw bytes `kept_output` walks at most. A char the sanitizer
-/// drops costs no width, so without this bound a control-only
-/// prefix would make the walk the output's.
-const SCAN_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
+/// Raw bytes of one tool output the interface reads, from the end:
+/// the walk of `kept_output` stops here. A char the sanitizer drops
+/// costs no width, so without this bound a control-only prefix
+/// would make the walk the output's. A driver that replays a result
+/// from a file hands over this tail at most: the card shows the
+/// same, and the copy costs the tail, not the result.
+pub const OUTPUT_TAIL_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
 
 /// Output lines a collapsed card shows, from the end.
 const TAIL_LINES: usize = 5;
@@ -267,6 +272,14 @@ impl Card {
             .filter(|summary| !summary.is_empty())
             .map(|summary| one_line(summary, LINE_BYTES));
         self.stale = true;
+    }
+
+    /// The call as a session file records it: ended at once, with
+    /// the clock the file kept — `None` when it kept none — in place
+    /// of one measured here.
+    pub fn replay(&mut self, outcome: Outcome<'_>, duration: Option<Duration>) {
+        self.end(outcome);
+        self.duration = duration;
     }
 
     /// The turn ended with the call open.
@@ -506,8 +519,8 @@ pub fn push_sanitized(out: &mut String, text: &str) {
 /// The tail of `output` the interface keeps: the last chars whose
 /// sanitized form fits the byte cap. The walk back from the end
 /// measures each char as the sanitizer writes it and stops at
-/// `SCAN_BYTES` of raw text, so the work is the kept tail's, not
-/// the output's. Returns the tail and whether it is a cut.
+/// `OUTPUT_TAIL_BYTES` of raw text, so the work is the kept tail's,
+/// not the output's. Returns the tail and whether it is a cut.
 pub fn kept_output(output: &str) -> (String, bool) {
     let mut width = 0usize;
     let mut start = output.len();
@@ -518,7 +531,7 @@ pub fn kept_output(output: &str) -> (String, bool) {
             ch if ch.is_control() => 0,
             ch => ch.len_utf8(),
         };
-        if width + cols > MAX_OUTPUT_BYTES || output.len() - at > SCAN_BYTES {
+        if width + cols > MAX_OUTPUT_BYTES || output.len() - at > OUTPUT_TAIL_BYTES {
             break;
         }
         width += cols;
@@ -542,6 +555,20 @@ pub fn write_duration(out: &mut String, duration: Duration) {
         let seconds = duration.as_secs();
         write!(out, "{}m {:02}s", seconds / 60, seconds % 60)
     };
+}
+
+/// Append the usage line of one model call: the counts and, with
+/// `elapsed`, the time since the turn started.
+pub fn write_usage(out: &mut String, usage: &Usage, elapsed: Option<Duration>) {
+    let _ = write!(
+        out,
+        "· {} in · {} out · {} cached",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
+    );
+    if let Some(elapsed) = elapsed {
+        out.push_str(" · ");
+        write_duration(out, elapsed);
+    }
 }
 
 /// Write the progress line into `out`: the spinner, the elapsed

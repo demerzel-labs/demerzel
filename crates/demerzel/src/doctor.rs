@@ -1,6 +1,7 @@
 //! `demerzel doctor`: report the state a session depends on. The
 //! report shows presence, not values — never token or key text.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -208,6 +209,83 @@ fn report_file(
     }
 }
 
+/// One provider's credential state: the wording `doctor` reports
+/// and the first-run screen shows, from a read-only probe.
+pub(crate) struct CredentialState {
+    pub provider: &'static str,
+    /// The state text after the provider's name.
+    pub state: String,
+    /// Where the credential comes from; `None` when none resolves.
+    pub source: Option<CredentialSource>,
+}
+
+impl CredentialState {
+    /// Whether a session with this provider can authenticate.
+    pub fn usable(&self) -> bool {
+        self.source.is_some_and(CredentialSource::usable)
+    }
+}
+
+/// The credential state of each provider from one store. The
+/// environment key wins for the Anthropic state and skips the store,
+/// the order a session applies. Reads only: the store stays
+/// unwritten, and no key text leaves it.
+pub(crate) fn credential_states(store: &AuthStore, env_key: Option<&str>) -> [CredentialState; 2] {
+    let codex = match store.probe() {
+        Some(probe) => {
+            let mut state = probe.source.describe().to_string();
+            if probe.source.usable() {
+                match probe.expires {
+                    Some(when) if when <= SystemTime::now() => {
+                        state.push_str(" — the access token is expired; the next run refreshes it")
+                    }
+                    Some(when) => {
+                        let _ = write!(
+                            state,
+                            " — the access token expires {}",
+                            humantime::format_rfc3339_seconds(when)
+                        );
+                    }
+                    None => {}
+                }
+            }
+            CredentialState {
+                provider: openai_codex::PROVIDER_ID,
+                state,
+                source: Some(probe.source),
+            }
+        }
+        None => CredentialState {
+            provider: openai_codex::PROVIDER_ID,
+            state: format!("none — {NO_CREDENTIALS_HELP}"),
+            source: None,
+        },
+    };
+    let anthropic_source = match env_key.filter(|key| !key.is_empty()) {
+        Some(_) => Some(CredentialSource::Env),
+        None => store.anthropic_api_key().map(|_| CredentialSource::Store),
+    };
+    let anthropic = match anthropic_source {
+        Some(source) => {
+            let mut state = source.describe().to_string();
+            if source == CredentialSource::Env {
+                let _ = write!(state, " ({})", anthropic::ENV_API_KEY);
+            }
+            CredentialState {
+                provider: anthropic::PROVIDER_ID,
+                state,
+                source: Some(source),
+            }
+        }
+        None => CredentialState {
+            provider: anthropic::PROVIDER_ID,
+            state: format!("none — {}", anthropic::NO_CREDENTIALS_HELP),
+            source: None,
+        },
+    };
+    [codex, anthropic]
+}
+
 /// Report every provider's credentials. Missing credentials count as
 /// a problem only for the active provider: the other provider's state
 /// is information, not a blocker.
@@ -225,57 +303,20 @@ fn report_credentials(
             return Ok(());
         }
     };
-
-    let codex_active = active_provider == openai_codex::PROVIDER_ID;
-    match store.probe() {
-        Some(probe) if probe.source.usable() => {
-            let expiry = match probe.expires {
-                Some(when) if when <= SystemTime::now() => {
-                    " — the access token is expired; the next run refreshes it".to_string()
-                }
-                Some(when) => format!(
-                    " — the access token expires {}",
-                    humantime::format_rfc3339_seconds(when)
-                ),
-                None => String::new(),
-            };
-            writeln!(out, "  openai-codex: {}{expiry}", probe.source.describe())?;
-        }
-        Some(probe) if codex_active => {
-            *problems += 1;
-            writeln!(out, "  problem: openai-codex: {}", probe.source.describe())?;
-        }
-        Some(probe) => {
-            writeln!(out, "  openai-codex: {}", probe.source.describe())?;
-        }
-        None => {
-            if codex_active {
-                *problems += 1;
-            }
-            writeln!(out, "  openai-codex: none — {NO_CREDENTIALS_HELP}")?;
-        }
-    }
-
     let env_key = std::env::var(anthropic::ENV_API_KEY).ok();
-    match store.probe_anthropic(env_key.as_deref()) {
-        Some(probe) => {
-            let detail = if probe.source == CredentialSource::Env {
-                format!(" ({})", anthropic::ENV_API_KEY)
-            } else {
-                String::new()
-            };
-            writeln!(out, "  anthropic: {}{detail}", probe.source.describe())?;
+    for state in credential_states(&store, env_key.as_deref()) {
+        let active = state.provider == active_provider;
+        if active && !state.usable() {
+            *problems += 1;
         }
-        None => {
-            if active_provider == anthropic::PROVIDER_ID {
-                *problems += 1;
-            }
-            writeln!(
-                out,
-                "  anthropic: none — {}",
-                anthropic::NO_CREDENTIALS_HELP
-            )?;
-        }
+        // A source that is there but cannot authenticate — an import
+        // file that does not parse — names the problem on its line.
+        let prefix = if active && state.source.is_some() && !state.usable() {
+            "problem: "
+        } else {
+            ""
+        };
+        writeln!(out, "  {prefix}{}: {}", state.provider, state.state)?;
     }
     Ok(())
 }

@@ -38,8 +38,10 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::Instant;
 
-use crate::cards::{Card, INDENT, Outcome, push_sanitized};
+use crate::PROMPT;
+use crate::cards::{Card, INDENT, Outcome, kept_output, push_sanitized, write_usage};
 use crate::markdown::{self, Face, Seam, Target};
+use crate::replay::{Replay, ReplayEntry, ReplayResult};
 use crate::select::{self, Copied, Point, Selection};
 use crate::thinking::{SUMMARY_RESERVE, Thinking, Thought};
 use crate::wrap::{display_width, row_starts};
@@ -812,6 +814,101 @@ impl Transcript {
                 self.push_block(Block::card(card));
             }
         }
+    }
+
+    /// Show a resumed session's past turns as blocks: the replay on
+    /// resume. Each entry lands finished, as the live turn left it:
+    /// a prompt line, a text block, a thought, a card with its
+    /// result, a usage line. A count of left-out messages shows
+    /// first, as a dim line. Nothing streams and nothing lays out
+    /// here: the blocks lay out at the next frame, for the rows it
+    /// shows, so a long replay costs its window, not its length.
+    pub fn replay(&mut self, replay: Replay) {
+        // Nothing streams across a replay: a thought or a call still
+        // open would keep an index the replay moves past. At the
+        // quiet point the driver uses, this closes nothing.
+        self.close();
+        self.blocks.reserve(replay.entries.len().min(MAX_BLOCKS));
+        let now = Instant::now();
+        if replay.left_out > 0 {
+            let noun = if replay.left_out == 1 {
+                "message"
+            } else {
+                "messages"
+            };
+            self.push_line(
+                Kind::Notice,
+                &format!("… {} earlier {noun} left out", replay.left_out),
+            );
+        }
+        for entry in replay.entries {
+            match entry {
+                ReplayEntry::Prompt(text) => {
+                    self.push_line(Kind::Prompt, &format!("{PROMPT}{text}"));
+                }
+                // An empty text opens no block, as an empty delta
+                // does.
+                ReplayEntry::Text(text) if text.is_empty() => {}
+                ReplayEntry::Text(text) => self.push_line(Kind::Text, &text),
+                ReplayEntry::Reasoning(summary) => self.replay_thought(&summary, now),
+                ReplayEntry::Tool {
+                    name,
+                    preview,
+                    result,
+                } => self.replay_card(&name, preview.as_deref(), result, now),
+                ReplayEntry::Usage { usage, elapsed } => {
+                    let mut line = String::new();
+                    write_usage(&mut line, &usage, elapsed);
+                    self.push_line(Kind::Notice, &line);
+                }
+            }
+        }
+    }
+
+    /// A replayed reasoning segment: one thought, ended with no
+    /// clock. Whitespace alone opens nothing, as a live delta of
+    /// whitespace opens nothing; a hidden setting drops it.
+    fn replay_thought(&mut self, summary: &str, now: Instant) {
+        if self.thinking == Thinking::Hidden || summary.trim_start().is_empty() {
+            return;
+        }
+        let mut thought = Thought::new(self.thinking == Thinking::Open, now);
+        thought.push(summary, SUMMARY_BYTES);
+        thought.end_without_clock();
+        self.push_block(Block::thought(thought, self.markdown_for(Kind::Reasoning)));
+    }
+
+    /// A replayed tool call: one card, ended with the file's clock,
+    /// or interrupted when the turn ended before its result. The
+    /// card holds the kept tail of the result, as a live card does.
+    fn replay_card(
+        &mut self,
+        name: &str,
+        preview: Option<&str>,
+        result: Option<ReplayResult>,
+        now: Instant,
+    ) {
+        let mut card = Card::new(name, self.expanded);
+        if let Some(preview) = preview {
+            card.set_preview(preview);
+        }
+        match result {
+            Some(result) => {
+                let (output, output_cut) = kept_output(&result.output);
+                card.replay(
+                    Outcome {
+                        summary: None,
+                        is_error: result.is_error,
+                        output,
+                        output_cut,
+                        at: now,
+                    },
+                    result.duration,
+                );
+            }
+            None => card.interrupt(),
+        }
+        self.push_block(Block::card(card));
     }
 
     /// End-of-turn cleanup: close any block that still streams, and
@@ -1757,6 +1854,134 @@ mod tests {
             blocks(&mut t),
             vec![(Kind::Tool, "✗ edit\n  the tag is stale\n  stale tag")]
         );
+    }
+
+    #[test]
+    fn a_replay_lands_every_entry_finished_with_the_left_out_count_first() {
+        use std::time::Duration;
+        let mut t = plain();
+        t.replay(Replay {
+            left_out: 2,
+            entries: vec![
+                ReplayEntry::Prompt("hello".into()),
+                ReplayEntry::Reasoning("Plan the fix\nthen check".into()),
+                ReplayEntry::Tool {
+                    name: "bash".into(),
+                    preview: Some("$ echo hi".into()),
+                    result: Some(ReplayResult {
+                        output: "hi\n".into(),
+                        is_error: false,
+                        duration: Some(Duration::from_millis(40)),
+                    }),
+                },
+                ReplayEntry::Usage {
+                    usage: demerzel_core::Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 2,
+                        cache_creation_tokens: 0,
+                    },
+                    elapsed: Some(Duration::from_millis(1_200)),
+                },
+                ReplayEntry::Text("done".into()),
+                ReplayEntry::Text(String::new()),
+                ReplayEntry::Tool {
+                    name: "read".into(),
+                    preview: None,
+                    result: Some(ReplayResult {
+                        output: "no such file".into(),
+                        is_error: true,
+                        duration: None,
+                    }),
+                },
+                ReplayEntry::Tool {
+                    name: "edit".into(),
+                    preview: None,
+                    result: None,
+                },
+                ReplayEntry::Usage {
+                    usage: demerzel_core::Usage::default(),
+                    elapsed: None,
+                },
+            ],
+        });
+        // The turn's end touches no replayed card: none is open.
+        t.close();
+        assert_eq!(
+            blocks(&mut t),
+            vec![
+                (Kind::Notice, "… 2 earlier messages left out"),
+                (Kind::Prompt, "❯ hello"),
+                (Kind::Reasoning, "▸ thought · Plan the fix…"),
+                (Kind::Tool, "✓ bash $ echo hi\n  hi\n  40ms · done"),
+                (Kind::Notice, "· 10 in · 5 out · 2 cached · 1.2s"),
+                (Kind::Text, "done"),
+                (Kind::Tool, "✗ read\n  no such file\n  error"),
+                (Kind::Tool, "✗ edit\n  interrupted"),
+                (Kind::Notice, "· 0 in · 0 out · 0 cached"),
+            ]
+        );
+        // The thought opens after the fact, as a live one does.
+        t.toggle_thinking();
+        assert_eq!(
+            blocks(&mut t)[2],
+            (Kind::Reasoning, "▾ thought\n\nPlan the fix\nthen check")
+        );
+    }
+
+    #[test]
+    fn a_replay_follows_the_thinking_setting_and_a_blank_summary_opens_nothing() {
+        let mut t = plain();
+        t.set_thinking(Thinking::Hidden);
+        t.replay(Replay {
+            left_out: 0,
+            entries: vec![
+                ReplayEntry::Reasoning("hidden".into()),
+                ReplayEntry::Text("shown".into()),
+            ],
+        });
+        assert_eq!(blocks(&mut t), vec![(Kind::Text, "shown")]);
+
+        let mut t = plain();
+        t.set_thinking(Thinking::Open);
+        t.replay(Replay {
+            left_out: 1,
+            entries: vec![
+                ReplayEntry::Reasoning("  \n".into()),
+                ReplayEntry::Reasoning("open".into()),
+            ],
+        });
+        assert_eq!(
+            blocks(&mut t),
+            vec![
+                (Kind::Notice, "… 1 earlier message left out"),
+                (Kind::Reasoning, "▾ thought\n\nopen"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_replayed_card_keeps_the_output_tail_and_expands_with_the_rest() {
+        let mut t = plain();
+        let long: String = (1..=8).map(|i| format!("row {i}\n")).collect();
+        t.replay(Replay {
+            left_out: 0,
+            entries: vec![ReplayEntry::Tool {
+                name: "read".into(),
+                preview: None,
+                result: Some(ReplayResult {
+                    output: long,
+                    is_error: false,
+                    duration: None,
+                }),
+            }],
+        });
+        let text = blocks(&mut t)[0].1.to_string();
+        assert!(text.starts_with("✓ read\n  row 4\n"), "{text}");
+        assert!(text.ends_with("done · 3 more lines · Ctrl-O"), "{text}");
+        t.set_expanded(true);
+        let text = blocks(&mut t)[0].1.to_string();
+        assert!(text.contains("row 1\n"), "{text}");
     }
 
     #[test]

@@ -11,21 +11,26 @@ mod git;
 pub mod login;
 mod preview;
 pub mod repl;
+mod replay;
 pub mod trace;
 pub mod tui;
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
-    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, ToolHost, TurnOutcome,
+    NoPrompt, ProviderError, Replay, Session, SessionMeta, SessionStore, ToolAccess, ToolHost,
+    TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
-pub use demerzel_tui::{Theme, Thinking};
+pub use demerzel_tui::{FirstRun, LoginCommand, Theme, Thinking};
+
+use crate::doctor::credential_states;
 
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
@@ -163,7 +168,11 @@ pub enum RunError {
 pub struct Runtime {
     config: RunConfig,
     engine_config: EngineConfig,
-    provider: Box<dyn Provider>,
+    /// The provider, built at the first turn: credentials resolve
+    /// then, not at boot, so a run that opens without a login — the
+    /// first-run screen — finds a login that lands before its first
+    /// turn. See `Runtime::provider`.
+    provider: OnceLock<Box<dyn Provider>>,
     /// The full tool set, and the read-only subset. `tools(mode)`
     /// picks one; `Engine::set_approval` takes the pick when the mode
     /// changes mid-session.
@@ -173,6 +182,11 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Build the long-lived pieces: the session store, the tool
+    /// registries, and the checks that stop a run at boot — a
+    /// `--session <id>` with no file, a provider id this build does
+    /// not have. The credentials resolve at the first turn; see
+    /// `Runtime::provider`.
     pub fn new(config: RunConfig) -> Result<Self, RunError> {
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
@@ -189,7 +203,12 @@ impl Runtime {
         let mut read_only_registry = Registry::full(&config.project_dir);
         read_only_registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
 
-        let provider = Self::build_provider(&config)?;
+        // The provider id is a config value: an unknown one stops the
+        // run at boot, before the interface opens. The credentials
+        // resolve at the first turn.
+        if !demerzel_providers::PROVIDER_IDS.contains(&config.provider.as_str()) {
+            return Err(unknown_provider(&config.provider));
+        }
 
         let mut engine_config = EngineConfig::new(config.model.clone());
         engine_config.max_model_calls = config.max_model_calls;
@@ -197,7 +216,7 @@ impl Runtime {
         Ok(Self {
             engine_config,
             config,
-            provider,
+            provider: OnceLock::new(),
             registry,
             read_only_registry,
             store,
@@ -208,15 +227,97 @@ impl Runtime {
         &self.config
     }
 
-    /// Build the provider the config names. Credentials resolve here,
-    /// so a missing login fails with a clear message instead of inside
-    /// the first turn.
-    fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
-        let open_store = || match &config.auth {
+    /// The provider, built on the first call. Credentials resolve
+    /// here, so a missing login fails with a clear message. A failed
+    /// build is not kept: the next call tries again, so a login that
+    /// lands between two prompts takes effect at the next one. The
+    /// plain interface calls this at boot and a one-shot run inside
+    /// the open of its one session, so a missing login stops both
+    /// before a request goes out or a session file is touched, their
+    /// M2 behavior.
+    pub(crate) fn provider(&self) -> Result<&dyn Provider, RunError> {
+        if let Some(provider) = self.provider.get() {
+            return Ok(provider.as_ref());
+        }
+        let provider = Self::build_provider(&self.config)?;
+        Ok(self.provider.get_or_init(|| provider).as_ref())
+    }
+
+    /// The first-run screen's text when no credential resolves for
+    /// the session's provider; `None` when one does. The decision
+    /// comes first and the text second: a run that can authenticate
+    /// pays the probe alone, and an Anthropic session with its key in
+    /// the environment opens no store at all. The state lines come
+    /// from the read-only probe `doctor` runs, with its wording: the
+    /// store stays unwritten, and a Codex CLI login that the first
+    /// turn would import counts as a credential. A store that does
+    /// not open is a state to show, not a stop: the first turn fails
+    /// on it with the same error.
+    pub fn first_run(&self) -> Option<FirstRun> {
+        let env_key = std::env::var(anthropic::ENV_API_KEY)
+            .ok()
+            .filter(|key| !key.is_empty());
+        let provider = self.config.provider.as_str();
+        // The environment wins and skips the store, the order the
+        // provider build applies.
+        if provider == anthropic::PROVIDER_ID && env_key.is_some() {
+            return None;
+        }
+        let store = Self::open_store(&self.config);
+        let resolves = match (provider, &store) {
+            (_, Err(_)) => false,
+            (openai_codex::PROVIDER_ID, Ok(store)) => {
+                store.probe().is_some_and(|probe| probe.source.usable())
+            }
+            (anthropic::PROVIDER_ID, Ok(store)) => store.anthropic_api_key().is_some(),
+            // The boot check refuses any other id; the build's error
+            // says so at the first turn.
+            _ => return None,
+        };
+        if resolves {
+            return None;
+        }
+        let credentials = match &store {
+            Ok(store) => credential_states(store, env_key.as_deref())
+                .map(|state| format!("{}: {}", state.provider, state.state))
+                .to_vec(),
+            Err(error) => {
+                let state = error.to_string();
+                vec![
+                    format!("{}: {state}", openai_codex::PROVIDER_ID),
+                    format!("{}: {state}", anthropic::PROVIDER_ID),
+                ]
+            }
+        };
+        let codex_login =
+            LoginCommand::new("dmz login", "the ChatGPT subscription, through the browser");
+        let anthropic_login =
+            LoginCommand::new("dmz login anthropic", "an API key, prompted and verified");
+        let mut screen = FirstRun::default();
+        screen.provider = provider.to_string();
+        screen.credentials = credentials;
+        // The session's provider first.
+        screen.commands = if provider == anthropic::PROVIDER_ID {
+            vec![anthropic_login, codex_login]
+        } else {
+            vec![codex_login, anthropic_login]
+        };
+        Some(screen)
+    }
+
+    /// The auth store of this run: the configured paths, or the
+    /// defaults.
+    fn open_store(config: &RunConfig) -> Result<AuthStore, RunError> {
+        match &config.auth {
             Some(paths) => AuthStore::open(paths.store.clone(), paths.codex_cli.clone())
                 .map_err(RunError::Auth),
             None => AuthStore::open_default().map_err(RunError::Auth),
-        };
+        }
+    }
+
+    /// Build the provider the config names, with its credentials.
+    fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
+        let open_store = || Self::open_store(config);
         match config.provider.as_str() {
             openai_codex::PROVIDER_ID => {
                 let mut auth = open_store()?;
@@ -253,16 +354,7 @@ impl Runtime {
                 }
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
-            other => {
-                let known: Vec<String> = demerzel_providers::PROVIDER_IDS
-                    .iter()
-                    .map(|id| format!("`{id}`"))
-                    .collect();
-                Err(RunError::Config(format!(
-                    "unknown provider `{other}` — this build has: {}",
-                    known.join(", ")
-                )))
-            }
+            other => Err(unknown_provider(other)),
         }
     }
 
@@ -272,12 +364,17 @@ impl Runtime {
     /// fails. Resume appends a fresh meta record, so the file names
     /// the model and provider that continue it. The interfaces own
     /// the session model — `/model` switches it — so it arrives as
-    /// an argument.
+    /// an argument. The replay holds the history the engine
+    /// continues, and the records the full-screen interface shows
+    /// again; a fresh session's is empty. A session opens only with
+    /// a provider to run it: a missing login fails here, before a
+    /// file is created or touched.
     pub fn open_session(
         &self,
         resume: &Resume,
         settings: &SessionSettings,
-    ) -> Result<(Session, Vec<Message>), RunError> {
+    ) -> Result<(Session, Replay), RunError> {
+        self.provider()?;
         let path = match resume {
             Resume::Fresh => None,
             Resume::Latest => self.store.latest(&self.config.project_dir)?,
@@ -301,12 +398,12 @@ impl Runtime {
             if same_project {
                 session.append_meta(&SessionMeta::now(
                     &self.config.project_dir,
-                    self.provider.id(),
+                    &self.config.provider,
                     &settings.model,
                     Some(settings.effort),
                     settings.approval,
                 ))?;
-                return Ok((session, replay.messages));
+                return Ok((session, replay));
             }
             if let Resume::Id(id) = resume {
                 return Err(RunError::Config(format!(
@@ -316,12 +413,12 @@ impl Runtime {
         }
         let session = self.store.create(
             &self.config.project_dir,
-            self.provider.id(),
+            &self.config.provider,
             &settings.model,
             Some(settings.effort),
             settings.approval,
         )?;
-        Ok((session, Vec::new()))
+        Ok((session, Replay::default()))
     }
 
     /// Whether `id` names the project's latest session, the one `-c`
@@ -343,7 +440,7 @@ impl Runtime {
     pub(crate) fn context_window(&self, model: &str) -> Option<u64> {
         self.config
             .context_window
-            .or_else(|| demerzel_providers::context_window(self.provider.id(), model))
+            .or_else(|| demerzel_providers::context_window(&self.config.provider, model))
     }
 
     /// The tool set for an approval mode: `read-only` advertises the
@@ -357,24 +454,25 @@ impl Runtime {
     }
 
     /// Build the turn engine over an open session, with the
-    /// interface's current session settings.
+    /// interface's current session settings. The provider builds
+    /// here when nothing built it yet; see `Runtime::provider`.
     pub fn engine(
         &self,
         session: Session,
         history: Vec<Message>,
         settings: &SessionSettings,
-    ) -> Engine<'_> {
+    ) -> Result<Engine<'_>, RunError> {
         let mut engine_config = self.engine_config.clone();
         engine_config.model = settings.model.clone();
         engine_config.effort = Some(settings.effort);
-        Engine::with_history(
-            self.provider.as_ref(),
+        Ok(Engine::with_history(
+            self.provider()?,
             self.tools(settings.approval),
             ApprovalPolicy::new(settings.approval),
             engine_config,
             session,
             history,
-        )
+        ))
     }
 
     /// Run one prompt to completion. Display events go to `sink`; the
@@ -385,10 +483,22 @@ impl Runtime {
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
         let settings = SessionSettings::from_config(&self.config);
-        let (session, history) = self.open_session(&self.config.resume, &settings)?;
-        let mut engine = self.engine(session, history, &settings);
+        let (session, replay) = self.open_session(&self.config.resume, &settings)?;
+        let mut engine = self.engine(session, replay.messages, &settings)?;
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
+}
+
+/// The error for a provider id this build does not have.
+fn unknown_provider(other: &str) -> RunError {
+    let known: Vec<String> = demerzel_providers::PROVIDER_IDS
+        .iter()
+        .map(|id| format!("`{id}`"))
+        .collect();
+    RunError::Config(format!(
+        "unknown provider `{other}` — this build has: {}",
+        known.join(", ")
+    ))
 }
 
 /// The session file `id` names in the project, or the clear error

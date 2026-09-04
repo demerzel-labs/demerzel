@@ -10,7 +10,8 @@
 //!   event sink, and an [`ApprovalChannel`] to ask questions through.
 //!   The driver renders each dispatching call's preview and sends it
 //!   with [`EventSender::tool_preview`]; the interface shows it on
-//!   the call's card.
+//!   the call's card. A resumed session's past turns arrive the
+//!   same way, as a [`Replay`] through [`EventSender::replay`].
 //! - The interface loop draws what arrives and answers approval
 //!   questions at the keyboard.
 //! - Dropping the returned turn future aborts the turn; the loop does
@@ -22,10 +23,12 @@ pub mod bench;
 mod cards;
 mod editor;
 mod events;
+mod first_run;
 mod highlight;
 mod history;
 mod markdown;
 mod render;
+mod replay;
 mod select;
 mod terminal;
 pub mod theme;
@@ -40,9 +43,11 @@ use std::time::Duration;
 
 use demerzel_core::ApprovalMode;
 
-pub use cards::write_duration;
+pub use cards::{OUTPUT_TAIL_BYTES, write_duration};
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
+pub use first_run::{FirstRun, LoginCommand};
+pub use replay::{Replay, ReplayEntry, ReplayResult};
 pub use theme::Theme;
 pub use thinking::Thinking;
 
@@ -85,8 +90,12 @@ pub enum Submission<'a> {
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
     /// Display events the driver sends through `events` before this
-    /// call returns — a status patch for a model or effort switch —
-    /// show on the same frame as the note the call returns.
+    /// call returns — a status patch for a model or effort switch,
+    /// the replay of a resumed session — land above the line's echo,
+    /// and show on the same frame as the note the call returns. The
+    /// call runs on the interface loop, so nothing draws and no key
+    /// lands until it returns: a file read is fine, a network round
+    /// trip is not.
     fn submit(
         &mut self,
         line: String,
@@ -149,6 +158,10 @@ pub struct Options {
     /// with `/`. The driver still dispatches the submitted line; the
     /// list only completes it.
     pub commands: Vec<CommandSpec>,
+    /// The first-run screen, shown before the prompt when set: the
+    /// driver fills it when no credential resolves for the session's
+    /// provider. Enter continues to the session.
+    pub first_run: Option<FirstRun>,
 }
 
 impl Default for Options {
@@ -167,6 +180,7 @@ impl Default for Options {
             thinking: Thinking::default(),
             theme: Theme::default(),
             commands: Vec::new(),
+            first_run: None,
         }
     }
 }

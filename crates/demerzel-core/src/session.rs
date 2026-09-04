@@ -262,11 +262,40 @@ struct RecordTag<'a> {
     kind: Option<std::borrow::Cow<'a, str>>,
 }
 
-/// History rebuilt from a session file.
+/// History rebuilt from a session file: the messages the model
+/// receives again, and the records beside them that an interface
+/// shows again — the usage lines and the clock of each tool call.
+/// Readers get one from [`replay`] or [`Session::resume`]; the
+/// struct grows with the records a reader shows.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Replay {
     pub meta: Option<SessionMeta>,
     pub messages: Vec<Message>,
+    /// The usage records, in file order. Each counts the messages
+    /// before it, so a reader places the line where the call ended.
+    pub usage: Vec<ReplayUsage>,
+    /// The tool records, in file order: the clock of each answered
+    /// call, by call id.
+    pub tools: Vec<ReplayToolClock>,
+}
+
+/// One usage record on the replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayUsage {
+    /// The count of messages before the record in the file.
+    pub messages_before: usize,
+    pub usage: Usage,
+    /// The call's clock, when the record carries one.
+    pub timing: Option<Timing>,
+}
+
+/// The clock of one tool record on the replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayToolClock {
+    pub call_id: String,
+    /// The call's wall time, as the record kept it.
+    pub duration: Duration,
 }
 
 /// The session directory tree under one data root.
@@ -696,10 +725,34 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
                 out.meta = Some(meta);
             }
             SessionRecord::Message(message) => out.messages.push(message),
-            SessionRecord::Approval { .. }
-            | SessionRecord::Usage { .. }
-            | SessionRecord::Tool { .. }
-            | SessionRecord::Turn { .. } => {}
+            SessionRecord::Usage {
+                usage,
+                at,
+                duration_ms,
+            } => {
+                // A clock needs both halves; a file from before the
+                // fields has neither, and a record with one alone
+                // has no clock a reader can place.
+                let timing = at
+                    .as_deref()
+                    .and_then(|at| humantime::parse_rfc3339(at).ok())
+                    .zip(duration_ms)
+                    .map(|(at, ms)| Timing::new(at, Duration::from_millis(ms)));
+                out.usage.push(ReplayUsage {
+                    messages_before: out.messages.len(),
+                    usage,
+                    timing,
+                });
+            }
+            SessionRecord::Tool {
+                call_id,
+                duration_ms,
+                ..
+            } => out.tools.push(ReplayToolClock {
+                call_id,
+                duration: Duration::from_millis(duration_ms),
+            }),
+            SessionRecord::Approval { .. } | SessionRecord::Turn { .. } => {}
             SessionRecord::Unknown => {}
         }
     }
@@ -847,6 +900,73 @@ mod tests {
         assert_eq!(meta.approval.as_deref(), Some("ask"));
         assert_eq!(replay.messages.len(), 2);
         assert_eq!(replay.messages[0], text_message(Role::User, "hi"));
+        // The usage record follows both messages, with its clock.
+        assert_eq!(replay.usage.len(), 1);
+        assert_eq!(replay.usage[0].messages_before, 2);
+        assert_eq!(replay.usage[0].usage.input_tokens, 10);
+        assert_eq!(
+            replay.usage[0].timing.map(|timing| timing.duration),
+            Some(Duration::from_millis(5))
+        );
+        assert!(replay.tools.is_empty());
+    }
+
+    #[test]
+    fn the_replay_keeps_the_tool_clocks_and_places_each_usage_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::at(dir.path());
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let mut session = store
+            .create(
+                &project,
+                "openai-codex",
+                "gpt-test",
+                None,
+                ApprovalMode::Auto,
+            )
+            .unwrap();
+        let usage = Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        let clock = Timing::new(SystemTime::UNIX_EPOCH, Duration::from_millis(40));
+        session
+            .append_message(&text_message(Role::User, "go"))
+            .unwrap();
+        session
+            .append_message(&text_message(Role::Assistant, "calling"))
+            .unwrap();
+        session.append_usage(&usage, clock).unwrap();
+        session
+            .append_message(&text_message(Role::User, "result"))
+            .unwrap();
+        session
+            .append_tool("call_1", "read", clock, false, 12, false)
+            .unwrap();
+        session
+            .append_message(&text_message(Role::Assistant, "done"))
+            .unwrap();
+        session.append_usage(&usage, clock).unwrap();
+
+        let replay = replay(session.path()).unwrap();
+        assert_eq!(replay.messages.len(), 4);
+        let placed: Vec<usize> = replay
+            .usage
+            .iter()
+            .map(|record| record.messages_before)
+            .collect();
+        assert_eq!(placed, vec![2, 4]);
+        assert_eq!(replay.usage[0].timing, Some(clock));
+        assert_eq!(
+            replay.tools,
+            vec![ReplayToolClock {
+                call_id: "call_1".into(),
+                duration: Duration::from_millis(40),
+            }]
+        );
     }
 
     #[test]
@@ -1156,6 +1276,10 @@ mod tests {
         .unwrap();
         let replayed = replay(&path).unwrap();
         assert_eq!(replayed.messages.len(), 1);
+        // The usage record replays without a clock.
+        assert_eq!(replayed.usage.len(), 1);
+        assert_eq!(replayed.usage[0].messages_before, 1);
+        assert_eq!(replayed.usage[0].timing, None);
 
         // The old records parse into the current variants with the
         // clock fields absent, so a reader of the typed records sees

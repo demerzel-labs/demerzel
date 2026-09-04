@@ -4,6 +4,9 @@
 //! outcomes to messages. The REPL and this driver share the command
 //! registry, the previews, and the message wording. The driver builds
 //! every preview, so the interface crate needs no knowledge of tools.
+//! A resumed session's past turns go to the screen the same way: the
+//! driver turns the session file into display entries, previews
+//! included, and the interface shows them as blocks.
 
 use std::path::PathBuf;
 
@@ -61,6 +64,10 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.thinking = config.thinking;
     options.theme = config.theme.clone();
     options.commands = crate::commands::specs();
+    // No credential for the provider: the screen says so before the
+    // prompt, and the provider builds at the first turn, so a login
+    // that lands meanwhile takes effect.
+    options.first_run = runtime.first_run();
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,
@@ -203,6 +210,43 @@ impl Driver for TuiDriver<'_> {
             }
             None => {}
         }
+        // The session opens at the first prompt, before the turn
+        // starts: the events land above the prompt line's echo, so
+        // a resumed session's past turns show first, the notice
+        // under them, and the new prompt under the notice — the
+        // screen shows what the model receives.
+        if self.engine.is_none() {
+            let (session, replay) = match self.runtime.open_session(&self.resume, &self.settings) {
+                Ok(opened) => opened,
+                Err(error) => return Submission::Error(format!("demerzel: {error}")),
+            };
+            let id = session.id().to_string();
+            let history = (!replay.messages.is_empty()).then(|| {
+                (
+                    crate::replay::entries(&replay),
+                    format!(
+                        "continuing session {id} ({} messages)",
+                        replay.messages.len()
+                    ),
+                )
+            });
+            // The state changes after the engine builds: a failure
+            // leaves no opened session behind it.
+            let engine = match self
+                .runtime
+                .engine(session, replay.messages, &self.settings)
+            {
+                Ok(engine) => engine,
+                Err(error) => return Submission::Error(format!("demerzel: {error}")),
+            };
+            self.engine = Some(engine);
+            self.opened = Some(id);
+            events.session_changed();
+            if let Some((entries, notice)) = history {
+                events.replay(entries);
+                events.notice(notice);
+            }
+        }
         Submission::Run(Box::pin(async move {
             // The branch on the status follows a checkout between
             // turns: one read at each turn's start, no polling, and
@@ -213,26 +257,6 @@ impl Driver for TuiDriver<'_> {
                 let mut patch = StatusPatch::default();
                 patch.branch = Some(self.branch.clone());
                 events.status(patch);
-            }
-            if self.engine.is_none() {
-                match self.runtime.open_session(&self.resume, &self.settings) {
-                    Ok((session, history)) => {
-                        self.opened = Some(session.id().to_string());
-                        events.session_changed();
-                        if !history.is_empty() {
-                            events.notice(format!(
-                                "continuing session {} ({} messages)",
-                                session.id(),
-                                history.len()
-                            ));
-                        }
-                        self.engine = Some(self.runtime.engine(session, history, &self.settings));
-                    }
-                    Err(error) => {
-                        events.error(format!("demerzel: {error}"));
-                        return;
-                    }
-                }
             }
             let engine = self.engine.as_mut().expect("engine opened above");
             let sink = PreviewSink {

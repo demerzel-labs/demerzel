@@ -101,11 +101,14 @@ impl Bed {
     async fn timed_turn(&self, expected_history: usize) -> Duration {
         let config = self.runtime.config();
         let settings = demerzel::SessionSettings::from_config(config);
-        let (session, history) = self
+        let (session, replay) = self
             .runtime
             .open_session(&config.resume, &settings)
             .unwrap();
-        let mut engine = self.runtime.engine(session, history, &settings);
+        let mut engine = self
+            .runtime
+            .engine(session, replay.messages, &settings)
+            .unwrap();
         let start = Instant::now();
         let outcome = engine
             .user_turn("bench".into(), &noop, &mut NoPrompt)

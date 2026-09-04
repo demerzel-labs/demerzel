@@ -47,8 +47,10 @@ use tokio::time::Instant;
 use crate::cards::{self, Outcome};
 use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
+use crate::first_run::{self, FirstRun};
 use crate::history::History;
 use crate::render::{self, Status, View, status_text};
+use crate::replay::ReplayEntry;
 use crate::select;
 use crate::terminal::Guard;
 use crate::theme::{Depth, Palette};
@@ -77,6 +79,13 @@ enum Action {
     Command(String),
     Exit,
     AbortTurn,
+}
+
+/// One line for the driver: the text, and whether it echoes as a
+/// prompt line — a typed line does, a key's command does not.
+struct Submitted {
+    text: String,
+    echo: bool,
 }
 
 /// Whether a turn is running when a key arrives.
@@ -133,26 +142,36 @@ enum Mode {
 pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result<()> {
     let mut app = App::new(options)?;
     app.draw()?;
+    if !app.first_run_screen().await? {
+        return Ok(());
+    }
     loop {
-        let Some(line) = app.next_submission().await? else {
+        let Some(submitted) = app.next_submission().await? else {
             return Ok(());
         };
-        // A command can send display events before it returns its
-        // note — a model, effort, or approval switch moves the
-        // status — so the
-        // queue drains first and the note's frame shows both.
-        match driver.submit(line, app.sender(), app.approver()) {
+        let echo = submitted
+            .echo
+            .then(|| format!("{PROMPT}{}", submitted.text));
+        let submission = driver.submit(submitted.text, app.sender(), app.approver());
+        // What the driver sent before it returned lands first: a
+        // status patch for a model, effort, or approval switch, or
+        // the past turns of a resumed session with the notice that
+        // names it. The echo of the line follows them, and the note
+        // or the turn follows the echo, so one frame shows all of it
+        // in that order.
+        app.drain_displays();
+        if let Some(echo) = &echo {
+            app.transcript.push_line(Kind::Prompt, echo);
+        }
+        app.dirty = true;
+        match submission {
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
-                app.drain_displays();
                 app.transcript.push_line(Kind::Notice, &text);
-                app.dirty = true;
                 app.draw()?;
             }
             Submission::Error(text) => {
-                app.drain_displays();
                 app.transcript.push_line(Kind::Error, &text);
-                app.dirty = true;
                 app.draw()?;
             }
             Submission::Run(turn) => app.run_turn(turn).await?,
@@ -168,6 +187,9 @@ struct App {
     status: Status,
     /// The theme at the terminal's color depth, built once.
     palette: Palette,
+    /// The first-run screen, while it shows: the frame draws it in
+    /// place of the panes, and Enter takes it down.
+    first_run: Option<FirstRun>,
     mode: Mode,
     /// Set while a turn runs.
     progress: Option<Progress>,
@@ -230,6 +252,7 @@ impl App {
                 quit_hint: false,
             },
             palette: Palette::new(&options.theme, Depth::from_env()),
+            first_run: options.first_run,
             mode: Mode::Edit,
             progress: None,
             progress_line: String::new(),
@@ -256,8 +279,65 @@ impl App {
         ApprovalChannel::new(self.approval_tx.clone())
     }
 
+    /// Hold the first-run screen, when there is one, until Enter
+    /// takes it down. Returns false when a quit key ends the run
+    /// instead: Ctrl-D, or Ctrl-C twice inside the span, the rule
+    /// of an empty prompt. Any other key takes the quit question
+    /// back.
+    async fn first_run_screen(&mut self) -> io::Result<bool> {
+        while self.first_run.is_some() {
+            let action = tokio::select! {
+                event = self.keys.recv() => match event {
+                    Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                        self.dirty = true;
+                        self.first_run_key(key)
+                    }
+                    Some(Event::Resize(..)) => {
+                        self.dirty = true;
+                        Action::None
+                    }
+                    Some(_) => Action::None,
+                    None => Action::Exit,
+                },
+                _ = self.sigint.recv() => {
+                    self.dirty = true;
+                    self.ctrl_c(Phase::Idle)
+                }
+                _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => {
+                    Action::None
+                }
+                _ = tokio::time::sleep_until(self.quit_asked.unwrap_or(self.last_draw)),
+                    if self.quit_asked.is_some() =>
+                {
+                    self.withdraw_quit();
+                    Action::None
+                }
+            };
+            self.draw()?;
+            if matches!(action, Action::Exit) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// One key on the first-run screen.
+    fn first_run_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('c') if ctrl => return self.ctrl_c(Phase::Idle),
+            KeyCode::Char('d') if ctrl => return Action::Exit,
+            KeyCode::Enter => {
+                self.first_run = None;
+                self.withdraw_quit();
+            }
+            _ => self.withdraw_quit(),
+        }
+        Action::None
+    }
+
     /// Wait at the prompt. `None` means the session ends.
-    async fn next_submission(&mut self) -> io::Result<Option<String>> {
+    async fn next_submission(&mut self) -> io::Result<Option<Submitted>> {
         loop {
             let action = tokio::select! {
                 event = self.keys.recv() => match event {
@@ -302,12 +382,17 @@ impl App {
                 Action::Exit => return Ok(None),
                 Action::Submit(line) => {
                     self.history.record(&line);
-                    self.transcript
-                        .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
-                    self.dirty = true;
-                    return Ok(Some(line));
+                    return Ok(Some(Submitted {
+                        text: line,
+                        echo: true,
+                    }));
                 }
-                Action::Command(line) => return Ok(Some(line)),
+                Action::Command(line) => {
+                    return Ok(Some(Submitted {
+                        text: line,
+                        echo: false,
+                    }));
+                }
             }
         }
     }
@@ -462,23 +547,28 @@ impl App {
                 self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
-                // The last call's prompt is the context in use.
-                self.status.context_tokens = usage.input_tokens;
-                self.status.input_tokens += usage.input_tokens;
-                self.status.output_tokens += usage.output_tokens;
-                self.status.cached_tokens += usage.cache_read_tokens;
-                let mut line = format!(
-                    "· {} in · {} out · {} cached",
-                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                );
+                self.count_usage(&usage);
                 // The time since the turn started: the turn's length
                 // on its last call, the time so far on the calls
                 // before it.
-                if let Some(progress) = &self.progress {
-                    line.push_str(" · ");
-                    cards::write_duration(&mut line, progress.started.elapsed());
-                }
+                let elapsed = self
+                    .progress
+                    .as_ref()
+                    .map(|progress| progress.started.elapsed());
+                let mut line = String::new();
+                cards::write_usage(&mut line, &usage, elapsed);
                 self.transcript.push_line(Kind::Notice, &line);
+            }
+            DisplayEvent::Replay(replay) => {
+                // The replayed calls are the session's: their counts
+                // join the totals and the last one is the context in
+                // use, as the live calls' would.
+                for entry in &replay.entries {
+                    if let ReplayEntry::Usage { usage, .. } = entry {
+                        self.count_usage(usage);
+                    }
+                }
+                self.transcript.replay(replay);
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
@@ -492,6 +582,16 @@ impl App {
                 self.status.cached_tokens = 0;
             }
         }
+    }
+
+    /// One model call's counts onto the status: the last call's
+    /// prompt is the context in use, and every call adds to the
+    /// totals.
+    fn count_usage(&mut self, usage: &demerzel_core::Usage) {
+        self.status.context_tokens = usage.input_tokens;
+        self.status.input_tokens += usage.input_tokens;
+        self.status.output_tokens += usage.output_tokens;
+        self.status.cached_tokens += usage.cache_read_tokens;
     }
 
     /// The progress line's stage, while a turn runs.
@@ -817,6 +917,16 @@ impl App {
         // One state, read here: the hint shows while the question
         // stands.
         self.status.quit_hint = self.quit_asked.is_some();
+        if let Some(screen) = &self.first_run {
+            let palette = &self.palette;
+            let quit_hint = self.status.quit_hint;
+            self.guard
+                .terminal
+                .draw(|frame| first_run::draw(frame, screen, palette, quit_hint))?;
+            self.dirty = false;
+            self.last_draw = Instant::now();
+            return Ok(());
+        }
         let Self {
             guard,
             transcript,

@@ -60,7 +60,9 @@ impl std::str::FromStr for Thinking {
 enum State {
     /// Deltas still arrive.
     Live,
-    Done(Duration),
+    /// The segment ended, after this long. A replayed segment has
+    /// no clock: the file keeps none.
+    Done(Option<Duration>),
     /// The turn ended before the segment did.
     Interrupted,
 }
@@ -119,8 +121,18 @@ impl Thought {
 
     /// The segment ended at `at`.
     pub fn end(&mut self, at: Instant) {
+        self.finish(Some(at.saturating_duration_since(self.started)));
+    }
+
+    /// The segment ended with no clock: a replayed segment, whose
+    /// file kept none.
+    pub fn end_without_clock(&mut self) {
+        self.finish(None);
+    }
+
+    fn finish(&mut self, duration: Option<Duration>) {
         if matches!(self.state, State::Live) {
-            self.state = State::Done(at.saturating_duration_since(self.started));
+            self.state = State::Done(duration);
             self.settle();
         }
     }
@@ -169,8 +181,11 @@ impl Thought {
             State::Live => out.push_str("· thinking"),
             State::Done(duration) => {
                 out.push(glyph);
-                out.push_str(" thought for ");
-                write_duration(out, duration);
+                out.push_str(" thought");
+                if let Some(duration) = duration {
+                    out.push_str(" for ");
+                    write_duration(out, duration);
+                }
             }
             State::Interrupted => {
                 out.push(glyph);

@@ -366,6 +366,9 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
 /// runtime.
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
+    // The credentials resolve at boot: a missing login stops the
+    // plain interface before its prompt, the M2 behavior it keeps.
+    runtime.provider()?;
     repl(&runtime).await
 }
 
@@ -461,22 +464,30 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = match runtime.open_session(&resume, &settings) {
+                    let (session, replay) = match runtime.open_session(&resume, &settings) {
                         Ok(opened) => opened,
                         Err(error) => {
                             result = Err(error);
                             break;
                         }
                     };
-                    opened = Some(session.id().to_string());
-                    if !history.is_empty() {
-                        eprintln!(
-                            "continuing session {} ({} messages)",
-                            session.id(),
-                            history.len()
-                        );
+                    let id = session.id().to_string();
+                    let messages = replay.messages.len();
+                    // The state changes after the engine builds, as
+                    // the full-screen driver does it.
+                    engine = match runtime.engine(session, replay.messages, &settings) {
+                        Ok(engine) => Some(engine),
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    };
+                    opened = Some(id.clone());
+                    // The notice alone: the plain interface shows no
+                    // history, the M2 behavior it keeps.
+                    if messages > 0 {
+                        eprintln!("continuing session {id} ({messages} messages)");
                     }
-                    engine = Some(runtime.engine(session, history, &settings));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(

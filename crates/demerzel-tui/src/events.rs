@@ -11,6 +11,7 @@ use demerzel_core::{ApprovalAnswer, ApprovalMode, EngineEvent, EventSink, Usage}
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cards::kept_output;
+use crate::replay::Replay;
 
 /// One owned display event, decoupled from the engine's borrowed
 /// [`EngineEvent`].
@@ -56,6 +57,8 @@ pub(crate) enum DisplayEvent {
     Status(StatusPatch),
     /// A session opened or closed; the status totals restart.
     SessionChanged,
+    /// A resumed session's past turns, as blocks.
+    Replay(Replay),
 }
 
 /// A change to the status. Each field that is `Some` replaces its
@@ -113,6 +116,15 @@ impl EventSender {
     /// A session opened or closed: the status totals restart.
     pub fn session_changed(&self) {
         let _ = self.tx.send(DisplayEvent::SessionChanged);
+    }
+
+    /// A resumed session's past turns: the transcript shows them as
+    /// blocks, in order, before whatever follows. Send it after
+    /// [`EventSender::session_changed`] and before the notice that
+    /// names the session, so the usage lines count into the
+    /// session's totals and the notice lands under the history.
+    pub fn replay(&self, replay: Replay) {
+        let _ = self.tx.send(DisplayEvent::Replay(replay));
     }
 
     /// The preview of a dispatching call — the diff, the command —
