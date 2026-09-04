@@ -13,6 +13,7 @@ use crate::render::{self, Status, View};
 use crate::theme::{Depth, Palette, Theme};
 use crate::transcript::{Kind, Transcript};
 
+pub use crate::replay::{Replay, ReplayEntry, ReplayResult};
 pub use crate::transcript::MAX_BLOCK_BYTES;
 
 /// A transcript, an input editor, a status bar, and a frame buffer
@@ -58,6 +59,12 @@ impl Screen {
     /// Append one whole block, the way a notice arrives.
     pub fn push_line(&mut self, text: &str) {
         self.transcript.push_line(Kind::Notice, text);
+    }
+
+    /// Show a resumed session's past turns, the way the first prompt
+    /// of a resumed session does.
+    pub fn replay(&mut self, replay: Replay) {
+        self.transcript.replay(replay);
     }
 
     /// Draw one frame: the same layout and the same buffer diff the

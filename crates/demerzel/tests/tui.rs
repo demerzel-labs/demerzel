@@ -8,10 +8,12 @@
 
 use std::io::Read as _;
 use std::os::fd::{FromRawFd as _, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use demerzel_core::{ApprovalMode, ContentBlock, Message, Role, SessionStore};
 use demerzel_mock::{MockResponse, MockServer};
 use serde_json::{Value, json};
 
@@ -172,8 +174,10 @@ struct Pty {
     /// Search cursor into the stripped, space-free view of `seen`.
     cursor: usize,
     /// The project directory the session runs in.
-    project: std::path::PathBuf,
-    _dirs: tempfile::TempDir,
+    project: PathBuf,
+    /// The home, data, config, and project directories of this run.
+    /// Shared with a relaunch, which runs in the same ones.
+    dirs: Arc<tempfile::TempDir>,
 }
 
 impl Drop for Pty {
@@ -267,7 +271,19 @@ impl Pty {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("config.toml"), config).unwrap();
         }
+        Self::launch(Arc::new(dirs), project, base_url, extra_args, env)
+    }
 
+    /// Spawn the binary on a fresh PTY in prepared directories.
+    fn launch(
+        dirs: Arc<tempfile::TempDir>,
+        project: PathBuf,
+        base_url: &str,
+        extra_args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Self {
+        let home = dirs.path().join("home");
+        let data = dirs.path().join("data");
         let (master, slave) = openpty();
         let slave_fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
         let mut command = Command::new(env!("CARGO_BIN_EXE_demerzel"));
@@ -309,8 +325,19 @@ impl Pty {
             seen: Vec::new(),
             cursor: 0,
             project,
-            _dirs: dirs,
+            dirs,
         }
+    }
+
+    /// Wait for a clean exit, then spawn the binary again in the same
+    /// directories: the same project, data, and config. `-c` then
+    /// opens the session the first run left.
+    fn relaunch(self, base_url: &str, extra_args: &[&str]) -> Self {
+        let dirs = self.dirs.clone();
+        let project = self.project.clone();
+        let (status, _) = self.wait_end();
+        assert!(status.success(), "exit status: {status:?}");
+        Self::launch(dirs, project, base_url, extra_args, &[])
     }
 
     /// Read the merged stream until `marker` shows up. The comparison
@@ -412,13 +439,19 @@ impl Pty {
     }
 
     /// The project directory the session runs in.
-    fn project(&self) -> std::path::PathBuf {
+    fn project(&self) -> PathBuf {
         self.project.clone()
+    }
+
+    /// The session store's root for this run: the data directory the
+    /// binary opens by default under `XDG_DATA_HOME`.
+    fn data_dir(&self) -> PathBuf {
+        self.dirs.path().join("data/demerzel")
     }
 
     /// The session-file stems this run created, across all projects.
     fn session_files(&self) -> Vec<String> {
-        let projects = self._dirs.path().join("data/demerzel/projects");
+        let projects = self.dirs.path().join("data/demerzel/projects");
         let mut stems = Vec::new();
         let Ok(entries) = std::fs::read_dir(&projects) else {
             return stems;
@@ -439,8 +472,8 @@ impl Pty {
 
     /// The debug-trace files this run wrote, under the data
     /// directory.
-    fn log_files(&self) -> Vec<std::path::PathBuf> {
-        let logs = self._dirs.path().join("data/demerzel/logs");
+    fn log_files(&self) -> Vec<PathBuf> {
+        let logs = self.dirs.path().join("data/demerzel/logs");
         let Ok(entries) = std::fs::read_dir(&logs) else {
             return Vec::new();
         };
@@ -2025,4 +2058,153 @@ async fn a_theme_name_with_no_theme_stops_the_run() {
         text.contains("`tui.theme`") && text.contains("ocean"),
         "{text}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_session_replays_its_turns_as_blocks_before_the_notice() {
+    let mock = MockServer::start(
+        vec![
+            // The first run: a reasoning turn, then a turn with a
+            // read call and a reply. The second run: one reply.
+            reasoning_turn("Plan the fix", "first reply"),
+            tool_call("call_r", "read", json!({"path": "tall.txt"})),
+            text_turn("read it"),
+            text_turn("third reply"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+    std::fs::write(pty.project().join("tall.txt"), tall_file()).unwrap();
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("first reply");
+    pty.wait_for("2 cached ·");
+    pty.send(b"look\r");
+    pty.wait_for("row 8 of the file");
+    pty.wait_for("read it");
+    pty.wait_for("2 cached ·");
+    let sessions = pty.session_files();
+    assert_eq!(sessions.len(), 1);
+    pty.send(CTRL_D);
+
+    let mut pty = pty.relaunch(&mock.url(), &["-c"]);
+    pty.wait_for(PROMPT);
+    // A taller window, so the whole replay fits above the box.
+    pty.resize(120, 40);
+    pty.send(b"again\r");
+    // The past turns land as blocks, in order — the prompt line,
+    // the closed thought, the reply, its usage line, the second
+    // prompt, the finished card with its output tail, the reply —
+    // then the notice, then the new turn's reply.
+    pty.wait_for("❯ hello");
+    pty.wait_for("▸ thought · Plan the fix");
+    pty.wait_for("first reply");
+    pty.wait_for("2 cached ·");
+    pty.wait_for("❯ look");
+    pty.wait_for("✓ read");
+    pty.wait_for("row 8 of the file");
+    pty.wait_for("read it");
+    pty.wait_for(&format!("continuing session {} (6 messages)", sessions[0]));
+    pty.wait_for("❯ again");
+    pty.wait_for("third reply");
+    pty.send(CTRL_D);
+    pty.wait_exit();
+
+    // The resumed run sent the history back to the model.
+    let requests = mock.received();
+    assert_eq!(requests.len(), 4);
+    let last = requests[3].body.to_string();
+    assert!(
+        last.contains("first reply") && last.contains("again"),
+        "{last}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_file_over_the_cap_names_the_messages_it_leaves_out() {
+    let mock = MockServer::start(vec![text_turn("after the cap")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &["-c"]);
+    // A session file with two messages more than the replay shows,
+    // written through the store the binary opens at the first
+    // prompt. The boot reads no session file, so the file can land
+    // after the screen opens.
+    let store = SessionStore::at(pty.data_dir());
+    let mut session = store
+        .create(
+            &pty.project(),
+            "openai-codex",
+            "gpt-test",
+            None,
+            ApprovalMode::Ask,
+        )
+        .unwrap();
+    for index in 0..202 {
+        let role = if index % 2 == 0 {
+            Role::User
+        } else {
+            Role::Assistant
+        };
+        session
+            .append_message(&Message {
+                role,
+                content: vec![ContentBlock::Text {
+                    text: format!("message {index}"),
+                }],
+            })
+            .unwrap();
+    }
+    drop(session);
+
+    pty.wait_for(PROMPT);
+    pty.resize(120, 40);
+    pty.send(b"more\r");
+    pty.wait_for("message 201");
+    pty.wait_for("continuing session");
+    pty.wait_for("(202 messages)");
+    pty.wait_for("after the cap");
+    // The dim line sits at the top of the transcript: page up to it.
+    // A height change repaints the rows whole and holds the top row,
+    // so the first replayed messages reach the stream in full.
+    for _ in 0..8 {
+        pty.send(PAGE_UP);
+    }
+    pty.wait_for("2 earlier messages left out");
+    pty.resize(120, 39);
+    pty.send(b"x");
+    pty.wait_for("2 earlier messages left out");
+    pty.wait_for("❯ message 2");
+    pty.wait_for("message 3");
+    pty.send(END);
+    // The wake key sits in the box: a press clears it, then Ctrl-D
+    // on the empty box ends the session.
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_prints_the_resume_notice_alone() {
+    let mock = MockServer::start(
+        vec![text_turn("plain reply"), text_turn("plain again")],
+        Vec::new(),
+    )
+    .await;
+    let mut pty = Pty::spawn(&mock.url(), &["--plain"]);
+    pty.wait_for(PROMPT);
+    pty.send(b"hello\r");
+    pty.wait_for("plain reply");
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_D);
+
+    let mut pty = pty.relaunch(&mock.url(), &["--plain", "-c"]);
+    pty.wait_for(PROMPT);
+    pty.send(b"more\r");
+    // The notice alone: no replayed prompt, no replayed reply.
+    pty.all_absent_until(&["hello", "plain reply"], "continuing session");
+    pty.wait_for("(2 messages)");
+    pty.wait_for("plain again");
+    pty.wait_for(PROMPT);
+    pty.send(CTRL_D);
+    pty.wait_exit();
 }

@@ -22,6 +22,7 @@ pub use provider::{
     Capabilities, Effort, EventStream, Provider, ProviderError, Request, StreamEvent,
 };
 pub use session::{
-    Replay, SCHEMA_VERSION, Session, SessionMeta, SessionRecord, SessionStore, Timing, replay,
+    Replay, ReplayTool, ReplayUsage, SCHEMA_VERSION, Session, SessionMeta, SessionRecord,
+    SessionStore, Timing, replay,
 };
 pub use tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};

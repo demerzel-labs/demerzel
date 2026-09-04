@@ -293,6 +293,16 @@ Two flags resume a session. Both look in the current project only:
 The two flags exclude each other. `/session` shows the open
 session's id and file.
 
+The full-screen interface shows a resumed session's past turns. At
+the first prompt, the transcript shows the messages of the session
+file as blocks: each prompt, each reply, each reasoning summary as a
+closed thinking block, each tool call as a finished card, and each
+model call's usage line. The `continuing session` notice follows
+them. The replay shows the last 200 messages or the last 256 KiB of
+message content, whichever is fewer. A dim line at the top names
+how many earlier messages it leaves out. The model receives the
+whole history. The plain interface prints the notice alone.
+
 ## The debug trace
 
 `DEMERZEL_LOG=<level>` turns the debug trace on for one run. The

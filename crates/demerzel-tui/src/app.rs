@@ -49,6 +49,7 @@ use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
 use crate::history::History;
 use crate::render::{self, Status, View, status_text};
+use crate::replay::ReplayEntry;
 use crate::select;
 use crate::terminal::Guard;
 use crate::theme::{Depth, Palette};
@@ -77,6 +78,13 @@ enum Action {
     Command(String),
     Exit,
     AbortTurn,
+}
+
+/// One line for the driver: the text, and whether it echoes as a
+/// prompt line — a typed line does, a key's command does not.
+struct Submitted {
+    text: String,
+    echo: bool,
 }
 
 /// Whether a turn is running when a key arrives.
@@ -134,25 +142,30 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
     let mut app = App::new(options)?;
     app.draw()?;
     loop {
-        let Some(line) = app.next_submission().await? else {
+        let Some(submitted) = app.next_submission().await? else {
             return Ok(());
         };
-        // A command can send display events before it returns its
-        // note — a model, effort, or approval switch moves the
-        // status — so the
-        // queue drains first and the note's frame shows both.
-        match driver.submit(line, app.sender(), app.approver()) {
+        let submission = driver.submit(submitted.text.clone(), app.sender(), app.approver());
+        // What the driver sent before it returned lands first: a
+        // status patch for a model, effort, or approval switch, or
+        // the past turns of a resumed session with the notice that
+        // names it. The echo of the line follows them, and the note
+        // or the turn follows the echo, so one frame shows all of it
+        // in that order.
+        app.drain_displays();
+        if submitted.echo {
+            app.transcript
+                .push_line(Kind::Prompt, &format!("{PROMPT}{}", submitted.text));
+        }
+        app.dirty = true;
+        match submission {
             Submission::Exit => return Ok(()),
             Submission::Note(text) => {
-                app.drain_displays();
                 app.transcript.push_line(Kind::Notice, &text);
-                app.dirty = true;
                 app.draw()?;
             }
             Submission::Error(text) => {
-                app.drain_displays();
                 app.transcript.push_line(Kind::Error, &text);
-                app.dirty = true;
                 app.draw()?;
             }
             Submission::Run(turn) => app.run_turn(turn).await?,
@@ -257,7 +270,7 @@ impl App {
     }
 
     /// Wait at the prompt. `None` means the session ends.
-    async fn next_submission(&mut self) -> io::Result<Option<String>> {
+    async fn next_submission(&mut self) -> io::Result<Option<Submitted>> {
         loop {
             let action = tokio::select! {
                 event = self.keys.recv() => match event {
@@ -302,12 +315,17 @@ impl App {
                 Action::Exit => return Ok(None),
                 Action::Submit(line) => {
                     self.history.record(&line);
-                    self.transcript
-                        .push_line(Kind::Prompt, &format!("{PROMPT}{line}"));
-                    self.dirty = true;
-                    return Ok(Some(line));
+                    return Ok(Some(Submitted {
+                        text: line,
+                        echo: true,
+                    }));
                 }
-                Action::Command(line) => return Ok(Some(line)),
+                Action::Command(line) => {
+                    return Ok(Some(Submitted {
+                        text: line,
+                        echo: false,
+                    }));
+                }
             }
         }
     }
@@ -462,23 +480,28 @@ impl App {
                 self.stage(Stage::Thinking);
             }
             DisplayEvent::Usage(usage) => {
-                // The last call's prompt is the context in use.
-                self.status.context_tokens = usage.input_tokens;
-                self.status.input_tokens += usage.input_tokens;
-                self.status.output_tokens += usage.output_tokens;
-                self.status.cached_tokens += usage.cache_read_tokens;
-                let mut line = format!(
-                    "· {} in · {} out · {} cached",
-                    usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
-                );
+                self.count_usage(&usage);
                 // The time since the turn started: the turn's length
                 // on its last call, the time so far on the calls
                 // before it.
-                if let Some(progress) = &self.progress {
-                    line.push_str(" · ");
-                    cards::write_duration(&mut line, progress.started.elapsed());
-                }
+                let elapsed = self
+                    .progress
+                    .as_ref()
+                    .map(|progress| progress.started.elapsed());
+                let mut line = String::new();
+                cards::write_usage(&mut line, &usage, elapsed);
                 self.transcript.push_line(Kind::Notice, &line);
+            }
+            DisplayEvent::Replay(replay) => {
+                // The replayed calls are the session's: their counts
+                // join the totals and the last one is the context in
+                // use, as the live calls' would.
+                for entry in &replay.entries {
+                    if let ReplayEntry::Usage { usage, .. } = entry {
+                        self.count_usage(usage);
+                    }
+                }
+                self.transcript.replay(*replay);
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),
@@ -492,6 +515,16 @@ impl App {
                 self.status.cached_tokens = 0;
             }
         }
+    }
+
+    /// One model call's counts onto the status: the last call's
+    /// prompt is the context in use, and every call adds to the
+    /// totals.
+    fn count_usage(&mut self, usage: &demerzel_core::Usage) {
+        self.status.context_tokens = usage.input_tokens;
+        self.status.input_tokens += usage.input_tokens;
+        self.status.output_tokens += usage.output_tokens;
+        self.status.cached_tokens += usage.cache_read_tokens;
     }
 
     /// The progress line's stage, while a turn runs.

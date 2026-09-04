@@ -461,7 +461,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, history) = match runtime.open_session(&resume, &settings) {
+                    let (session, replay) = match runtime.open_session(&resume, &settings) {
                         Ok(opened) => opened,
                         Err(error) => {
                             result = Err(error);
@@ -469,14 +469,16 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         }
                     };
                     opened = Some(session.id().to_string());
-                    if !history.is_empty() {
+                    // The notice alone: the plain interface shows no
+                    // history, the M2 behavior it keeps.
+                    if !replay.messages.is_empty() {
                         eprintln!(
                             "continuing session {} ({} messages)",
                             session.id(),
-                            history.len()
+                            replay.messages.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, history, &settings));
+                    engine = Some(runtime.engine(session, replay.messages, &settings));
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(

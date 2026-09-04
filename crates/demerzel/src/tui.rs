@@ -4,6 +4,9 @@
 //! outcomes to messages. The REPL and this driver share the command
 //! registry, the previews, and the message wording. The driver builds
 //! every preview, so the interface crate needs no knowledge of tools.
+//! A resumed session's past turns go to the screen the same way: the
+//! driver turns the session file into display entries, previews
+//! included, and the interface shows them as blocks.
 
 use std::path::PathBuf;
 
@@ -203,6 +206,33 @@ impl Driver for TuiDriver<'_> {
             }
             None => {}
         }
+        // The session opens at the first prompt, before the turn
+        // starts: the events land above the prompt line's echo, so
+        // a resumed session's past turns show first, the notice
+        // under them, and the new prompt under the notice — the
+        // screen shows what the model receives.
+        if self.engine.is_none() {
+            match self.runtime.open_session(&self.resume, &self.settings) {
+                Ok((session, replay)) => {
+                    self.opened = Some(session.id().to_string());
+                    events.session_changed();
+                    if !replay.messages.is_empty() {
+                        events.replay(crate::replay::entries(&replay));
+                        events.notice(format!(
+                            "continuing session {} ({} messages)",
+                            session.id(),
+                            replay.messages.len()
+                        ));
+                    }
+                    self.engine = Some(self.runtime.engine(
+                        session,
+                        replay.messages,
+                        &self.settings,
+                    ));
+                }
+                Err(error) => return Submission::Error(format!("demerzel: {error}")),
+            }
+        }
         Submission::Run(Box::pin(async move {
             // The branch on the status follows a checkout between
             // turns: one read at each turn's start, no polling, and
@@ -213,26 +243,6 @@ impl Driver for TuiDriver<'_> {
                 let mut patch = StatusPatch::default();
                 patch.branch = Some(self.branch.clone());
                 events.status(patch);
-            }
-            if self.engine.is_none() {
-                match self.runtime.open_session(&self.resume, &self.settings) {
-                    Ok((session, history)) => {
-                        self.opened = Some(session.id().to_string());
-                        events.session_changed();
-                        if !history.is_empty() {
-                            events.notice(format!(
-                                "continuing session {} ({} messages)",
-                                session.id(),
-                                history.len()
-                            ));
-                        }
-                        self.engine = Some(self.runtime.engine(session, history, &self.settings));
-                    }
-                    Err(error) => {
-                        events.error(format!("demerzel: {error}"));
-                        return;
-                    }
-                }
             }
             let engine = self.engine.as_mut().expect("engine opened above");
             let sink = PreviewSink {

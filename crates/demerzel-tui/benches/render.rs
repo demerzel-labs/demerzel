@@ -20,6 +20,15 @@
 //!   two end rows pay the column split and the extra spans; the rows
 //!   between take the whole-row path. The number pins that a
 //!   selection left on the screen costs a frame about nothing.
+//! - `replay`: the first prompt of a resumed session: 50 turns of a
+//!   session file — 200 messages' worth of prompts, thoughts, cards,
+//!   usage lines, and markdown replies — pushed as blocks, then the
+//!   first frame. The push lays nothing out; the frame lays out the
+//!   rows it shows. The cost of the replay on resume, past the file
+//!   read.
+//! - `frame-replayed`: one redraw over that replayed transcript. The
+//!   rows on screen come from cards, a thought, and formatted
+//!   blocks; the walk stops at the viewport as it does over prose.
 //!
 //! Each bench runs twice. The prose run keeps the M2 workloads on a
 //! plain-text transcript, so its numbers compare with the M2
@@ -41,8 +50,11 @@
 //! crosses the per-block byte cap once, so one block split is inside
 //! `ingest` and `stream`.
 
+use std::time::Duration;
+
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use demerzel_tui::bench::{MAX_BLOCK_BYTES, Screen};
+use demerzel_core::Usage;
+use demerzel_tui::bench::{MAX_BLOCK_BYTES, Replay, ReplayEntry, ReplayResult, Screen};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
@@ -54,6 +66,12 @@ const STREAM: usize = 64 * 1024;
 const DELTAS_PER_FRAME: usize = 64;
 /// Frames in one `stream` iteration: one per batch, one at the end.
 const FRAMES: usize = STREAM / DELTA / DELTAS_PER_FRAME + 1;
+/// Turns in the replayed history: four messages each, the replay's
+/// message cap.
+const REPLAY_TURNS: usize = 50;
+/// Entries per replayed turn: the prompt, a thought, a card, its
+/// usage line, the reply, its usage line.
+const REPLAY_ENTRIES: usize = 6;
 
 /// A history block of one line; lengths cycle from one row to several
 /// wrapped rows.
@@ -118,6 +136,48 @@ fn formatted_text() -> String {
     text.truncate(STREAM);
     assert!(text.is_ascii());
     text
+}
+
+/// The replayed history: `REPLAY_TURNS` turns as the first prompt of
+/// a resumed session shows them, and a count of messages left out.
+fn replay_history() -> Replay {
+    let usage = Usage {
+        input_tokens: 34_200,
+        output_tokens: 180,
+        cache_read_tokens: 30_000,
+        cache_creation_tokens: 0,
+    };
+    let mut entries = Vec::with_capacity(REPLAY_TURNS * REPLAY_ENTRIES);
+    for turn in 0..REPLAY_TURNS {
+        entries.push(ReplayEntry::Prompt(history_line(turn)));
+        entries.push(ReplayEntry::Reasoning(
+            "**Plan the change.** Read the file, then edit the one line that matters.".into(),
+        ));
+        entries.push(ReplayEntry::Tool {
+            name: "bash".into(),
+            preview: Some(format!("$ echo turn {turn}")),
+            result: Some(ReplayResult {
+                output: format!("turn {turn}\n"),
+                is_error: false,
+                duration: Some(Duration::from_millis(40)),
+            }),
+        });
+        entries.push(ReplayEntry::Usage {
+            usage,
+            elapsed: Some(Duration::from_millis(900)),
+        });
+        entries.push(ReplayEntry::Text(format!(
+            "## Turn {turn}\n\nThe change is in. Next:\n\n- run the tests\n- read the `diff`\n"
+        )));
+        entries.push(ReplayEntry::Usage {
+            usage,
+            elapsed: Some(Duration::from_millis(2_100)),
+        });
+    }
+    Replay {
+        left_out: 12,
+        entries,
+    }
 }
 
 /// The stream as 16-byte deltas.
@@ -193,6 +253,10 @@ fn bench_render(c: &mut Criterion) {
     // selection and a bench that measures nothing.
     let mut check = screen_with_history(false);
     assert!(check.select((4, 0), (60, HEIGHT - 5)));
+    // The replay lands one block per entry, plus the left-out line.
+    let mut check = Screen::new(WIDTH, HEIGHT, true);
+    check.replay(replay_history());
+    assert_eq!(check.blocks(), REPLAY_TURNS * REPLAY_ENTRIES + 1);
 
     // The frames run before any throughput is set on the group, the
     // M2 shape of `frame`. The formatted one redraws a screen whose
@@ -212,6 +276,22 @@ fn bench_render(c: &mut Criterion) {
             b.iter(|| screen.draw())
         });
     }
+
+    let mut screen = Screen::new(WIDTH, HEIGHT, true);
+    screen.replay(replay_history());
+    screen.draw();
+    group.bench_function("frame-replayed", |b| b.iter(|| screen.draw()));
+    group.bench_function("replay", |b| {
+        b.iter_batched(
+            || (Screen::new(WIDTH, HEIGHT, true), replay_history()),
+            |(mut screen, replay)| {
+                screen.replay(replay);
+                screen.draw();
+                screen
+            },
+            BatchSize::LargeInput,
+        )
+    });
 
     for (suffix, markdown, text) in workloads {
         let deltas = deltas(text);

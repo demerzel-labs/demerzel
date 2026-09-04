@@ -11,6 +11,7 @@ mod git;
 pub mod login;
 mod preview;
 pub mod repl;
+mod replay;
 pub mod trace;
 pub mod tui;
 
@@ -18,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
-    NoPrompt, ProviderError, Session, SessionMeta, SessionStore, ToolAccess, ToolHost, TurnOutcome,
+    NoPrompt, ProviderError, Replay, Session, SessionMeta, SessionStore, ToolAccess, ToolHost,
+    TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
@@ -272,12 +274,14 @@ impl Runtime {
     /// fails. Resume appends a fresh meta record, so the file names
     /// the model and provider that continue it. The interfaces own
     /// the session model — `/model` switches it — so it arrives as
-    /// an argument.
+    /// an argument. The replay holds the history the engine
+    /// continues, and the records the full-screen interface shows
+    /// again; a fresh session's is empty.
     pub fn open_session(
         &self,
         resume: &Resume,
         settings: &SessionSettings,
-    ) -> Result<(Session, Vec<Message>), RunError> {
+    ) -> Result<(Session, Replay), RunError> {
         let path = match resume {
             Resume::Fresh => None,
             Resume::Latest => self.store.latest(&self.config.project_dir)?,
@@ -306,7 +310,7 @@ impl Runtime {
                     Some(settings.effort),
                     settings.approval,
                 ))?;
-                return Ok((session, replay.messages));
+                return Ok((session, replay));
             }
             if let Resume::Id(id) = resume {
                 return Err(RunError::Config(format!(
@@ -321,7 +325,7 @@ impl Runtime {
             Some(settings.effort),
             settings.approval,
         )?;
-        Ok((session, Vec::new()))
+        Ok((session, Replay::default()))
     }
 
     /// Whether `id` names the project's latest session, the one `-c`
@@ -385,8 +389,8 @@ impl Runtime {
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
         let settings = SessionSettings::from_config(&self.config);
-        let (session, history) = self.open_session(&self.config.resume, &settings)?;
-        let mut engine = self.engine(session, history, &settings);
+        let (session, replay) = self.open_session(&self.config.resume, &settings)?;
+        let mut engine = self.engine(session, replay.messages, &settings);
         Ok(engine.user_turn(prompt, sink, &mut NoPrompt).await?)
     }
 }

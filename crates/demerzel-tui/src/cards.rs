@@ -23,6 +23,8 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
+use demerzel_core::Usage;
+
 use crate::markdown::Face;
 
 /// Bytes of one tool output the interface keeps: the tail, after
@@ -267,6 +269,14 @@ impl Card {
             .filter(|summary| !summary.is_empty())
             .map(|summary| one_line(summary, LINE_BYTES));
         self.stale = true;
+    }
+
+    /// The call as a session file records it: ended at once, with
+    /// the clock the file kept — `None` when it kept none — in place
+    /// of one measured here.
+    pub fn replay(&mut self, outcome: Outcome<'_>, duration: Option<Duration>) {
+        self.end(outcome);
+        self.duration = duration;
     }
 
     /// The turn ended with the call open.
@@ -542,6 +552,20 @@ pub fn write_duration(out: &mut String, duration: Duration) {
         let seconds = duration.as_secs();
         write!(out, "{}m {:02}s", seconds / 60, seconds % 60)
     };
+}
+
+/// Append the usage line of one model call: the counts and, with
+/// `elapsed`, the time since the turn started.
+pub fn write_usage(out: &mut String, usage: &Usage, elapsed: Option<Duration>) {
+    let _ = write!(
+        out,
+        "· {} in · {} out · {} cached",
+        usage.input_tokens, usage.output_tokens, usage.cache_read_tokens
+    );
+    if let Some(elapsed) = elapsed {
+        out.push_str(" · ");
+        write_duration(out, elapsed);
+    }
 }
 
 /// Write the progress line into `out`: the spinner, the elapsed

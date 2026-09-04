@@ -10,7 +10,8 @@
 //!   event sink, and an [`ApprovalChannel`] to ask questions through.
 //!   The driver renders each dispatching call's preview and sends it
 //!   with [`EventSender::tool_preview`]; the interface shows it on
-//!   the call's card.
+//!   the call's card. A resumed session's past turns arrive the
+//!   same way, as a [`Replay`] through [`EventSender::replay`].
 //! - The interface loop draws what arrives and answers approval
 //!   questions at the keyboard.
 //! - Dropping the returned turn future aborts the turn; the loop does
@@ -26,6 +27,7 @@ mod highlight;
 mod history;
 mod markdown;
 mod render;
+mod replay;
 mod select;
 mod terminal;
 pub mod theme;
@@ -43,6 +45,7 @@ use demerzel_core::ApprovalMode;
 pub use cards::write_duration;
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
+pub use replay::{Replay, ReplayEntry, ReplayResult};
 pub use theme::Theme;
 pub use thinking::Thinking;
 
@@ -85,8 +88,9 @@ pub enum Submission<'a> {
 pub trait Driver {
     /// Handle one submitted line. The line is trimmed and non-empty.
     /// Display events the driver sends through `events` before this
-    /// call returns — a status patch for a model or effort switch —
-    /// show on the same frame as the note the call returns.
+    /// call returns — a status patch for a model or effort switch,
+    /// the replay of a resumed session — land above the line's echo,
+    /// and show on the same frame as the note the call returns.
     fn submit(
         &mut self,
         line: String,

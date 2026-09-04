@@ -60,7 +60,9 @@ impl std::str::FromStr for Thinking {
 enum State {
     /// Deltas still arrive.
     Live,
-    Done(Duration),
+    /// The segment ended, after this long. A replayed segment has
+    /// no clock: the file keeps none.
+    Done(Option<Duration>),
     /// The turn ended before the segment did.
     Interrupted,
 }
@@ -117,10 +119,11 @@ impl Thought {
         self.stale = true;
     }
 
-    /// The segment ended at `at`.
-    pub fn end(&mut self, at: Instant) {
+    /// The segment ended at `at`, or with no clock — a replayed
+    /// segment, whose file kept none.
+    pub fn end(&mut self, at: Option<Instant>) {
         if matches!(self.state, State::Live) {
-            self.state = State::Done(at.saturating_duration_since(self.started));
+            self.state = State::Done(at.map(|at| at.saturating_duration_since(self.started)));
             self.settle();
         }
     }
@@ -169,8 +172,11 @@ impl Thought {
             State::Live => out.push_str("· thinking"),
             State::Done(duration) => {
                 out.push(glyph);
-                out.push_str(" thought for ");
-                write_duration(out, duration);
+                out.push_str(" thought");
+                if let Some(duration) = duration {
+                    out.push_str(" for ");
+                    write_duration(out, duration);
+                }
             }
             State::Interrupted => {
                 out.push(glyph);
@@ -244,7 +250,7 @@ mod tests {
         let mut thought = Thought::new(false, at(0));
         thought.push("**Plan** the fix\nthen the rest", CAP);
         assert_eq!(text(&mut thought), "· thinking · **Plan** the fix…");
-        thought.end(at(2));
+        thought.end(Some(at(2)));
         assert_eq!(text(&mut thought), "▸ thought for 2.0s · **Plan** the fix…");
         assert!(!thought.stale());
     }
@@ -254,7 +260,7 @@ mod tests {
         let mut thought = Thought::new(true, at(0));
         thought.push("one\ntwo", CAP);
         assert_eq!(text(&mut thought), "· thinking\n\none\ntwo");
-        thought.end(at(1));
+        thought.end(Some(at(1)));
         assert_eq!(text(&mut thought), "▾ thought for 1.0s\n\none\ntwo");
         thought.set_open(false);
         assert!(thought.stale());
@@ -267,7 +273,7 @@ mod tests {
     fn a_one_line_summary_gets_no_more_mark() {
         let mut thought = Thought::new(false, at(0));
         thought.push("just this\n\n", CAP);
-        thought.end(at(0));
+        thought.end(Some(at(0)));
         assert_eq!(text(&mut thought), "▸ thought for 0ms · just this");
     }
 
@@ -278,7 +284,7 @@ mod tests {
         assert_eq!(text(&mut thought), "· thinking");
         thought.interrupt();
         assert_eq!(text(&mut thought), "▸ thinking interrupted");
-        thought.end(at(3));
+        thought.end(Some(at(3)));
         assert_eq!(
             text(&mut thought),
             "▸ thinking interrupted",
