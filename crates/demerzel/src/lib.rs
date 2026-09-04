@@ -171,7 +171,7 @@ pub struct Runtime {
     /// The provider, built at the first turn: credentials resolve
     /// then, not at boot, so a run that opens without a login — the
     /// first-run screen — finds a login that lands before its first
-    /// turn. See [`Runtime::provider`].
+    /// turn. See `Runtime::provider`.
     provider: OnceLock<Box<dyn Provider>>,
     /// The full tool set, and the read-only subset. `tools(mode)`
     /// picks one; `Engine::set_approval` takes the pick when the mode
@@ -186,7 +186,7 @@ impl Runtime {
     /// registries, and the checks that stop a run at boot — a
     /// `--session <id>` with no file, a provider id this build does
     /// not have. The credentials resolve at the first turn; see
-    /// [`Runtime::provider`].
+    /// `Runtime::provider`.
     pub fn new(config: RunConfig) -> Result<Self, RunError> {
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
@@ -455,7 +455,7 @@ impl Runtime {
 
     /// Build the turn engine over an open session, with the
     /// interface's current session settings. The provider builds
-    /// here when nothing built it yet; see [`Runtime::provider`].
+    /// here when nothing built it yet; see `Runtime::provider`.
     pub fn engine(
         &self,
         session: Session,
