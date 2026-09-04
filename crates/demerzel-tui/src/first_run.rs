@@ -21,14 +21,36 @@ use crate::theme::{Palette, Role};
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct FirstRun {
+    /// The session's provider, the one without a credential.
+    pub provider: String,
     /// The credential state per provider, one line each, as the
     /// doctor reports it: the provider id, a colon, the state.
     pub credentials: Vec<String>,
-    /// The login commands: each the command, then what it does.
-    pub commands: Vec<(String, String)>,
+    /// The login commands, the session's provider first.
+    pub commands: Vec<LoginCommand>,
 }
 
-/// The wordmark: three rows of box-drawing characters, 24 columns.
+/// One login command on the first-run screen.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LoginCommand {
+    /// The command to type.
+    pub command: String,
+    /// What the command does, in a few words.
+    pub purpose: String,
+}
+
+impl LoginCommand {
+    pub fn new(command: impl Into<String>, purpose: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            purpose: purpose.into(),
+        }
+    }
+}
+
+/// The wordmark: three rows of box-drawing characters, at most 24
+/// columns.
 const LOGO: [&str; 3] = [
     "┌┬┐┌─┐┌┬┐┌─┐┬─┐┌─┐┌─┐┬",
     "│││├┤ │││├┤ ├┬┘┌─┘├┤ │",
@@ -62,7 +84,13 @@ pub(crate) fn draw(frame: &mut Frame, screen: &FirstRun, palette: &Palette, quit
         rows.push(row, accent);
     }
     rows.push("", text);
-    rows.push("No credential for the session's provider.", text);
+    rows.push(
+        &format!(
+            "No credential for {}, the session's provider.",
+            screen.provider
+        ),
+        text,
+    );
     for line in &screen.credentials {
         rows.push(&format!("  {line}"), dim);
     }
@@ -71,11 +99,14 @@ pub(crate) fn draw(frame: &mut Frame, screen: &FirstRun, palette: &Palette, quit
     let width = screen
         .commands
         .iter()
-        .map(|(command, _)| command.chars().count())
+        .map(|login| login.command.chars().count())
         .max()
         .unwrap_or(0);
-    for (command, purpose) in &screen.commands {
-        rows.push(&format!("  {command:<width$}   {purpose}"), text);
+    for login in &screen.commands {
+        rows.push(
+            &format!("  {:<width$}   {}", login.command, login.purpose),
+            text,
+        );
     }
     rows.push("", text);
     rows.push(
@@ -84,9 +115,10 @@ pub(crate) fn draw(frame: &mut Frame, screen: &FirstRun, palette: &Palette, quit
     );
     if quit_hint {
         let last = Rect {
+            x: area.x + MARGIN,
             y: area.y + area.height - 1,
+            width: area.width - MARGIN,
             height: 1,
-            ..area
         };
         let warning = paint(Style::default(), palette.color(Role::Warning));
         draw_line(rows.frame, last, QUIT_HINT, warning);
@@ -125,13 +157,14 @@ mod tests {
 
     fn screen() -> FirstRun {
         FirstRun {
+            provider: "openai-codex".into(),
             credentials: vec![
                 "openai-codex: none — run `dmz login`".into(),
                 "anthropic: none".into(),
             ],
             commands: vec![
-                ("dmz login".into(), "the subscription".into()),
-                ("dmz login anthropic".into(), "an API key".into()),
+                LoginCommand::new("dmz login", "the subscription"),
+                LoginCommand::new("dmz login anthropic", "an API key"),
             ],
         }
     }
@@ -168,7 +201,10 @@ mod tests {
         assert_eq!(rows[0], "");
         assert_eq!(rows[1], format!("  {}", LOGO[0]));
         assert_eq!(rows[3], format!("  {}", LOGO[2]));
-        assert_eq!(rows[5], "  No credential for the session's provider.");
+        assert_eq!(
+            rows[5],
+            "  No credential for openai-codex, the session's provider."
+        );
         assert_eq!(rows[6], "    openai-codex: none — run `dmz login`");
         assert_eq!(rows[9], "  Log in from another terminal:");
         assert_eq!(rows[10], "    dmz login             the subscription");
@@ -184,7 +220,10 @@ mod tests {
         let rows = rows(20, 5, true);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[1].chars().count(), 20);
-        assert_eq!(rows[4], QUIT_HINT.chars().take(20).collect::<String>());
+        assert_eq!(
+            rows[4],
+            format!("  {}", QUIT_HINT.chars().take(18).collect::<String>())
+        );
         // Nothing to draw into: no panic.
         rows_of_nothing();
     }

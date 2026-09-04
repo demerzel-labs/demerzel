@@ -25,10 +25,12 @@ use demerzel_core::{
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
-use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP};
+use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_tools::Registry;
-pub use demerzel_tui::{FirstRun, Theme, Thinking};
+pub use demerzel_tui::{FirstRun, LoginCommand, Theme, Thinking};
+
+use crate::doctor::credential_states;
 
 /// First line an interactive interface prints on stderr. The PTY boot
 /// probe waits for it; the TUI prints it before the alternate screen.
@@ -180,6 +182,11 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Build the long-lived pieces: the session store, the tool
+    /// registries, and the checks that stop a run at boot — a
+    /// `--session <id>` with no file, a provider id this build does
+    /// not have. The credentials resolve at the first turn; see
+    /// [`Runtime::provider`].
     pub fn new(config: RunConfig) -> Result<Self, RunError> {
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
@@ -224,9 +231,11 @@ impl Runtime {
     /// here, so a missing login fails with a clear message. A failed
     /// build is not kept: the next call tries again, so a login that
     /// lands between two prompts takes effect at the next one. The
-    /// plain interface and a one-shot run call this at boot, so a
-    /// missing login stops them before a prompt, their M2 behavior.
-    pub fn provider(&self) -> Result<&dyn Provider, RunError> {
+    /// plain interface calls this at boot and a one-shot run inside
+    /// the open of its one session, so a missing login stops both
+    /// before a request goes out or a session file is touched, their
+    /// M2 behavior.
+    pub(crate) fn provider(&self) -> Result<&dyn Provider, RunError> {
         if let Some(provider) = self.provider.get() {
             return Ok(provider.as_ref());
         }
@@ -235,70 +244,62 @@ impl Runtime {
     }
 
     /// The first-run screen's text when no credential resolves for
-    /// the session's provider; `None` when one does, or when the
-    /// provider is already built. A read-only probe, the one
-    /// `doctor` runs: the store stays unwritten, and a Codex CLI
-    /// login that the first turn would import counts as a
-    /// credential. A store that does not open is a state to show,
-    /// not a stop: the first turn fails on it with the same error.
+    /// the session's provider; `None` when one does. The decision
+    /// comes first and the text second: a run that can authenticate
+    /// pays the probe alone, and an Anthropic session with its key in
+    /// the environment opens no store at all. The state lines come
+    /// from the read-only probe `doctor` runs, with its wording: the
+    /// store stays unwritten, and a Codex CLI login that the first
+    /// turn would import counts as a credential. A store that does
+    /// not open is a state to show, not a stop: the first turn fails
+    /// on it with the same error.
     pub fn first_run(&self) -> Option<FirstRun> {
-        if self.provider.get().is_some() {
-            return None;
-        }
         let env_key = std::env::var(anthropic::ENV_API_KEY)
             .ok()
             .filter(|key| !key.is_empty());
-        let store = Self::open_store(&self.config);
-        let codex = store
-            .as_ref()
-            .ok()
-            .and_then(|store| store.probe())
-            .map(|probe| probe.source);
+        let provider = self.config.provider.as_str();
         // The environment wins and skips the store, the order the
         // provider build applies.
-        let anthropic_source = match env_key {
-            Some(_) => Some(CredentialSource::Env),
-            None => store
-                .as_ref()
-                .ok()
-                .and_then(|store| store.probe_anthropic(None))
-                .map(|probe| probe.source),
-        };
-        let resolves = match self.config.provider.as_str() {
-            openai_codex::PROVIDER_ID => codex.is_some_and(CredentialSource::usable),
-            _ => anthropic_source.is_some(),
-        };
-        if resolves {
+        if provider == anthropic::PROVIDER_ID && env_key.is_some() {
             return None;
         }
-        let state = |source: Option<CredentialSource>, help: &str| match (source, &store) {
-            (Some(source), _) => source.describe().to_string(),
-            (None, Err(error)) => error.to_string(),
-            (None, Ok(_)) => format!("none — {help}"),
+        let credentials = match Self::open_store(&self.config) {
+            Ok(store) => {
+                let resolves = match provider {
+                    openai_codex::PROVIDER_ID => {
+                        store.probe().is_some_and(|probe| probe.source.usable())
+                    }
+                    anthropic::PROVIDER_ID => store.anthropic_api_key().is_some(),
+                    _ => return None,
+                };
+                if resolves {
+                    return None;
+                }
+                credential_states(&store, env_key.as_deref())
+                    .map(|state| format!("{}: {}", state.provider, state.state))
+                    .to_vec()
+            }
+            Err(error) => {
+                let state = error.to_string();
+                vec![
+                    format!("{}: {state}", openai_codex::PROVIDER_ID),
+                    format!("{}: {state}", anthropic::PROVIDER_ID),
+                ]
+            }
         };
+        let codex_login =
+            LoginCommand::new("dmz login", "the ChatGPT subscription, through the browser");
+        let anthropic_login =
+            LoginCommand::new("dmz login anthropic", "an API key, prompted and verified");
         let mut screen = FirstRun::default();
-        screen.credentials = vec![
-            format!(
-                "{}: {}",
-                openai_codex::PROVIDER_ID,
-                state(codex, NO_CREDENTIALS_HELP)
-            ),
-            format!(
-                "{}: {}",
-                anthropic::PROVIDER_ID,
-                state(anthropic_source, anthropic::NO_CREDENTIALS_HELP)
-            ),
-        ];
-        screen.commands = vec![
-            (
-                "dmz login".to_string(),
-                "the ChatGPT subscription, through the browser".to_string(),
-            ),
-            (
-                "dmz login anthropic".to_string(),
-                "an API key, prompted and verified".to_string(),
-            ),
-        ];
+        screen.provider = provider.to_string();
+        screen.credentials = credentials;
+        // The session's provider first.
+        screen.commands = if provider == anthropic::PROVIDER_ID {
+            vec![anthropic_login, codex_login]
+        } else {
+            vec![codex_login, anthropic_login]
+        };
         Some(screen)
     }
 

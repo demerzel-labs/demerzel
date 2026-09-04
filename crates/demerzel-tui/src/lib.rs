@@ -46,7 +46,7 @@ use demerzel_core::ApprovalMode;
 pub use cards::{OUTPUT_TAIL_BYTES, write_duration};
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
-pub use first_run::FirstRun;
+pub use first_run::{FirstRun, LoginCommand};
 pub use replay::{Replay, ReplayEntry, ReplayResult};
 pub use theme::Theme;
 pub use thinking::Thinking;

@@ -216,27 +216,35 @@ impl Driver for TuiDriver<'_> {
         // under them, and the new prompt under the notice — the
         // screen shows what the model receives.
         if self.engine.is_none() {
-            match self.runtime.open_session(&self.resume, &self.settings) {
-                Ok((session, replay)) => {
-                    self.opened = Some(session.id().to_string());
-                    events.session_changed();
-                    if !replay.messages.is_empty() {
-                        events.replay(crate::replay::entries(&replay));
-                        events.notice(format!(
-                            "continuing session {} ({} messages)",
-                            session.id(),
-                            replay.messages.len()
-                        ));
-                    }
-                    match self
-                        .runtime
-                        .engine(session, replay.messages, &self.settings)
-                    {
-                        Ok(engine) => self.engine = Some(engine),
-                        Err(error) => return Submission::Error(format!("demerzel: {error}")),
-                    }
-                }
+            let (session, replay) = match self.runtime.open_session(&self.resume, &self.settings) {
+                Ok(opened) => opened,
                 Err(error) => return Submission::Error(format!("demerzel: {error}")),
+            };
+            let id = session.id().to_string();
+            let history = (!replay.messages.is_empty()).then(|| {
+                (
+                    crate::replay::entries(&replay),
+                    format!(
+                        "continuing session {id} ({} messages)",
+                        replay.messages.len()
+                    ),
+                )
+            });
+            // The state changes after the engine builds: a failure
+            // leaves no opened session behind it.
+            let engine = match self
+                .runtime
+                .engine(session, replay.messages, &self.settings)
+            {
+                Ok(engine) => engine,
+                Err(error) => return Submission::Error(format!("demerzel: {error}")),
+            };
+            self.engine = Some(engine);
+            self.opened = Some(id);
+            events.session_changed();
+            if let Some((entries, notice)) = history {
+                events.replay(entries);
+                events.notice(notice);
             }
         }
         Submission::Run(Box::pin(async move {

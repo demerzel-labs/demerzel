@@ -285,8 +285,8 @@ async fn a_failed_run_names_its_file_and_keeps_the_token_out_at_error_level() {
     // The echo lands redacted.
     assert!(log.contains("[redacted]"), "{log}");
     assert!(!log.contains(ACCESS_TOKEN), "{log}");
-    // A boot that fails before the interface — here, no credentials
-    // in an empty data directory — names the file too.
+    // A run that fails on its credentials — here, none in an empty
+    // data directory — names the file too.
     let mock = MockServer::start(Vec::new(), Vec::new()).await;
     let dirs = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_demerzel"));

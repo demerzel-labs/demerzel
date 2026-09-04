@@ -498,7 +498,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
 }
 
 /// One row of text cut to the width: the progress line, the
-/// approval question.
+/// approval question, the rows of the first-run screen.
 pub(crate) fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
     let (shown, _) = fit_row([text], usize::from(area.width));
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);

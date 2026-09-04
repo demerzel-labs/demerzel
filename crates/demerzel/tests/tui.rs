@@ -2241,14 +2241,16 @@ async fn a_run_without_a_login_shows_the_first_run_screen_until_a_login_lands() 
     let mock = MockServer::start(vec![text_turn("logged in now")], Vec::new()).await;
     let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
 
-    // The screen before the prompt: the wordmark, the state per
-    // provider, the login commands, and the key that continues.
+    // The screen before the prompt: the wordmark's first row, the
+    // state per provider in the doctor's words, and the login
+    // commands, the session's provider first.
     pty.wait_for(READY);
     pty.wait_for("┌┬┐┌─┐┌┬┐");
+    pty.wait_for("openai-codex, the session's provider");
     pty.wait_for("openai-codex: none");
     pty.wait_for("anthropic: none");
+    pty.wait_for("dmz login ");
     pty.wait_for("dmz login anthropic");
-    pty.wait_for("Press Enter to continue");
     // The Ctrl-C rule holds on the screen: one press asks, and Enter
     // takes the question back and the screen down.
     pty.send(CTRL_C);
@@ -2275,7 +2277,7 @@ async fn a_run_without_a_login_shows_the_first_run_screen_until_a_login_lands() 
 async fn a_run_without_a_login_quits_from_the_first_run_screen() {
     let mock = MockServer::start(Vec::new(), Vec::new()).await;
     let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
-    pty.wait_for("Press Enter to continue");
+    pty.wait_for("openai-codex: none");
     pty.send(CTRL_C);
     pty.wait_for(QUIT_HINT);
     pty.send(CTRL_C);
@@ -2284,7 +2286,7 @@ async fn a_run_without_a_login_quits_from_the_first_run_screen() {
     assert!(!after_restore(&raw).contains("resume with"));
 
     let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
-    pty.wait_for("Press Enter to continue");
+    pty.wait_for("openai-codex: none");
     pty.send(CTRL_D);
     pty.wait_exit();
 }
