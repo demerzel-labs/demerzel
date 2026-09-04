@@ -828,7 +828,7 @@ impl Transcript {
         // open would keep an index the replay moves past. At the
         // quiet point the driver uses, this closes nothing.
         self.close();
-        self.blocks.reserve(replay.entries.len());
+        self.blocks.reserve(replay.entries.len().min(MAX_BLOCKS));
         let now = Instant::now();
         if replay.left_out > 0 {
             let noun = if replay.left_out == 1 {

@@ -158,8 +158,10 @@ fn content_bytes(message: &Message) -> usize {
 
 /// The tail of a tool result the card reads: the last
 /// [`OUTPUT_TAIL_BYTES`] at most, on a char boundary. The card shows
-/// the same for the whole text, so the rest is neither counted nor
-/// copied.
+/// the same text for the whole result, so the rest is neither
+/// counted nor copied. The cut mark can differ on a result that is
+/// mostly control characters: the card counts the cut it made, not
+/// the one made here.
 fn output_tail(content: &str) -> &str {
     let mut start = content.len().saturating_sub(OUTPUT_TAIL_BYTES);
     while !content.is_char_boundary(start) {
