@@ -366,6 +366,9 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
 /// runtime.
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
+    // The credentials resolve at boot: a missing login stops the
+    // plain interface before its prompt, the M2 behavior it keeps.
+    runtime.provider()?;
     repl(&runtime).await
 }
 
@@ -478,7 +481,13 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             replay.messages.len()
                         );
                     }
-                    engine = Some(runtime.engine(session, replay.messages, &settings));
+                    engine = match runtime.engine(session, replay.messages, &settings) {
+                        Ok(engine) => Some(engine),
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    };
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(

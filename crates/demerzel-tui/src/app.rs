@@ -47,6 +47,7 @@ use tokio::time::Instant;
 use crate::cards::{self, Outcome};
 use crate::editor::{Completion, Editor};
 use crate::events::{ApprovalChannel, ApprovalRequest, DisplayEvent, EventSender};
+use crate::first_run::{self, FirstRun};
 use crate::history::History;
 use crate::render::{self, Status, View, status_text};
 use crate::replay::ReplayEntry;
@@ -141,6 +142,9 @@ enum Mode {
 pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result<()> {
     let mut app = App::new(options)?;
     app.draw()?;
+    if !app.first_run_screen().await? {
+        return Ok(());
+    }
     loop {
         let Some(submitted) = app.next_submission().await? else {
             return Ok(());
@@ -183,6 +187,9 @@ struct App {
     status: Status,
     /// The theme at the terminal's color depth, built once.
     palette: Palette,
+    /// The first-run screen, while it shows: the frame draws it in
+    /// place of the panes, and Enter takes it down.
+    first_run: Option<FirstRun>,
     mode: Mode,
     /// Set while a turn runs.
     progress: Option<Progress>,
@@ -245,6 +252,7 @@ impl App {
                 quit_hint: false,
             },
             palette: Palette::new(&options.theme, Depth::from_env()),
+            first_run: options.first_run,
             mode: Mode::Edit,
             progress: None,
             progress_line: String::new(),
@@ -269,6 +277,63 @@ impl App {
 
     fn approver(&self) -> ApprovalChannel {
         ApprovalChannel::new(self.approval_tx.clone())
+    }
+
+    /// Hold the first-run screen, when there is one, until Enter
+    /// takes it down. Returns false when a quit key ends the run
+    /// instead: Ctrl-D, or Ctrl-C twice inside the span, the rule
+    /// of an empty prompt. Any other key takes the quit question
+    /// back.
+    async fn first_run_screen(&mut self) -> io::Result<bool> {
+        while self.first_run.is_some() {
+            let action = tokio::select! {
+                event = self.keys.recv() => match event {
+                    Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                        self.dirty = true;
+                        self.first_run_key(key)
+                    }
+                    Some(Event::Resize(..)) => {
+                        self.dirty = true;
+                        Action::None
+                    }
+                    Some(_) => Action::None,
+                    None => Action::Exit,
+                },
+                _ = self.sigint.recv() => {
+                    self.dirty = true;
+                    self.ctrl_c(Phase::Idle)
+                }
+                _ = tokio::time::sleep_until(self.last_draw + FRAME), if self.dirty => {
+                    Action::None
+                }
+                _ = tokio::time::sleep_until(self.quit_asked.unwrap_or(self.last_draw)),
+                    if self.quit_asked.is_some() =>
+                {
+                    self.withdraw_quit();
+                    Action::None
+                }
+            };
+            self.draw()?;
+            if matches!(action, Action::Exit) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// One key on the first-run screen.
+    fn first_run_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('c') if ctrl => return self.ctrl_c(Phase::Idle),
+            KeyCode::Char('d') if ctrl => return Action::Exit,
+            KeyCode::Enter => {
+                self.first_run = None;
+                self.withdraw_quit();
+            }
+            _ => self.withdraw_quit(),
+        }
+        Action::None
     }
 
     /// Wait at the prompt. `None` means the session ends.
@@ -852,6 +917,16 @@ impl App {
         // One state, read here: the hint shows while the question
         // stands.
         self.status.quit_hint = self.quit_asked.is_some();
+        if let Some(screen) = &self.first_run {
+            let palette = &self.palette;
+            let quit_hint = self.status.quit_hint;
+            self.guard
+                .terminal
+                .draw(|frame| first_run::draw(frame, screen, palette, quit_hint))?;
+            self.dirty = false;
+            self.last_draw = Instant::now();
+            return Ok(());
+        }
         let Self {
             guard,
             transcript,

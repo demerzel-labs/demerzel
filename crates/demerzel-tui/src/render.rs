@@ -499,7 +499,7 @@ fn status_edge(status: &Status, width: usize, palette: &Palette) -> Line<'static
 
 /// One row of text cut to the width: the progress line, the
 /// approval question.
-fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
+pub(crate) fn draw_line(frame: &mut Frame, area: Rect, text: &str, style: Style) {
     let (shown, _) = fit_row([text], usize::from(area.width));
     frame.render_widget(Paragraph::new(Line::styled(shown, style)), area);
 }
@@ -565,7 +565,7 @@ fn fit_parts<const N: usize>(parts: [&str; N], width: usize) -> (String, usize, 
 /// paints the terminal's own foreground, so `none` on a nested role
 /// — inline code inside colored text, a keyword inside a fence —
 /// takes the enclosing color away, as the config contract says.
-fn paint(style: Style, color: Option<ratatui::style::Color>) -> Style {
+pub(crate) fn paint(style: Style, color: Option<ratatui::style::Color>) -> Style {
     style.fg(color.unwrap_or(ratatui::style::Color::Reset))
 }
 

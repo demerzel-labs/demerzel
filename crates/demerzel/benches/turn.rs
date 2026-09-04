@@ -105,7 +105,10 @@ impl Bed {
             .runtime
             .open_session(&config.resume, &settings)
             .unwrap();
-        let mut engine = self.runtime.engine(session, replay.messages, &settings);
+        let mut engine = self
+            .runtime
+            .engine(session, replay.messages, &settings)
+            .unwrap();
         let start = Instant::now();
         let outcome = engine
             .user_turn("bench".into(), &noop, &mut NoPrompt)

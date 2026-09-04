@@ -312,6 +312,18 @@ shows. A dim line at the top names how many earlier messages the
 replay leaves out. The model receives the whole history. The plain
 interface prints the notice alone.
 
+## The first-run screen
+
+The full-screen interface shows one screen before the prompt when
+no credential resolves for the session's provider. The screen holds
+the wordmark, the credential state of each provider, and the login
+commands. Enter continues to the session. Ctrl-D ends the run, and
+Ctrl-C keeps its two-press rule. Run a login command in another
+terminal. The session builds its provider at the first turn, so a
+login that lands before it takes effect. A turn before that fails
+with the credential error. The plain interface stops at boot with
+the same error.
+
 ## The debug trace
 
 `DEMERZEL_LOG=<level>` turns the debug trace on for one run. The

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use demerzel_core::{ApprovalMode, ContentBlock, Message, Role, SessionStore};
 use demerzel_mock::{MockResponse, MockServer};
+use demerzel_providers::auth::NO_CREDENTIALS_HELP;
 use serde_json::{Value, json};
 
 const READY: &str = "demerzel ready";
@@ -194,6 +195,21 @@ impl Pty {
         Self::spawn_with_project_config(base_url, extra_args, None)
     }
 
+    /// [`Pty::spawn`] with an empty data directory: no auth store,
+    /// so no credential resolves.
+    fn spawn_without_login(base_url: &str, extra_args: &[&str]) -> Self {
+        Self::spawn_full(
+            base_url,
+            extra_args,
+            None,
+            None,
+            &[],
+            "project",
+            None,
+            false,
+        )
+    }
+
     /// [`Pty::spawn`] with a `.demerzel/config.toml` in the project.
     fn spawn_with_project_config(
         base_url: &str,
@@ -230,15 +246,17 @@ impl Pty {
             env,
             "project",
             None,
+            true,
         )
     }
 
     /// [`Pty::spawn`] in a project directory named `name` that holds
     /// a `.git/HEAD` with `head` as its text.
     fn spawn_in_repo(base_url: &str, name: &str, head: &str) -> Self {
-        Self::spawn_full(base_url, &[], None, None, &[], name, Some(head))
+        Self::spawn_full(base_url, &[], None, None, &[], name, Some(head), true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_full(
         base_url: &str,
         extra_args: &[&str],
@@ -247,6 +265,7 @@ impl Pty {
         env: &[(&str, &str)],
         project_name: &str,
         head: Option<&str>,
+        login: bool,
     ) -> Self {
         let dirs = tempfile::tempdir().unwrap();
         let home = dirs.path().join("home");
@@ -255,7 +274,9 @@ impl Pty {
         for dir in [&home, &data, &project] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        write_auth_store(&data);
+        if login {
+            write_auth_store(&data);
+        }
         if let Some(head) = head {
             let git = project.join(".git");
             std::fs::create_dir(&git).unwrap();
@@ -447,6 +468,12 @@ impl Pty {
     /// binary opens by default under `XDG_DATA_HOME`.
     fn data_dir(&self) -> PathBuf {
         self.dirs.path().join("data/demerzel")
+    }
+
+    /// A login lands: the auth store appears in this run's data
+    /// directory, the way `login` writes it.
+    fn log_in(&self) {
+        write_auth_store(&self.dirs.path().join("data"));
     }
 
     /// The session-file stems this run created, across all projects.
@@ -2207,4 +2234,68 @@ async fn the_plain_interface_prints_the_resume_notice_alone() {
     pty.wait_for(PROMPT);
     pty.send(CTRL_D);
     pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_a_login_shows_the_first_run_screen_until_a_login_lands() {
+    let mock = MockServer::start(vec![text_turn("logged in now")], Vec::new()).await;
+    let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
+
+    // The screen before the prompt: the wordmark, the state per
+    // provider, the login commands, and the key that continues.
+    pty.wait_for(READY);
+    pty.wait_for("┌┬┐┌─┐┌┬┐");
+    pty.wait_for("openai-codex: none");
+    pty.wait_for("anthropic: none");
+    pty.wait_for("dmz login anthropic");
+    pty.wait_for("Press Enter to continue");
+    // The Ctrl-C rule holds on the screen: one press asks, and Enter
+    // takes the question back and the screen down.
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.send(b"\r");
+    pty.wait_for(PROMPT);
+    // A turn fails with the credential error, and no session opens.
+    pty.send(b"hello\r");
+    pty.wait_for(NO_CREDENTIALS_HELP);
+    assert!(pty.session_files().is_empty());
+    assert!(mock.received().is_empty());
+    // The login lands: the next turn runs.
+    pty.log_in();
+    pty.send(b"hello\r");
+    pty.wait_for("logged in now");
+    let sessions = pty.session_files();
+    pty.send(CTRL_D);
+    pty.wait_exit();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_a_login_quits_from_the_first_run_screen() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
+    pty.wait_for("Press Enter to continue");
+    pty.send(CTRL_C);
+    pty.wait_for(QUIT_HINT);
+    pty.send(CTRL_C);
+    let raw = pty.wait_exit();
+    // No session opened, so no exit line.
+    assert!(!after_restore(&raw).contains("resume with"));
+
+    let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
+    pty.wait_for("Press Enter to continue");
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plain_interface_without_a_login_stops_at_boot() {
+    let mock = MockServer::start(Vec::new(), Vec::new()).await;
+    let pty = Pty::spawn_without_login(&mock.url(), &["--plain"]);
+    let (status, raw) = pty.wait_end();
+    assert!(!status.success(), "exit status: {status:?}");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.contains(NO_CREDENTIALS_HELP), "{text:?}");
+    assert!(!text.contains(ENTER_ALT_SCREEN), "{text:?}");
 }

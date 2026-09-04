@@ -64,6 +64,10 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     options.thinking = config.thinking;
     options.theme = config.theme.clone();
     options.commands = crate::commands::specs();
+    // No credential for the provider: the screen says so before the
+    // prompt, and the provider builds at the first turn, so a login
+    // that lands meanwhile takes effect.
+    options.first_run = runtime.first_run();
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,
@@ -224,11 +228,13 @@ impl Driver for TuiDriver<'_> {
                             replay.messages.len()
                         ));
                     }
-                    self.engine = Some(self.runtime.engine(
-                        session,
-                        replay.messages,
-                        &self.settings,
-                    ));
+                    match self
+                        .runtime
+                        .engine(session, replay.messages, &self.settings)
+                    {
+                        Ok(engine) => self.engine = Some(engine),
+                        Err(error) => return Submission::Error(format!("demerzel: {error}")),
+                    }
                 }
                 Err(error) => return Submission::Error(format!("demerzel: {error}")),
             }

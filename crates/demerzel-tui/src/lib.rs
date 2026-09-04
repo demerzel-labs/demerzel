@@ -23,6 +23,7 @@ pub mod bench;
 mod cards;
 mod editor;
 mod events;
+mod first_run;
 mod highlight;
 mod history;
 mod markdown;
@@ -45,6 +46,7 @@ use demerzel_core::ApprovalMode;
 pub use cards::{OUTPUT_TAIL_BYTES, write_duration};
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
+pub use first_run::FirstRun;
 pub use replay::{Replay, ReplayEntry, ReplayResult};
 pub use theme::Theme;
 pub use thinking::Thinking;
@@ -156,6 +158,10 @@ pub struct Options {
     /// with `/`. The driver still dispatches the submitted line; the
     /// list only completes it.
     pub commands: Vec<CommandSpec>,
+    /// The first-run screen, shown before the prompt when set: the
+    /// driver fills it when no credential resolves for the session's
+    /// provider. Enter continues to the session.
+    pub first_run: Option<FirstRun>,
 }
 
 impl Default for Options {
@@ -174,6 +180,7 @@ impl Default for Options {
             thinking: Thinking::default(),
             theme: Theme::default(),
             commands: Vec::new(),
+            first_run: None,
         }
     }
 }
