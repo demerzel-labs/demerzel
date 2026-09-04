@@ -2249,8 +2249,8 @@ async fn a_run_without_a_login_shows_the_first_run_screen_until_a_login_lands() 
     pty.wait_for("openai-codex, the session's provider");
     pty.wait_for("openai-codex: none");
     pty.wait_for("anthropic: none");
-    pty.wait_for("dmz login ");
-    pty.wait_for("dmz login anthropic");
+    pty.wait_for("dmz login the ChatGPT subscription");
+    pty.wait_for("dmz login anthropic an API key");
     // The Ctrl-C rule holds on the screen: one press asks, and Enter
     // takes the question back and the screen down.
     pty.send(CTRL_C);
@@ -2285,8 +2285,12 @@ async fn a_run_without_a_login_quits_from_the_first_run_screen() {
     // No session opened, so no exit line.
     assert!(!after_restore(&raw).contains("resume with"));
 
-    let mut pty = Pty::spawn_without_login(&mock.url(), &[]);
-    pty.wait_for("openai-codex: none");
+    // An Anthropic session names its provider and leads with its
+    // command; Ctrl-D ends the run from the screen.
+    let mut pty = Pty::spawn_without_login(&mock.url(), &["--provider", "anthropic"]);
+    pty.wait_for("anthropic, the session's provider");
+    pty.wait_for("dmz login anthropic an API key");
+    pty.wait_for("dmz login the ChatGPT subscription");
     pty.send(CTRL_D);
     pty.wait_exit();
 }

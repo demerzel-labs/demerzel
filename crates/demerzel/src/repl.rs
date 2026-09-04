@@ -471,16 +471,10 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             break;
                         }
                     };
-                    opened = Some(session.id().to_string());
-                    // The notice alone: the plain interface shows no
-                    // history, the M2 behavior it keeps.
-                    if !replay.messages.is_empty() {
-                        eprintln!(
-                            "continuing session {} ({} messages)",
-                            session.id(),
-                            replay.messages.len()
-                        );
-                    }
+                    let id = session.id().to_string();
+                    let messages = replay.messages.len();
+                    // The state changes after the engine builds, as
+                    // the full-screen driver does it.
                     engine = match runtime.engine(session, replay.messages, &settings) {
                         Ok(engine) => Some(engine),
                         Err(error) => {
@@ -488,6 +482,12 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             break;
                         }
                     };
+                    opened = Some(id.clone());
+                    // The notice alone: the plain interface shows no
+                    // history, the M2 behavior it keeps.
+                    if messages > 0 {
+                        eprintln!("continuing session {id} ({messages} messages)");
+                    }
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(

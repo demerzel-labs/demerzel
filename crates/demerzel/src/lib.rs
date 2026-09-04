@@ -263,22 +263,24 @@ impl Runtime {
         if provider == anthropic::PROVIDER_ID && env_key.is_some() {
             return None;
         }
-        let credentials = match Self::open_store(&self.config) {
-            Ok(store) => {
-                let resolves = match provider {
-                    openai_codex::PROVIDER_ID => {
-                        store.probe().is_some_and(|probe| probe.source.usable())
-                    }
-                    anthropic::PROVIDER_ID => store.anthropic_api_key().is_some(),
-                    _ => return None,
-                };
-                if resolves {
-                    return None;
-                }
-                credential_states(&store, env_key.as_deref())
-                    .map(|state| format!("{}: {}", state.provider, state.state))
-                    .to_vec()
+        let store = Self::open_store(&self.config);
+        let resolves = match (provider, &store) {
+            (_, Err(_)) => false,
+            (openai_codex::PROVIDER_ID, Ok(store)) => {
+                store.probe().is_some_and(|probe| probe.source.usable())
             }
+            (anthropic::PROVIDER_ID, Ok(store)) => store.anthropic_api_key().is_some(),
+            // The boot check refuses any other id; the build's error
+            // says so at the first turn.
+            _ => return None,
+        };
+        if resolves {
+            return None;
+        }
+        let credentials = match &store {
+            Ok(store) => credential_states(store, env_key.as_deref())
+                .map(|state| format!("{}: {}", state.provider, state.state))
+                .to_vec(),
             Err(error) => {
                 let state = error.to_string();
                 vec![
