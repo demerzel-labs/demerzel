@@ -139,7 +139,7 @@ fn tool_call(id: &str, name: &str, input: Value) -> MockResponse {
 }
 
 /// One reasoning segment with `summary`, then a text reply, the way
-/// the Codex endpoint streams them.
+/// the Responses endpoint streams them.
 fn reasoning_turn(summary: &str, reply: &str) -> MockResponse {
     MockResponse::stream(vec![
         json!({
@@ -2285,8 +2285,8 @@ async fn a_run_without_a_login_quits_from_the_first_run_screen() {
     // No session opened, so no exit line.
     assert!(!after_restore(&raw).contains("resume with"));
 
-    // An Anthropic session names its provider and leads with its
-    // command; Ctrl-D ends the run from the screen.
+    // A provider-specific session names its provider and leads with
+    // its command; Ctrl-D ends the run from the screen.
     let mut pty = Pty::spawn_without_login(&mock.url(), &["--provider", "anthropic"]);
     pty.wait_for("anthropic, the session's provider");
     pty.wait_for("dmz login anthropic an API key");

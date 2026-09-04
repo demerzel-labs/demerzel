@@ -1,7 +1,6 @@
 //! Live smoke call against the real Codex endpoint with the imported
-//! Codex CLI credentials. Part of the M1 step-2 verify line. The call
-//! sends the full tool set, so it also confirms that the endpoint
-//! accepts every tool input schema (step-5 verify).
+//! Codex CLI credentials. The call sends the full tool set, so it also
+//! confirms that the endpoint accepts every tool input schema.
 //!
 //! Run: `cargo run -p demerzel-providers --example codex_smoke -- [model] [prompt...]`
 

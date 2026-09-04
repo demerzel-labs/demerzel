@@ -135,10 +135,10 @@ pub struct ApprovalRequest<'a> {
 /// user gave for the rest of the session. Per-tool overrides and
 /// path rules land here as later fields.
 ///
-/// Grant scope follows the access class (step-6 decision). A write
-/// grant covers the tool by name. An execute grant covers only the
-/// exact input it was given for: one "always" on bash must not approve
-/// every later bash command in the session.
+/// Grant scope follows the access class. A write grant covers the tool
+/// by name. An execute grant covers only the exact input it was given
+/// for: one "always" on bash must not approve every later bash command
+/// in the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPolicy {
     pub mode: ApprovalMode,

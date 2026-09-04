@@ -51,7 +51,7 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
     print_setting(out, "model", &settings.model.value, settings.model.origin)?;
     let approval = match settings.approval.value {
         Some(mode) => mode.to_string(),
-        None => "ask in the REPL, read-only for one-shot".to_string(),
+        None => "ask in an interactive session, read-only for one-shot".to_string(),
     };
     print_setting(out, "approval", &approval, settings.approval.origin)?;
     print_setting(
@@ -227,7 +227,7 @@ impl CredentialState {
 }
 
 /// The credential state of each provider from one store. The
-/// environment key wins for the Anthropic state and skips the store,
+/// environment key wins for the API-key state and skips the store,
 /// the order a session applies. Reads only: the store stays
 /// unwritten, and no key text leaves it.
 pub(crate) fn credential_states(store: &AuthStore, env_key: Option<&str>) -> [CredentialState; 2] {
@@ -504,10 +504,10 @@ mod tests {
     fn secret_values_are_flagged_by_shape_and_inside_arrays() {
         let found = warnings(
             "model = \"gpt-5.6-sol\"\n\
-             a = \"sk-live\"\n\
-             b = \"ghp_abc\"\n\
+             a = \"sk-fake-live\"\n\
+             b = \"ghp_fake\"\n\
              c = \"eyJhbGci\"\n\
-             extras = [\"xoxb-1\", \"plain\"]",
+             extras = [\"xoxb-fake\", \"plain\"]",
         );
         assert_eq!(found.len(), 4, "{found:?}");
         assert!(found.iter().any(|w| w.contains("`extras`")));

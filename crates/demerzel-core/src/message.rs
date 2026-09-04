@@ -73,7 +73,7 @@ pub struct Usage {
     pub cache_creation_tokens: u64,
 }
 
-/// Why the model stopped. Non-exhaustive: a later milestone can add a
+/// Why the model stopped. Non-exhaustive: a future release can add a
 /// reason without breaking adapter or interface crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

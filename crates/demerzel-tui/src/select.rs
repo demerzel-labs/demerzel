@@ -1,24 +1,16 @@
 //! Drag selection over the transcript, the copy it yields, and the
 //! clipboard write.
 //!
-//! A selection is two points in transcript rows and columns: the
-//! press and the pointer. A point names a block by its absolute
-//! index, a row of that block's layout, and a screen column, so it
-//! holds still while content arrives below it and moves with nothing
-//! else. The transcript owns the points and the row map that maps a
-//! mouse position to them, and it clears the points when a block
-//! under them changes; this module holds the geometry, the copy,
-//! and the OSC 52 sequence.
+//! A selection has two transcript points: the press and the pointer.
+//! Each point names an absolute block, a row in that block, and a
+//! screen column. The transcript owns the points and clears them when
+//! selected blocks change; this module owns geometry, copied text, and
+//! the OSC 52 sequence.
 //!
-//! The copy holds the shown rows between the points, without the
-//! marks the frame adds: a fence gives its code without the frame, a
-//! card gives its output and its result line without the header, the
-//! indent, and the hint, a prompt echo gives the line without the
-//! prompt. A newline joins each row, trailing spaces drop, and the
-//! text is capped at [`COPY_CAP`] bytes. The copy goes to the
-//! terminal as one OSC 52 write, which reaches the clipboard over
-//! SSH and through a multiplexer that forwards the sequence. The
-//! base64 encoder lives here, so the write adds no dependency.
+//! The copy contains shown rows without frame marks: code without the
+//! fence frame, card output without chrome, and prompts without the
+//! prompt glyph. Rows join with newlines, trailing spaces drop, and
+//! text is capped at [`COPY_CAP`] bytes.
 
 use std::collections::VecDeque;
 use std::io::Write as _;

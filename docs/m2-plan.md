@@ -1,9 +1,13 @@
 # M2 Implementation Plan — Interface and Second Provider
 
+Historical plan. M2 is complete. See [`README.md`](../README.md)
+and [`config.md`](config.md) for the current user-facing behavior.
+Later planning moved `openai-compat` to M3.
+
 This plan turns the M2 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps. It follows the shape of [`m1-plan.md`](m1-plan.md).
 
-## Status (2026-08-22)
+## Status (2026-08-23)
 
 M1 is complete (PR #16). Steps 1 to 6 are merged: the plan (PR #17),
 layered config and `doctor` (PR #18) with the platform statement
@@ -13,10 +17,9 @@ landed between steps (PR #26). Step 7, the measurement pass, is
 merged (PR #27): the render-throughput bench, the cache-hit
 measurement for both providers, the turn record that closes the
 measurement seams, and the receipts in `bench/results/`. The build
-order is complete. The close-out — the alignment review and the
-metrics receipt — is next. Then M2.5, the interface build-out
-([`m2.5-plan.md`](m2.5-plan.md)), runs before M3; theming moves
-there from M3.
+order is complete. The M2 close-out ran on 2026-08-23. M2.5, the
+interface build-out ([`m2.5-plan.md`](m2.5-plan.md)), now carries
+the active interface work.
 
 Exit criteria, checked at step 7:
 
@@ -107,10 +110,10 @@ Out (deferred to the milestone in parentheses): skills, hooks, MCP,
 subagents, competitor-config discovery, memory, personality (M3),
 theming (M2.5), per-role model routing and fallback chains (M3, with
 subagents),
-compaction (M4), `openai-compat` adapter (post-M5, phase 1 of the
-local-model track in [`plan.md`](plan.md)), background-task
+compaction (M4), `openai-compat` adapter, background-task
 mechanism (decision revisited at the end of M2; see the open question
-in [`plan.md`](plan.md)).
+in [`plan.md`](plan.md)). The product plan moved `openai-compat` to
+M3 on 2026-08-26.
 
 ## Workspace after M2
 
@@ -272,7 +275,8 @@ Contracts:
   a TUI scenario.
 - The renderer consumes the existing `EngineEvent` stream. The engine
   does not change for the TUI.
-- Theming is M3. The M2 palette is the terminal's own colors.
+- At the M2 close, theming remained planned for M2.5. The M2 palette
+  is the terminal's own colors.
 
 ### Slash commands (demerzel bin)
 

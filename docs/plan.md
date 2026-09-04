@@ -16,6 +16,11 @@ Three pillars, in order:
 
 License: MIT. Plan adopted 2026-07-31.
 
+**Implementation status (2026-09-04):** M0 through M2 are complete.
+M2.5 is complete through step 9; step 10, the measurement pass, remains.
+M3 and later milestones describe planned work. See the
+[`README`](../README.md) for current features and source-build instructions.
+
 ---
 
 ## Lineage and boundaries
@@ -23,22 +28,19 @@ License: MIT. Plan adopted 2026-07-31.
 This repository previously held a Python/Strands pipeline review harness. That
 code, its tests, and its product contract are preserved on
 `archive/python-pipeline-harness-2026-07-31` and do not constrain this plan.
-Concepts carried forward: the append-only trace/session discipline, cost
-awareness, and the bash-tool sandbox posture (credential-free subprocess
-environment, secret scanning). Explicitly dropped: governance, organization
+Concepts carried forward: append-only traces and sessions, cost awareness,
+and the bash-tool safety posture. The bash tool uses a constructed
+environment that omits credential variables by default. Credential files
+remain readable through `HOME`. This is not an operating-system sandbox.
+Explicitly dropped: governance, organization
 policy, budgets-as-refusal, and every enterprise-runner surface. Demerzel is a
 personal developer tool.
 
-Sibling boundaries: the Demerzel ADE (Rust/GPUI) is the cockpit that herds
-agents; `daneel` is the ADE's thin terminal head over the fleet. Demerzel — this
-repo — is the agent itself. The cockpit may attach to it like any other agent;
-no code crosses.
-
 ## Command surface
 
-The binary and brand are `demerzel`. Installers create `dmz` as a hardlink — the
-blessed short command for daily use. The two names are the same program with the
-same flags; docs use `dmz` in examples and `demerzel` in prose.
+The binary is `demerzel`. Planned installers provide `dmz` as a hardlink
+with the same flags. Source builds produce only `demerzel`.
+Docs use `dmz` in examples and `demerzel` in prose.
 
 ```text
 dmz                       # interactive session in the current project
@@ -185,9 +187,10 @@ Decisions from the alignment review of 2026-08-23 (the M2 close-out):
 ### Sessions
 
 Append-only JSONL, one file per session, project-scoped under XDG data. The
-record is the source of truth for resume, compaction, and replay — and doubles
-as the fixture format for the bench suite's deterministic transcripts. No
-secrets in session files.
+record is the source of truth for resume, compaction, and replay. It also
+serves as the fixture format for the bench suite's deterministic transcripts.
+Demerzel does not intentionally store provider credentials there. User prompts,
+tool input, tool output, file content, and model text can contain secrets.
 
 ### Memory and personality
 
@@ -220,9 +223,9 @@ MEMORY.md pattern in Claude Code.
 ### Ecosystem and customizability
 
 - **System prompt, fully customizable** (decided 2026-08-02): the harness
-  owns a small base prompt, and config can replace it completely — the Pi
-  model, not the Codex or Claude Code model. Extension layers (project
-  instructions, skills, personality, memory recall) compose at fixed
+  owns a small base prompt, and config can replace it completely.
+  Extension layers (project instructions, skills, personality, memory recall)
+  compose at fixed
   positions so the prompt prefix stays stable. A user who replaces the base
   prompt owns the consequences; the harness does not merge or repair it.
   The composition order is designed in M3.
@@ -522,7 +525,7 @@ claim.
   is model providers and MCP servers the user configured, nothing else.
 - IDE plugins, browser IDE, editor embedding (ACP support may ride the session
   API later; not a launch goal).
-- A cockpit: fleet management belongs to the ADE.
+- Fleet management: Demerzel stays the terminal agent.
 - Benchmark claims ahead of the published suite — no number leaves this repo
   without `bench/` receipts.
 

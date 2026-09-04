@@ -1,36 +1,19 @@
-//! The interface loop: one task multiplexes terminal input, display
-//! events from the running turn, and approval questions.
+//! The interface loop multiplexes terminal input, display events from
+//! the running turn, and approval questions.
 //!
-//! Ctrl-C rules carry over from the REPL: at the prompt it clears the
-//! line, during a turn it aborts the turn by dropping its future, and
-//! at an approval question it stops the turn. On an empty line it
-//! asks once — the status shows the quit hint for a span — and a
-//! second press inside the span ends the session. Ctrl-D on an empty
-//! line ends the session at once.
+//! Ctrl-C clears a non-empty prompt, aborts a running turn, or stops a
+//! pending approval. On an empty prompt it asks once; a second Ctrl-C
+//! inside the quit window ends the session.
+//! Ctrl-D on an empty prompt also ends it.
 //!
-//! The transcript follows the bottom until the user scrolls up: the
-//! wheel when capture is on, PageUp, and PageDown browse; End and a
-//! submitted line return to the bottom. Ctrl-O expands every tool
-//! card to its kept output and collapses them again. Ctrl-T opens
-//! the newest thinking block and closes it again. With capture on, a
-//! drag over the transcript selects text and the release copies it
-//! to the clipboard through the terminal; a click clears it, and a
-//! press on the browse indicator is the End key.
+//! The transcript follows the bottom until the user browses. End and a
+//! submitted line return to follow mode. Ctrl-O toggles tool-card
+//! output, Ctrl-T toggles the newest thinking block, and a mouse drag
+//! copies selected transcript text through OSC 52.
 //!
-//! The editor holds several lines: Enter submits, Alt-Enter and
-//! Shift-Enter insert a newline, and a paste keeps its newlines. Up
-//! and Down move across rows, and at the first or last row they
-//! browse the history. A line that starts with `/` opens the
-//! completion popup: Tab and the arrows select, Enter completes, Esc
-//! closes it. A recalled history entry opens no popup, so the arrows
-//! keep browsing.
-//!
-//! While a turn runs, a progress line above the input box shows a
-//! spinner, the elapsed time, and the stage. The status sits on the
-//! input box's bottom edge, or on a bar under the box when the
-//! screen is too small for the frame. A tick timer wakes the loop
-//! for the progress line during the turn only; at idle nothing
-//! wakes.
+//! The editor keeps multi-line input, command completion, and history
+//! navigation. During a turn, a tick timer animates the progress line;
+//! at idle, the loop waits for input.
 
 use std::future::poll_fn;
 use std::io;

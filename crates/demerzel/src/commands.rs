@@ -1,9 +1,8 @@
 //! The slash-command registry shared by the REPL and the TUI driver.
 //! One table names the commands; both interfaces dispatch through
 //! [`dispatch`] and apply the returned effect, so the wording and the
-//! behavior stay identical. M3 file-based custom commands need a
-//! runtime-built table beside this constant one; the dispatch seam
-//! stays.
+//! behavior stay identical. Runtime-built commands can add another
+//! table beside this constant one; dispatch stays the join point.
 
 use demerzel_core::{ApprovalMode, Effort};
 
@@ -18,7 +17,7 @@ struct Command {
     help: &'static str,
 }
 
-/// The M2 command set. `/quit` stays as the M1 alias of `/exit`.
+/// The built-in command set. `/quit` stays as an alias of `/exit`.
 const COMMANDS: &[Command] = &[
     Command {
         usage: "/help",
@@ -217,7 +216,10 @@ mod tests {
         assert_eq!(slash_command("/exit"), Some(("exit", "")));
         assert_eq!(slash_command("/quit  "), Some(("quit", "")));
         assert_eq!(slash_command("/model  gpt-x "), Some(("model", "gpt-x")));
-        assert_eq!(slash_command("/home/user/x.rs:12 panics, fix it"), None);
+        assert_eq!(
+            slash_command("/workspace/example.rs:12 panics, fix it"),
+            None
+        );
         assert_eq!(slash_command("/Weird"), None);
         assert_eq!(slash_command("plain prompt"), None);
     }

@@ -1,13 +1,9 @@
 //! The input editor: a buffer of several lines, a cursor, the row
 //! layout of the box, and command completion.
 //!
-//! The editor is pure state; the loop maps keys onto these operations
-//! and the renderer draws the rows. The buffer holds newlines: a
-//! newline key and a paste insert them, and the box shows each line
-//! on rows of its own. Rows wrap hard at the box width, so every
-//! character stays on screen. The layout is a cache: an edit or a
-//! width change rebuilds it, and a frame walks only the rows it
-//! shows.
+//! The editor is pure state; the loop maps keys to operations and the
+//! renderer draws rows. Rows wrap at the box width, and edits or width
+//! changes rebuild the layout cache.
 //!
 //! A line that starts with `/` opens the completion popup: the
 //! commands whose name starts with the line. The loop routes the
@@ -15,9 +11,8 @@
 //! looks like is the driver's business: the popup matches the names
 //! it was given and states no rule of its own.
 //!
-//! The row readers — `row`, `cursor_row`, `cursor_col`,
-//! `scroll_to_cursor` — read the layout and run after `sync` in the
-//! same frame; a debug build checks that.
+//! Row readers run after `sync` in the same frame; a debug build checks
+//! that.
 
 use unicode_width::UnicodeWidthChar as _;
 

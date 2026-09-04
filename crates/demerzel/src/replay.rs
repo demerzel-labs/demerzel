@@ -5,13 +5,9 @@
 //!
 //! The replay is capped: the last [`MAX_MESSAGES`] messages or the
 //! last [`MAX_BYTES`] of shown content, whichever is smaller. A tool
-//! result counts and carries the tail the card reads, so one large
-//! read cannot spend the budget on bytes nothing shows. The last
-//! message always shows, whatever its size. The cap holds the first
-//! prompt's cost on a long file: the boot reads no session file, and
-//! the blocks lay out only for the rows on screen, so the replay
-//! costs at the first prompt and only for the window. The messages
-//! before the cut are counted, and the interface names the count.
+//! result counts only the tail the card reads, and the last message
+//! always shows. The messages before the cut are counted, and the
+//! interface names the count.
 //!
 //! A tool call and its result are two messages: the call in the
 //! model's, the result in the user's that follows. The replay pairs

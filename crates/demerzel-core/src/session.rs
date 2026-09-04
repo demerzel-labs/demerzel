@@ -2,9 +2,9 @@
 //!
 //! The file is the source of truth for resume and replay, and it is
 //! the fixture format for the mock server. It is plaintext and
-//! self-contained: inspect it with a pager, export it with `cp`,
-//! delete it with `rm` and nothing remains. The harness writes no
-//! secrets into it; auth tokens live only in the auth store.
+//! self-contained. It can hold user content and tool output, so it
+//! must not be treated as secret-free.
+//! Provider credentials belong in the auth store, never in session fields.
 //!
 //! Layout: `<data root>/projects/<project-id>/sessions/<id>.jsonl`.
 //! The first record is metadata. A later meta record marks a resume
@@ -15,21 +15,15 @@
 //! final line — a crash mid-append — is dropped on replay and
 //! truncated away on resume.
 //!
-//! The file is also the measurement trace for one session: the meta
-//! records carry the environment (project directory, provider,
-//! model), the messages carry every tool step, the usage records
-//! carry the token counts with the cached parts, the tool records
-//! carry each call's clock and result size, and the turn records
-//! carry how each user turn ended. A user turn opens with a user
-//! message that holds a text block; the turn record that follows
-//! before the next one closes it. A turn without one was cut off:
-//! a dropped turn future (Ctrl-C in the interfaces), a process exit
-//! mid-turn, or a session write failure.
+//! The file is also the measurement trace for one session. Meta
+//! records carry the project, provider, and model. Messages carry tool
+//! steps. Usage, tool, and turn records carry counts, timings, sizes,
+//! and outcomes. A turn without a closing turn record was cut off.
 //!
 //! The clock: every usage, tool, and turn record carries `at`, the
 //! event's start on the system clock, and `duration_ms`, its wall
 //! time on the monotonic clock. The engine measures both at the
-//! seam — the request send, the tool dispatch, the turn — so the
+//! boundary — the request send, the tool dispatch, the turn — so the
 //! file says when each call ran and how long it took. A file from
 //! before the clock fields replays the same; the fields are absent.
 

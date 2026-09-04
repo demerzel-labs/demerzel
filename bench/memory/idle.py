@@ -9,7 +9,7 @@ names the interface the run measured.
 Anonymous memory is the headline: it is the harness's own heap and
 stacks, and it is stable across runs. PSS and USS also count clean
 mapped binary text, which moves with page-cache state; the report
-keeps them because cross-agent comparisons use PSS.
+keeps them for comparison with external tools.
 """
 
 import argparse

@@ -30,16 +30,11 @@
 //!   rows on screen come from cards, a thought, and formatted
 //!   blocks; the walk stops at the viewport as it does over prose.
 //!
-//! Each bench runs twice. The prose run keeps the M2 workloads on a
-//! plain-text transcript, so its numbers compare with the M2
-//! receipts. Since M2.5 step 8c the status carries a project segment
-//! and a branch segment; since step 8e it carries a context segment
-//! with a share. The formatted run (`*-formatted`) streams a markdown
-//! document with headings, lists, tables, and code fences through a
-//! transcript that renders it. A formatted block renders again whole
-//! on every frame that changes it, so the formatted `stream` carries
-//! the cost of the markdown pass, and `frame-formatted` redraws a
-//! screen whose rows come from formatted blocks.
+//! Each bench runs twice. The prose run keeps a plain-text transcript.
+//! The formatted run (`*-formatted`) streams markdown with headings,
+//! lists, tables, and code fences through a transcript that renders it.
+//! A formatted block renders again on each changed frame, so the
+//! formatted `stream` carries the markdown pass cost.
 //!
 //! The screen is headless: frames render into a buffer and diff
 //! against the last one, the same work the live interface does before
@@ -259,9 +254,9 @@ fn bench_render(c: &mut Criterion) {
     check.replay(replay_history());
     assert_eq!(check.blocks(), REPLAY_TURNS * REPLAY_ENTRIES + 1);
 
-    // The frames run before any throughput is set on the group, the
-    // M2 shape of `frame`. The formatted one redraws a screen whose
-    // tail is the streamed text, so formatted rows are on screen.
+    // The frame benches run before any throughput is set on the group.
+    // The formatted one redraws a screen whose tail is the streamed
+    // text, so formatted rows are on screen.
     for (suffix, markdown, text) in workloads {
         let mut screen = screen_with_history(markdown);
         if markdown {

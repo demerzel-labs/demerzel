@@ -2,8 +2,7 @@
 """PTY time-to-interactive probe: Layer 1 boot measurement.
 
 The probe spawns the binary in a pseudo-terminal and measures the time
-from spawn to the ready marker on the merged output stream. The REPL
-prints the marker first, after credential resolution.
+from spawn to the ready marker on the merged output stream.
 
 Each run gets a private data home with a synthetic auth store, so a
 run needs no login and makes no network call.
@@ -16,8 +15,8 @@ Modes:
   caches stay warm, so the cold number tracks the binary read; a true
   cold start needs a fresh boot.
 
-The report records the probe's own spawn floor, measured through the
-identical path with `printf`. The floor sits inside every sample.
+The report records the probe's spawn floor through the identical path
+with `printf`. The floor sits inside every sample.
 """
 
 import argparse

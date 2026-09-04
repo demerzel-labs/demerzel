@@ -1,30 +1,14 @@
-//! Syntax highlighting: the lines of a code fence get keyword,
-//! string, comment, and number classes, for a fixed set of
-//! languages. The fence label picks the language; a label outside
-//! the set gets no classes.
+//! Syntax highlighting for code fences and markdown samples.
 //!
-//! Two scanners sit behind one type. The code scanner makes one
-//! linear pass over the bytes of each line under a language's rules,
-//! with one state that carries to the next line: inside a block
-//! comment, or inside a string that runs on. It is a tokenizer, not a
-//! grammar: it knows where comments, strings, numbers, and words
-//! start and end, and it looks a word up in the language's keyword
-//! list. The markdown scanner reads a markdown sample by its lines —
-//! headings, quotes, code spans, fences — and carries the open fence.
-//! Both cover what a reader scans a sample for, at a few nanoseconds
-//! per byte on every frame that renders the block again. The tables
-//! are static: no load on the boot path, none on the first fence. The
-//! caller widens tabs before the scan.
+//! The code scanner tokenizes one line at a time and carries only
+//! block-comment or open-string state. The markdown scanner carries an
+//! open fence. Tables are static, and the caller widens tabs before
+//! scanning.
 //!
-//! The highlighter starts fresh at the top of each block. A block cut
-//! at the byte cap inside a fence continues in the next block with a
-//! fresh state, so a comment or a string open across the cut reads
-//! as code until its closer, and the closer opens one that runs to
-//! the next: wrong classes on a stretch, never a lost row.
-//!
-//! The scanner cuts only at ASCII bytes or after a whole word, and a
-//! word takes every non-ASCII byte, so every offset it reports is a
-//! char boundary.
+//! The highlighter starts fresh at each block. A byte-cap split resets
+//! token state, so following text can be misclassified; rows stay
+//! intact. Cuts happen only at ASCII bytes or after a whole word, so
+//! reported offsets are char boundaries.
 
 /// The class of one span inside a code fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -55,7 +55,7 @@ pub enum ToolError {
 
 /// The contract every tool implements. `run` returns a boxed future so
 /// the trait stays object-safe. Names and descriptions are borrowed,
-/// not `'static`, so runtime-defined tools (MCP, M3) fit the trait.
+/// not `'static`, so runtime-defined tools fit the trait.
 pub trait Tool: Send + Sync {
     /// Stable tool name, e.g. "read". This is the dispatch key.
     fn name(&self) -> &str;

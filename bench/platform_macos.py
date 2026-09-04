@@ -5,10 +5,9 @@ and the macOS machine-spec fields. The interface is the same as
 `platform_linux.py`: `resident_pages`, `evict_once`, `SUPPORTS_EVICT`,
 `SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 
-Cold-boot eviction is undecided on macOS: `purge` flushes the whole
-disk cache and needs root. The decision is step 4 of
-`docs/bench-platforms.md`; until it lands, `evict_once` refuses. The
-per-process memory probe is step 3.
+Cold-boot eviction is disabled on macOS: `purge` flushes the whole
+disk cache and needs root. Until an eviction method is selected,
+`evict_once` refuses. The per-process memory probe is not implemented.
 """
 
 import ctypes

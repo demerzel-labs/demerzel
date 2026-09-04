@@ -1,4 +1,4 @@
-//! The `bash` tool: a real subprocess with the sandbox posture.
+//! The `bash` tool: a subprocess with environment and process-group limits.
 //!
 //! The child gets a constructed environment — an allowlist of names,
 //! never the full ambient environment — so credential variables of the

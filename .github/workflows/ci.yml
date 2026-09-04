@@ -9,7 +9,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Checkout needs read access and nothing here needs more.
 permissions:
   contents: read
 
@@ -23,8 +22,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Backstop: a stalled runner or a wedged child process cannot
-    # burn the six-hour job default.
+    # Stop stalled jobs before the six-hour runner limit.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -1,5 +1,5 @@
 //! The plain-terminal REPL: line editor, streamed tokens, one status
-//! line per tool call, approval prompts. No TUI in M1.
+//! line per tool call, and approval prompts.
 //!
 //! One dedicated thread owns the line editor and stdin; the async loop
 //! asks it for lines over a channel. Approval prompts use the same
@@ -367,7 +367,7 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
     // The credentials resolve at boot: a missing login stops the
-    // plain interface before its prompt, the M2 behavior it keeps.
+    // plain interface before its prompt.
     runtime.provider()?;
     repl(&runtime).await
 }
@@ -484,7 +484,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     };
                     opened = Some(id.clone());
                     // The notice alone: the plain interface shows no
-                    // history, the M2 behavior it keeps.
+                    // history.
                     if messages > 0 {
                         eprintln!("continuing session {id} ({messages} messages)");
                     }

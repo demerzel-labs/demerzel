@@ -106,7 +106,7 @@ snap 12-idle
 # the echoed prompt cannot match it. Then copy mode selects three rows and
 # pastes them into the input box with bracketed paste, as a terminal
 # would: the rendered rows must come back as text. The fence frame
-# comes with them; step 8b's own copy leaves it out.
+# comes with them; the transcript copy leaves it out.
 send 'describe this codebase in ascii visuals of the flow and the core components, inside one code fence; end your reply with one line that holds the word DONE, a space, then the word DIAGRAM' Enter
 wait_for 13-diagram-live '╭─' 180
 wait_for 14-diagram-done 'DONE DIAGRAM' 300
