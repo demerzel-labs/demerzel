@@ -294,14 +294,23 @@ The two flags exclude each other. `/session` shows the open
 session's id and file.
 
 The full-screen interface shows a resumed session's past turns. At
-the first prompt, the transcript shows the messages of the session
-file as blocks: each prompt, each reply, each reasoning summary as a
-closed thinking block, each tool call as a finished card, and each
-model call's usage line. The `continuing session` notice follows
-them. The replay shows the last 200 messages or the last 256 KiB of
-message content, whichever is fewer. A dim line at the top names
-how many earlier messages it leaves out. The model receives the
-whole history. The plain interface prints the notice alone.
+the first prompt, the transcript shows the session file as blocks:
+
+- each prompt, as a prompt line;
+- each reply, as text;
+- each reasoning summary, as a thinking block that follows the
+  `thinking` key;
+- each tool call, as a finished card with its preview, its output
+  tail, and its duration;
+- each model call, as a usage line.
+
+The `continuing session` notice follows them, and the new prompt
+follows the notice. The replay shows the last 200 messages or the
+last 256 KiB of shown content, whichever is smaller. A tool result
+counts the 32 KiB tail the card reads. The last message always
+shows. A dim line at the top names how many earlier messages the
+replay leaves out. The model receives the whole history. The plain
+interface prints the notice alone.
 
 ## The debug trace
 

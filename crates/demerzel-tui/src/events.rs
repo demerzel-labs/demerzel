@@ -58,7 +58,7 @@ pub(crate) enum DisplayEvent {
     /// A session opened or closed; the status totals restart.
     SessionChanged,
     /// A resumed session's past turns, as blocks.
-    Replay(Box<Replay>),
+    Replay(Replay),
 }
 
 /// A change to the status. Each field that is `Some` replaces its
@@ -124,7 +124,7 @@ impl EventSender {
     /// names the session, so the usage lines count into the
     /// session's totals and the notice lands under the history.
     pub fn replay(&self, replay: Replay) {
-        let _ = self.tx.send(DisplayEvent::Replay(Box::new(replay)));
+        let _ = self.tx.send(DisplayEvent::Replay(replay));
     }
 
     /// The preview of a dispatching call — the diff, the command —

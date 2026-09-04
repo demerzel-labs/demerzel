@@ -54,7 +54,8 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use demerzel_core::Usage;
-use demerzel_tui::bench::{MAX_BLOCK_BYTES, Replay, ReplayEntry, ReplayResult, Screen};
+use demerzel_tui::bench::{MAX_BLOCK_BYTES, Screen};
+use demerzel_tui::{Replay, ReplayEntry, ReplayResult};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
@@ -174,10 +175,10 @@ fn replay_history() -> Replay {
             elapsed: Some(Duration::from_millis(2_100)),
         });
     }
-    Replay {
-        left_out: 12,
-        entries,
-    }
+    let mut replay = Replay::default();
+    replay.left_out = 12;
+    replay.entries = entries;
+    replay
 }
 
 /// The stream as 16-byte deltas.

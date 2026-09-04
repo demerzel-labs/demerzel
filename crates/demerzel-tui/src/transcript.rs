@@ -716,7 +716,7 @@ impl Transcript {
         if let Some(index) = self.live.take()
             && let Some(thought) = self.thought_at(index)
         {
-            thought.end(Some(at));
+            thought.end(at);
             self.touch(index);
         }
     }
@@ -824,7 +824,12 @@ impl Transcript {
     /// here: the blocks lay out at the next frame, for the rows it
     /// shows, so a long replay costs its window, not its length.
     pub fn replay(&mut self, replay: Replay) {
-        self.open = None;
+        // Nothing streams across a replay: a thought or a call still
+        // open would keep an index the replay moves past. At the
+        // quiet point the driver uses, this closes nothing.
+        self.close();
+        self.blocks.reserve(replay.entries.len());
+        let now = Instant::now();
         if replay.left_out > 0 {
             let noun = if replay.left_out == 1 {
                 "message"
@@ -845,12 +850,12 @@ impl Transcript {
                 // does.
                 ReplayEntry::Text(text) if text.is_empty() => {}
                 ReplayEntry::Text(text) => self.push_line(Kind::Text, &text),
-                ReplayEntry::Reasoning(summary) => self.replay_thought(&summary),
+                ReplayEntry::Reasoning(summary) => self.replay_thought(&summary, now),
                 ReplayEntry::Tool {
                     name,
                     preview,
                     result,
-                } => self.replay_card(&name, preview.as_deref(), result),
+                } => self.replay_card(&name, preview.as_deref(), result, now),
                 ReplayEntry::Usage { usage, elapsed } => {
                     let mut line = String::new();
                     write_usage(&mut line, &usage, elapsed);
@@ -863,20 +868,26 @@ impl Transcript {
     /// A replayed reasoning segment: one thought, ended with no
     /// clock. Whitespace alone opens nothing, as a live delta of
     /// whitespace opens nothing; a hidden setting drops it.
-    fn replay_thought(&mut self, summary: &str) {
+    fn replay_thought(&mut self, summary: &str, now: Instant) {
         if self.thinking == Thinking::Hidden || summary.trim_start().is_empty() {
             return;
         }
-        let mut thought = Thought::new(self.thinking == Thinking::Open, Instant::now());
+        let mut thought = Thought::new(self.thinking == Thinking::Open, now);
         thought.push(summary, SUMMARY_BYTES);
-        thought.end(None);
+        thought.end_without_clock();
         self.push_block(Block::thought(thought, self.markdown_for(Kind::Reasoning)));
     }
 
     /// A replayed tool call: one card, ended with the file's clock,
     /// or interrupted when the turn ended before its result. The
     /// card holds the kept tail of the result, as a live card does.
-    fn replay_card(&mut self, name: &str, preview: Option<&str>, result: Option<ReplayResult>) {
+    fn replay_card(
+        &mut self,
+        name: &str,
+        preview: Option<&str>,
+        result: Option<ReplayResult>,
+        now: Instant,
+    ) {
         let mut card = Card::new(name, self.expanded);
         if let Some(preview) = preview {
             card.set_preview(preview);
@@ -890,7 +901,7 @@ impl Transcript {
                         is_error: result.is_error,
                         output,
                         output_cut,
-                        at: Instant::now(),
+                        at: now,
                     },
                     result.duration,
                 );

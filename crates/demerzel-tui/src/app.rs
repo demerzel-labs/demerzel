@@ -145,7 +145,10 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         let Some(submitted) = app.next_submission().await? else {
             return Ok(());
         };
-        let submission = driver.submit(submitted.text.clone(), app.sender(), app.approver());
+        let echo = submitted
+            .echo
+            .then(|| format!("{PROMPT}{}", submitted.text));
+        let submission = driver.submit(submitted.text, app.sender(), app.approver());
         // What the driver sent before it returned lands first: a
         // status patch for a model, effort, or approval switch, or
         // the past turns of a resumed session with the notice that
@@ -153,9 +156,8 @@ pub async fn run(driver: &mut dyn crate::Driver, options: Options) -> io::Result
         // or the turn follows the echo, so one frame shows all of it
         // in that order.
         app.drain_displays();
-        if submitted.echo {
-            app.transcript
-                .push_line(Kind::Prompt, &format!("{PROMPT}{}", submitted.text));
+        if let Some(echo) = &echo {
+            app.transcript.push_line(Kind::Prompt, echo);
         }
         app.dirty = true;
         match submission {
@@ -501,7 +503,7 @@ impl App {
                         self.count_usage(usage);
                     }
                 }
-                self.transcript.replay(*replay);
+                self.transcript.replay(replay);
             }
             DisplayEvent::Notice(text) => self.transcript.push_line(Kind::Notice, &text),
             DisplayEvent::Error(text) => self.transcript.push_line(Kind::Error, &text),

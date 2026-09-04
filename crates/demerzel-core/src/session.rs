@@ -265,32 +265,34 @@ struct RecordTag<'a> {
 /// History rebuilt from a session file: the messages the model
 /// receives again, and the records beside them that an interface
 /// shows again — the usage lines and the clock of each tool call.
+/// Readers get one from [`replay`] or [`Session::resume`]; the
+/// struct grows with the records a reader shows.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Replay {
     pub meta: Option<SessionMeta>,
     pub messages: Vec<Message>,
-    /// The usage records, in file order. Each names the messages
+    /// The usage records, in file order. Each counts the messages
     /// before it, so a reader places the line where the call ended.
     pub usage: Vec<ReplayUsage>,
     /// The tool records, in file order: the clock of each answered
     /// call, by call id.
-    pub tools: Vec<ReplayTool>,
+    pub tools: Vec<ReplayToolClock>,
 }
 
 /// One usage record on the replay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayUsage {
-    /// Messages before the record: the line follows
-    /// `messages[..before]`.
-    pub before: usize,
+    /// The count of messages before the record in the file.
+    pub messages_before: usize,
     pub usage: Usage,
     /// The call's clock, when the record carries one.
     pub timing: Option<Timing>,
 }
 
-/// One tool record on the replay.
+/// The clock of one tool record on the replay.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReplayTool {
+pub struct ReplayToolClock {
     pub call_id: String,
     /// The call's wall time, as the record kept it.
     pub duration: Duration,
@@ -737,7 +739,7 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
                     .zip(duration_ms)
                     .map(|(at, ms)| Timing::new(at, Duration::from_millis(ms)));
                 out.usage.push(ReplayUsage {
-                    before: out.messages.len(),
+                    messages_before: out.messages.len(),
                     usage,
                     timing,
                 });
@@ -746,7 +748,7 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
                 call_id,
                 duration_ms,
                 ..
-            } => out.tools.push(ReplayTool {
+            } => out.tools.push(ReplayToolClock {
                 call_id,
                 duration: Duration::from_millis(duration_ms),
             }),
@@ -900,7 +902,7 @@ mod tests {
         assert_eq!(replay.messages[0], text_message(Role::User, "hi"));
         // The usage record follows both messages, with its clock.
         assert_eq!(replay.usage.len(), 1);
-        assert_eq!(replay.usage[0].before, 2);
+        assert_eq!(replay.usage[0].messages_before, 2);
         assert_eq!(replay.usage[0].usage.input_tokens, 10);
         assert_eq!(
             replay.usage[0].timing.map(|timing| timing.duration),
@@ -951,12 +953,16 @@ mod tests {
 
         let replay = replay(session.path()).unwrap();
         assert_eq!(replay.messages.len(), 4);
-        let placed: Vec<usize> = replay.usage.iter().map(|record| record.before).collect();
+        let placed: Vec<usize> = replay
+            .usage
+            .iter()
+            .map(|record| record.messages_before)
+            .collect();
         assert_eq!(placed, vec![2, 4]);
         assert_eq!(replay.usage[0].timing, Some(clock));
         assert_eq!(
             replay.tools,
-            vec![ReplayTool {
+            vec![ReplayToolClock {
                 call_id: "call_1".into(),
                 duration: Duration::from_millis(40),
             }]
@@ -1272,7 +1278,7 @@ mod tests {
         assert_eq!(replayed.messages.len(), 1);
         // The usage record replays without a clock.
         assert_eq!(replayed.usage.len(), 1);
-        assert_eq!(replayed.usage[0].before, 1);
+        assert_eq!(replayed.usage[0].messages_before, 1);
         assert_eq!(replayed.usage[0].timing, None);
 
         // The old records parse into the current variants with the

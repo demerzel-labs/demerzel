@@ -119,11 +119,20 @@ impl Thought {
         self.stale = true;
     }
 
-    /// The segment ended at `at`, or with no clock — a replayed
-    /// segment, whose file kept none.
-    pub fn end(&mut self, at: Option<Instant>) {
+    /// The segment ended at `at`.
+    pub fn end(&mut self, at: Instant) {
+        self.finish(Some(at.saturating_duration_since(self.started)));
+    }
+
+    /// The segment ended with no clock: a replayed segment, whose
+    /// file kept none.
+    pub fn end_without_clock(&mut self) {
+        self.finish(None);
+    }
+
+    fn finish(&mut self, duration: Option<Duration>) {
         if matches!(self.state, State::Live) {
-            self.state = State::Done(at.map(|at| at.saturating_duration_since(self.started)));
+            self.state = State::Done(duration);
             self.settle();
         }
     }
@@ -250,7 +259,7 @@ mod tests {
         let mut thought = Thought::new(false, at(0));
         thought.push("**Plan** the fix\nthen the rest", CAP);
         assert_eq!(text(&mut thought), "· thinking · **Plan** the fix…");
-        thought.end(Some(at(2)));
+        thought.end(at(2));
         assert_eq!(text(&mut thought), "▸ thought for 2.0s · **Plan** the fix…");
         assert!(!thought.stale());
     }
@@ -260,7 +269,7 @@ mod tests {
         let mut thought = Thought::new(true, at(0));
         thought.push("one\ntwo", CAP);
         assert_eq!(text(&mut thought), "· thinking\n\none\ntwo");
-        thought.end(Some(at(1)));
+        thought.end(at(1));
         assert_eq!(text(&mut thought), "▾ thought for 1.0s\n\none\ntwo");
         thought.set_open(false);
         assert!(thought.stale());
@@ -273,7 +282,7 @@ mod tests {
     fn a_one_line_summary_gets_no_more_mark() {
         let mut thought = Thought::new(false, at(0));
         thought.push("just this\n\n", CAP);
-        thought.end(Some(at(0)));
+        thought.end(at(0));
         assert_eq!(text(&mut thought), "▸ thought for 0ms · just this");
     }
 
@@ -284,7 +293,7 @@ mod tests {
         assert_eq!(text(&mut thought), "· thinking");
         thought.interrupt();
         assert_eq!(text(&mut thought), "▸ thinking interrupted");
-        thought.end(Some(at(3)));
+        thought.end(at(3));
         assert_eq!(
             text(&mut thought),
             "▸ thinking interrupted",

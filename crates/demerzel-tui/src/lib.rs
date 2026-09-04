@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use demerzel_core::ApprovalMode;
 
-pub use cards::write_duration;
+pub use cards::{OUTPUT_TAIL_BYTES, write_duration};
 pub use editor::CommandSpec;
 pub use events::{ApprovalChannel, EventSender, StatusPatch};
 pub use replay::{Replay, ReplayEntry, ReplayResult};
@@ -90,7 +90,10 @@ pub trait Driver {
     /// Display events the driver sends through `events` before this
     /// call returns — a status patch for a model or effort switch,
     /// the replay of a resumed session — land above the line's echo,
-    /// and show on the same frame as the note the call returns.
+    /// and show on the same frame as the note the call returns. The
+    /// call runs on the interface loop, so nothing draws and no key
+    /// lands until it returns: a file read is fine, a network round
+    /// trip is not.
     fn submit(
         &mut self,
         line: String,

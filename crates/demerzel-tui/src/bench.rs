@@ -10,10 +10,10 @@ use demerzel_core::ApprovalMode;
 
 use crate::editor::Editor;
 use crate::render::{self, Status, View};
+use crate::replay::Replay;
 use crate::theme::{Depth, Palette, Theme};
 use crate::transcript::{Kind, Transcript};
 
-pub use crate::replay::{Replay, ReplayEntry, ReplayResult};
 pub use crate::transcript::MAX_BLOCK_BYTES;
 
 /// A transcript, an input editor, a status bar, and a frame buffer

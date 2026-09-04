@@ -16,8 +16,10 @@ use demerzel_core::Usage;
 /// A resumed session's past turns, for the transcript to show as
 /// blocks. The driver builds it from the session file and sends it
 /// through [`crate::EventSender::replay`] before the notice that
-/// names the session.
+/// names the session. Start from [`Replay::default`] and set the
+/// fields; the struct grows with the interface.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Replay {
     /// Earlier messages the replay leaves out. A count above zero
     /// shows as a dim line above the first entry.
@@ -57,10 +59,13 @@ pub enum ReplayEntry {
     },
 }
 
-/// A replayed tool call's result.
+/// A replayed tool call's result. A value struct the driver builds
+/// whole, so it stays open to a literal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayResult {
-    /// The result text the model received. The card keeps its tail.
+    /// The result text the model received, or its tail: the card
+    /// reads the last [`crate::OUTPUT_TAIL_BYTES`] at most and shows
+    /// the same for a longer text, so a driver hands over the tail.
     pub output: String,
     pub is_error: bool,
     /// The call's wall time, when the file kept it.
