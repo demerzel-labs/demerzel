@@ -14,8 +14,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// One-shot prompt, quoted. Give no prompt to start the
-    /// interactive REPL.
+    /// One-shot prompt, quoted. Give no prompt to start an interactive
+    /// session.
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
 

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Shared bench harness.
 
-The metric scripts under `boot/` and `memory/` import this module and
-hold only measurement logic. The harness owns: the private run
-environment, the auth fixture, PTY spawn and shutdown, page-cache
-eviction, spawn-floor calibration, and result-file output.
+The metric scripts keep measurement logic. This module owns the
+private run environment, auth fixture, PTY spawn and shutdown,
+page-cache eviction, spawn-floor calibration, and result-file output.
 
 Spawn notes:
 - `os.posix_spawn` starts the child, not `subprocess`. The Python
@@ -353,9 +352,8 @@ def evict_verified(path: str, attempts: int = 6) -> None:
     One eviction attempt is advisory and often leaves recently
     referenced pages resident; retry until zero pages remain. On a
     platform without eviction (`supports_evict` is false) the first
-    attempt raises with the reason. The retry loop fits an advisory
-    per-file eviction; a global mechanism (the step-4 macOS decision)
-    must replace the loop, not ride it."""
+    attempt raises with the reason. The retry loop fits advisory
+    per-file eviction; a global mechanism must replace the loop."""
     resident = -1
     for _ in range(attempts):
         _native.evict_once(path)

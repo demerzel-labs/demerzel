@@ -421,7 +421,7 @@ async fn one_shot_dispatches_to_the_anthropic_provider() {
     let store_path = data.path().join("auth.json");
     std::fs::write(
         &store_path,
-        json!({"version": 2, "anthropic": {"api_key": "sk-store-key"}}).to_string(),
+        json!({"version": 2, "anthropic": {"api_key": "sk-fake-store-key"}}).to_string(),
     )
     .unwrap();
 

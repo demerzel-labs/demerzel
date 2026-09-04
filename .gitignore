@@ -1,2 +1,8 @@
 /target
 __pycache__/
+
+# Local credentials and diagnostic logs.
+.env
+.env.*
+!.env.example
+*.log

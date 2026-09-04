@@ -1,7 +1,6 @@
-//! Live smoke call against the real Anthropic API with an API key.
-//! Part of the M2 step-3 verify line. The call sends the full tool
-//! set, so it also confirms that the endpoint accepts every tool
-//! input schema.
+//! Live smoke call against the real Messages API with an API key.
+//! The call sends the full tool set, so it also confirms that the
+//! endpoint accepts every tool input schema.
 //!
 //! Run: `ANTHROPIC_API_KEY=... cargo run -p demerzel-providers \
 //!   --example anthropic_smoke -- [model] [prompt...]`

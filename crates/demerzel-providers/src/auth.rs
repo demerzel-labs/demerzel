@@ -11,10 +11,10 @@
 //! refresh with the standard OAuth refresh flow. The store writes
 //! updates to its own file only, never to the Codex CLI file.
 //!
-//! Refresh strategy (M1 decision): when the Codex CLI file holds a newer
-//! `last_refresh` than our store, re-import it instead of spending our
-//! refresh token. This keeps the two programs from invalidating each
-//! other while the Codex CLI stays in daily use.
+//! Refresh strategy: when the Codex CLI file holds a newer
+//! `last_refresh` than this store, re-import it instead of spending the
+//! stored refresh token. This keeps the two programs from invalidating
+//! each other while the Codex CLI stays in daily use.
 //!
 //! The `anthropic` section holds an API key. `dmz login anthropic`
 //! writes it; the `ANTHROPIC_API_KEY` variable stays the override.

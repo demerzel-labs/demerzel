@@ -1,8 +1,8 @@
 //! Mock model endpoint for hermetic tests and Layer-2 benchmarks.
 //!
-//! The server implements `POST /responses` (Codex), `POST /v1/messages`
-//! (Anthropic), and `GET /v1/models` (the key check); all three replay
-//! one scripted list of responses in request order. It also implements
+//! The server implements `POST /responses`, `POST /v1/messages`, and
+//! `GET /v1/models` for key checks. All three replay one scripted list
+//! of responses in request order. It also implements
 //! `POST /oauth/token` for the credential-refresh and login-exchange
 //! paths. It records every request so tests can assert on
 //! serialization and headers. Never part of the shipped binary.

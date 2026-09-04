@@ -89,7 +89,7 @@ pub struct AuthPaths {
 pub struct RunConfig {
     /// The project directory tools and sessions are scoped to.
     pub project_dir: PathBuf,
-    /// The active provider id. M2 builds ship `openai-codex` and
+    /// The active provider id. This build ships `openai-codex` and
     /// `anthropic`.
     pub provider: String,
     pub model: String,
@@ -233,8 +233,7 @@ impl Runtime {
     /// lands between two prompts takes effect at the next one. The
     /// plain interface calls this at boot and a one-shot run inside
     /// the open of its one session, so a missing login stops both
-    /// before a request goes out or a session file is touched, their
-    /// M2 behavior.
+    /// before a request goes out or a session file is touched.
     pub(crate) fn provider(&self) -> Result<&dyn Provider, RunError> {
         if let Some(provider) = self.provider.get() {
             return Ok(provider.as_ref());

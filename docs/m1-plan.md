@@ -1,12 +1,15 @@
 # M1 Implementation Plan — Dogfoodable Core
 
+Historical plan. M1 is complete. See [`README.md`](../README.md)
+and [`config.md`](config.md) for the current user-facing behavior.
+
 This plan turns the M1 milestone of [`plan.md`](plan.md) into ordered,
 verifiable steps.
 
 ## Status (2026-08-08)
 
 All 7 steps are done and merged; M1 is complete. The exit criteria
-hold. [`m2-plan.md`](m2-plan.md) carries the current milestone.
+hold. [`m2-plan.md`](m2-plan.md) carries the next milestone after M1.
 Workspace state after
 step 7: 140 tests, `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean,
@@ -228,12 +231,15 @@ writes.
 - Append-only. The file is the source of truth for resume and replay, and it
   is the fixture format for the mock server.
 - Plaintext and self-contained. The session layer must pass five checks:
-  inspect, export, replay, audit, delete (spec source: the Earendil
-  session-portability tests). Delete means: remove the file, nothing remains.
+  inspect, export, replay, audit, delete. Spec source: the
+  [Earendil session-portability essay](https://earendil.com/posts/session-portability/).
+  Delete means: remove the file, nothing remains.
 - Sealed reasoning payloads go into the record next to their readable
   summary. A sealed item is never the only carrier of meaning.
-- The harness writes no secrets into the file. Auth tokens live only in the
-  auth store. `dmz -c` loads the latest session for the project and rebuilds
+- The harness does not intentionally write provider credentials into
+  the file. Auth tokens live only in the auth store. User prompts,
+  tool input, tool output, and model text can contain secrets.
+  `dmz -c` loads the latest session for the project and rebuilds
   history.
 
 ### CLI and REPL (demerzel bin)
@@ -341,8 +347,9 @@ Each step is one PR with its own verify line.
    glob. *Verify: unit tests against fixtures.*
    **Done — PR #10, merged 2026-08-02.** Step 4 revised the read output
    to the snapshot-tag format; see the resolved decision below.
-4. **Write tools and policy.** Hash-anchored edit, bash sandbox, approval
-   modes. *Verify: stale-anchor tests, timeout test, environment test.*
+4. **Write tools and policy.** Hash-anchored edit, bash safety posture,
+   approval modes. *Verify: stale-anchor tests, timeout test,
+   environment test.*
    **Done — PR #11, merged 2026-08-02.** Also landed: the `create` tool,
    write confinement to the project root, and the tool-type move into
    `demerzel-core` that gives the step-5 loop its seam.

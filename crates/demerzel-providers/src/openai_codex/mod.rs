@@ -22,7 +22,7 @@ pub const PROVIDER_ID: &str = "openai-codex";
 /// Default Codex backend base URL.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
-/// Default model until per-role model routing arrives (M3).
+/// Default model until per-role model routing arrives.
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// The request route under the base URL.

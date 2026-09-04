@@ -65,7 +65,7 @@ impl ToolOutput {
 /// access class the policy keys on, and approved execution. The engine
 /// applies the approval policy itself, so a composite host cannot
 /// bypass it. The registry in `demerzel-tools` implements this trait;
-/// MCP tool sets (M3) plug in through it.
+/// External tool sets plug in through it.
 pub trait ToolHost: Send + Sync {
     /// Tool definitions for the model request, in a stable order.
     fn definitions(&self) -> Vec<ToolDefinition>;

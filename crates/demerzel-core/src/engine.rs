@@ -23,7 +23,7 @@
 //!
 //! The engine holds the clock for the session file's timing fields.
 //! It reads the system clock and starts a monotonic timer at each
-//! seam — the request send, the tool run, the user turn — and the
+//! boundary — the request send, the tool run, the user turn — and the
 //! usage, tool, and turn records carry the start and the wall time.
 
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, St
 use crate::session::{Session, SessionMeta, Timing};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
-/// The fixed base system prompt for M1. Config replaces it in M3.
+/// The fixed base system prompt.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Demerzel, a terminal coding agent. \
 You work inside the user's project directory with the tools the harness provides. \
 Read a file before you edit it. Keep changes small and report what you did.";

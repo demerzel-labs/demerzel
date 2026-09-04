@@ -88,7 +88,8 @@ pub struct Settings {
     pub model: Setting<String>,
     /// `None` keeps the provider's default endpoint.
     pub base_url: Setting<Option<String>>,
-    /// `None` keeps the M1 rule: the REPL asks, one-shot is read-only.
+    /// `None` keeps the default: interactive runs ask, one-shot is
+    /// read-only.
     pub approval: Setting<Option<ApprovalMode>>,
     /// The reasoning effort every request carries.
     pub effort: Setting<Effort>,
@@ -119,8 +120,8 @@ pub struct TuiSettings {
 
 impl Settings {
     /// The approval mode for one run: the configured mode when one is
-    /// set, else the M1 rule. A one-shot run has nobody to ask, so
-    /// `ask` clamps to read-only there — the M1 behavior.
+    /// set, else the default. A one-shot run has nobody to ask, so
+    /// `ask` clamps to read-only there.
     pub fn approval_mode(&self, interactive: bool) -> ApprovalMode {
         match self.approval.value {
             Some(ApprovalMode::Ask) | None if !interactive => ApprovalMode::ReadOnly,
@@ -466,7 +467,7 @@ pub fn resolve(
     // names one provider's model id: when its layer also names a
     // provider, and that provider is not the active one, the resolver
     // skips the key — a provider switch must not pair the other
-    // provider's model with the active adapter (step-3 decision).
+    // provider's model with the active adapter.
     let layer_model = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
             l.providers

@@ -1,36 +1,19 @@
 //! Markdown rendering: the source of one model reply segment becomes
 //! styled rows at one width.
 //!
-//! The parser turns the source into events; the renderer here maps
-//! them to rows in one linear pass and keeps no tree. A block re-runs
-//! the pass whole when its text changes, so the byte cap on a block
-//! bounds the work of one frame. A fence the stream has not closed yet
-//! renders as code from its opening line: the parser reads an open
-//! fence to the end of the text, which is what a mid-fence stream is.
+//! The parser emits events; this renderer maps them to rows in one
+//! pass and keeps no tree. A block re-runs the pass when its text
+//! changes, so the caller's byte cap bounds one frame.
 //!
-//! Containers — block quotes, list items — stack a prefix that every
-//! row inside them carries. Rows wrap at the width left after the
-//! prefix, code rows included, so every character stays on screen.
-//! Table rows are the exception: they cut at the width, because a
-//! wrapped table reads as nothing. A newline inside a paragraph ends
-//! the row, the way chat interfaces read it: a model writes short
-//! lines as lines, not as one paragraph to reflow.
+//! Quotes and list items stack prefixes. Rows wrap inside the remaining
+//! width, code included. Tables cut at the width because wrapped tables
+//! are unreadable. A newline inside a paragraph stays a row break.
 //!
-//! The rendered rows live in a buffer of their own next to the source.
-//! Prefixes, frames, and table padding make it larger than the source;
-//! the caller passes a byte cap and no row starts past it, so a block
-//! of rules, padded tables, or deep quotes cannot grow without bound.
-//! The render reports the cap, and the caller then shows the source as
-//! plain text. The face table has a cap of its own on the entries a
-//! highlighted fence adds, because such a fence can change class at
-//! every byte: a quarter of the row cap in entries, twice it in
-//! bytes. Past that cap the rest of the block keeps the code face and
-//! stays framed. The two entries a row's prefix and face add sit
-//! under the row cap.
-//!
-//! The source is sanitized before it gets here, but the parser decodes
-//! character references, so control characters can come back; every
-//! path to the rows drops them again.
+//! Rendered rows live beside the source and can be larger than it. The
+//! caller passes a byte cap; past it, the caller shows the source as
+//! plain text. Highlight spans have their own cap, and the remainder
+//! keeps the code face. Parsed character references can reintroduce
+//! control characters, so row writers drop them again.
 
 use std::fmt::Write as _;
 use std::ops::Range;

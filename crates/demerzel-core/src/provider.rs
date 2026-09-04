@@ -65,11 +65,11 @@ impl Request {
     }
 }
 
-/// How hard the model reasons on a request. The levels are the
-/// Codex vocabulary, by rank; each adapter maps them to its own
-/// knob, and one that takes fewer levels clamps at its ends. Ordered,
-/// so a config rule can say "not above"; a later level must land in
-/// rank order. Non-exhaustive, so that level stays additive.
+/// How hard the model reasons on a request. The levels are ordered by
+/// rank; each adapter maps them to its own knob, and one that takes
+/// fewer levels clamps at its ends. Ordered, so a config rule can say
+/// "not above"; a later level must land in rank order.
+/// Non-exhaustive, so that level stays additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]

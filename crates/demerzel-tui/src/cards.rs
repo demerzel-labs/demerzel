@@ -1,20 +1,15 @@
 //! Tool cards and the progress line.
 //!
-//! One card per tool call. The header carries the state glyph, the
-//! tool name, and the input line: the first line of the driver's
-//! preview. The body is the rest of the preview. The footer is a tail
-//! of the output and one line with the duration and the tool's
-//! summary. A card renders to text with a few face changes; the
-//! transcript lays the text out like any other block and refreshes it
-//! when the card changes.
+//! One card per tool call. The header holds the state glyph, tool
+//! name, and first preview line. The body holds the rest of the
+//! preview. The footer holds the output tail, duration, and summary.
 //!
 //! The interface keeps a capped tail of each output, sanitized before
 //! the cap, so a card at the cap costs half a block of output next to
 //! its text. The expand toggle shows the kept output whole.
 //!
-//! The progress line names what the turn is doing: a spinner, the
-//! elapsed time, and the stage. Its text is a pure function of the
-//! elapsed time, so the frame timer animates it with no state.
+//! The progress line derives from elapsed time, so the frame timer can
+//! animate it without extra state.
 //!
 //! This module also owns the text hygiene every outside string goes
 //! through before it reaches a block: control characters drop, tabs

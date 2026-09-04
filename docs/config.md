@@ -101,7 +101,8 @@ the full-screen interface cycles the mode: `ask`, `auto`,
 is open. The key does nothing while a turn runs. The full-screen
 interface names the mode on its status. The user makes the switch
 at the keyboard. The trust rules for a project file do not limit
-it: the user can set any mode. A switch swaps the tool set:
+it: the user can set any mode. A one-shot run cannot ask, so
+`ask` becomes `read-only` there. A switch swaps the tool set:
 
 - `read-only` drops the write and execute tools.
 - `auto` asks nothing.
@@ -112,8 +113,7 @@ Each `meta` record in the session file names the mode in force. The
 `meta` record spells the mode `read-only`, the command name. An
 `approval` record spells it `read_only`, the record's own older
 spelling. A reader of the file must accept both. A resumed session
-takes its mode from the flags and the config, not from the file. A one-shot run has no command and no key, so its
-mode is the one the flags and the config set.
+takes its mode from the flags and the config, not from the file.
 
 ## The model-call limit
 
@@ -377,14 +377,15 @@ counts, and the steps of a token refresh. At `trace`: the request
 body in full, every SSE payload in full, and the conversation
 itself, message by message.
 
-The trace never holds the harness's own credentials: no bearer
-token, no API key, no auth-store content, at any level. A token
+The trace does not intentionally log the harness's own credentials:
+no bearer token, no API key, and no auth-store content. A token
 refresh logs its status and not the token. Server text can echo a
-credential; each adapter redacts its own credential from an error
-body or a failure message before the text becomes an error. The file does hold what
-the session holds: at `info` the head of each `bash` command, and
-at `trace` the whole conversation. That is why the file is mode
-0600.
+credential. Each adapter redacts its own credential from an error
+body or a failure message before the text becomes an error. The
+file does hold what the session holds: at `info`, the head of each
+`bash` command; at `trace`, request bodies, SSE payloads, and the
+conversation. User prompts, tool output, and server payloads can
+contain secrets. That is why the file is mode 0600.
 
 ## Trust rules
 

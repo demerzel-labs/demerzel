@@ -1,32 +1,26 @@
 #!/usr/bin/env python3
 """Prompt-cache hit rate on a replayed prompt script: Layer 4.
 
-The script replays the user side of one session — a fixed list of
-user turns — through the harness against one live provider, as two
-fresh sessions one after the other. The model side is live, so the
-two sessions differ in what the model reads and how many calls it
-makes. The report gives `cache_read_tokens / input_tokens` per model
-call, per turn, and per session. The turns read this repository and
-nothing else.
+The script replays a fixed list of user turns against one live
+provider, in fresh sessions. The report gives
+`cache_read_tokens / input_tokens` per model call, per turn, and per
+session. The turns read this repository and nothing else.
 
 The Rust side (`crates/demerzel/examples/cache_replay.rs`) drives
-the real engine over the real adapter and prints the per-call usage;
-this script builds it, runs it, and writes the report with the
-provenance envelope. The engine advertises the full tool set in
-`ask` mode with no approver: the prefix a real session sends, with
-only the read tools able to run. Sessions land in a private temporary
-data root that goes away with the run. Credentials resolve the way a
-session resolves them: the environment (`ANTHROPIC_API_KEY`), then
-the default auth store (`dmz login`).
+the real engine over the real adapter and prints the per-call usage.
+This script builds it, runs it, and writes the report with the shared
+result envelope. The run advertises the full tool set in `ask` mode
+with no approver; only read tools can run. Sessions use a private
+temporary data root. Credentials resolve like a normal session.
 
 What the numbers mean:
 - `input_tokens` counts the whole prompt, cached parts included, for
   both providers. `cache_read_tokens` is the part served from the
-  cache; `cache_creation_tokens` the part written into it (the Codex
-  endpoint reports no write count).
-- The comparable numbers across milestones are the per-call ones: a
-  warm call that reads its predecessor's whole prompt shows a stable
-  prefix. Session totals move with the model's tool choices.
+  cache; `cache_creation_tokens` the part written into it. A provider
+  without a write count reports zero.
+- The most comparable numbers are the per-call ones: a warm call that
+  reads its predecessor's whole prompt shows a stable prefix. Session
+  totals move with the model's tool choices.
 - `first_call_hit_rate` is the first call of each session. In the
   second session it shares its whole prefix with the first session's
   first call, so a non-zero value there shows the prefix holds across
@@ -53,8 +47,8 @@ REPO_ROOT = harness.REPO_ROOT
 TARGET = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO_ROOT, "target")
 EXAMPLE = os.path.join(TARGET, "release", "examples", "cache_replay")
 
-# The user side of the session: one read-only walk through this
-# repository. Fixed across milestones.
+# The user side of the session: one fixed read-only walk through this
+# repository.
 PROMPTS = [
     "Read Cargo.toml at the repository root and list the workspace members, one per line.",
     "Read crates/demerzel-core/src/provider.rs. Name each method of the Provider trait "

@@ -21,7 +21,7 @@ OUT="$(python3 -c 'import sys; sys.path.insert(0, "bench"); import harness; prin
 # -N: no shell between hyperfine and the binary; the command is
 # sub-5 ms and shell startup would blur it.
 hyperfine -N --warmup 5 --runs "${RUNS:-50}" --export-json "$OUT" "$BIN --version"
-# Wrap the raw export in the shared provenance envelope.
+# Wrap the raw export in the shared result envelope.
 python3 - "$OUT" "$BIN" <<'EOF'
 import json
 import os

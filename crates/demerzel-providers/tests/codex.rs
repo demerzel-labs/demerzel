@@ -1,5 +1,5 @@
 //! Conformance tests for the openai-codex adapter against the mock
-//! Codex endpoint. Hermetic: no network, no model.
+//! Responses endpoint. Hermetic: no network, no model.
 
 use std::future::poll_fn;
 use std::path::PathBuf;

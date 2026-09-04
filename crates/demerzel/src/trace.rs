@@ -1,36 +1,29 @@
 //! The debug trace: one log file per run, behind `DEMERZEL_LOG`.
 //!
-//! The variable names a level — `error`, `warn`, `info`, `debug`, or
-//! `trace` — and turns the trace on for a session run: a one-shot,
-//! the plain interface, or the full screen. Unset, nothing is
-//! written, and every `log` macro across the crates costs one level
-//! check. The file lands under the data directory:
-//! `$XDG_DATA_HOME/demerzel/logs/<run-start RFC3339>-<pid>.log`. It is
-//! the one sink for every mode: the full-screen interface cannot
-//! write to stderr behind the alternate screen, so a line on stderr
-//! names the path and the file holds the trace.
+//! The variable names a level: `error`, `warn`, `info`, `debug`, or
+//! `trace`. Unset, it writes nothing. Log files land under the data
+//! directory as `<run-start RFC3339>-<pid>.log`; stderr names the path
+//! when the trace is on.
 //!
 //! The sink takes the harness's own events only: a record whose
 //! target is outside the `demerzel` crates is dropped, whatever its
 //! level. A dependency's `log` output — a line editor's key events,
 //! a connection pool's churn — is not this trace.
 //!
-//! Line shape: `<RFC3339 millis> <LEVEL> <target> <message>`, one
-//! event per line. A message with a line break lands escaped, so a
-//! reader can split the file on newlines. Lines at `info` and above
-//! flush as they land; `debug` and `trace` lines buffer, and
-//! [`flush`] empties the buffer at exit and on a panic.
+//! Line shape: `<RFC3339 millis> <LEVEL> <target> <message>`. A line
+//! break inside the message is escaped. Lines at `info` and above
+//! flush as they land; [`flush`] empties buffered lines at exit and
+//! from the panic hook.
 //!
 //! Every run gets a fresh file: `create_new` refuses a name that
 //! exists, so a reused pid inside one second gets a numbered suffix.
 //! The file stops at [`MAX_FILE_BYTES`]; a last line says so.
 //!
-//! The file is mode 0600: at `trace` it holds the request bodies and
-//! the conversation, and at `info` a tool summary holds the head of
-//! a command. It never holds the harness's own credentials — no
-//! bearer token, no API key, no auth-store content — and the
-//! emitters keep that promise; `docs/config.md` states it and names
-//! what each level carries.
+//! The file is mode 0600: at `trace` it holds request bodies and user
+//! content, and at `info` a tool summary holds the head of a command.
+//! Emitters do not log credential headers or auth-store content. User
+//! prompts, tool output, and streamed events can still contain secrets;
+//! `docs/config.md` states what each level carries.
 
 use std::ffi::OsStr;
 use std::fmt;

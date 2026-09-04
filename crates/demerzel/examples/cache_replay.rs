@@ -8,14 +8,10 @@
 //!   --provider anthropic --runs 2 -- "first prompt" "second prompt"`
 //!
 //! The run advertises the full tool set in `ask` mode with no
-//! approver, the prefix a real interactive session sends, and it
-//! executes only the read tools: every other call is declined
-//! without a prompt, and the turn goes on. The project directory is
-//! the working directory. Sessions land in a private temporary data
-//! root that goes away with the run. Credentials resolve the way a
-//! session resolves them: the environment, then the default auth
-//! store. A turn that fails ends the program with a non-zero exit;
-//! a partial trace is not a receipt.
+//! approver. Only read tools can run; every other call is declined
+//! without a prompt. Sessions use a private temporary data root.
+//! Credentials resolve like a normal session. A failed turn exits
+//! non-zero; a partial trace is not a receipt.
 //!
 //! One `calls` entry per usage report; both shipped adapters report
 //! usage once per model call.

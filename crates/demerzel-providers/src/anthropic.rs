@@ -1,8 +1,9 @@
-//! The `anthropic` adapter: the native Messages API with an API key.
+//! The `anthropic` adapter: the native [Messages API] with an API key.
 //!
-//! Contract reference: the Anthropic Messages API
-//! (<https://platform.claude.com/docs/en/api/messages>). The endpoint is
-//! public and versioned; the version header below pins the wire shape.
+//! [Messages API]: https://platform.claude.com/docs/en/api/http/messages/create
+//!
+//! The endpoint is public and versioned; the version header below pins
+//! the wire shape.
 //! The parser still ignores unknown events and fields, so additive
 //! server changes never break a session.
 
@@ -19,11 +20,10 @@ use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Reque
 /// Stable adapter id. Sealed payloads carry this id.
 pub const PROVIDER_ID: &str = "anthropic";
 
-/// Default Anthropic API base URL.
+/// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-/// Default model (M2 step-3 decision, checked against the live
-/// `/v1/models` list).
+/// Default model, checked against the live `/v1/models` list.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
 /// The context windows of the models this adapter knows, in tokens,
@@ -325,8 +325,8 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
-        // Execution stays sequential in M2, so ask for one call at a
-        // time; the capability flag says the same.
+        // Execution stays sequential: ask for one call at a time. The
+        // capability flag says the same.
         body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": true});
     }
     if let Some(thinking) = &config.thinking {
@@ -615,7 +615,8 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                     "refusal" => StopReason::Refusal,
                     // `end_turn`, `stop_sequence`, and any future value
                     // end the turn. `pause_turn` lands here too: it
-                    // needs server-side tools, which M2 does not send.
+                    // needs server-side tools, which this adapter does
+                    // not send.
                     _ => StopReason::EndTurn,
                 });
             }

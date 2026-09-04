@@ -31,7 +31,7 @@ data for each number goes into `results/`. The "Benchmark program" section of
 |---|---|---|---|
 | 1 | Boot time, memory footprint, binary size | hyperfine; on Linux, PSS and USS from `smaps_rollup` and cgroup-v2 `memory.peak`; cargo-bloat | The boot runner, the PTY probe, the PSS sampler, and the idle-session driver are here. |
 | 2 | Harness overhead per turn and per tool call; render throughput | A mock OpenAI-compatible server replays recorded transcripts for the turn benches. The render bench drives the transcript and the renderer in process. criterion runs micro-benchmarks. iai-callgrind gates CI on instruction counts. | The criterion turn benchmark and the render benchmark are here. iai-callgrind arrives with CI in M5. |
-| 3 | Agentic capability of the harness plus a model | Terminal-Bench 2.0; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
+| 3 | Agentic capability of the harness plus a model | Terminal-Bench 3.0 as the headline suite; Terminal-Bench 2.1 as the longitudinal track; fixed-model A/B benchmarks against other harnesses; the Coding Agent Index as the external target | Comes with M3/M4 |
 | 4 | Loop efficiency | Prompt-cache hit rate on replayed sessions; tokens per completed task; memory recall precision | The cache-hit measurement is here. The rest comes with M4. |
 
 ## The dogfood driver
@@ -43,6 +43,9 @@ the expand key on a tall output, a declined call. Read the captures in
 `target/dogfood/` to check the screen without a terminal in front of
 you. It needs tmux and a logged-in provider, and it spends a few
 hundred tokens per prompt.
+
+Review `target/dogfood/` before you share a capture. A capture can
+contain prompt text, tool output, file content, and model text.
 
 ## How to run
 

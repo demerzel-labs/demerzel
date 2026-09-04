@@ -8,12 +8,10 @@
 //!   harness-added latency is `turn_text - transport_floor`.
 //! - `turn_read_tool`: a turn with one read dispatch, two model calls.
 //!
-//! The bench drives `demerzel::Runtime`, the same wiring seam the
-//! REPL and the one-shot mode use, so later runtime work shows up in
-//! this number. Session and engine construction, and the session-file
-//! removal, run outside the timed span. Session files land under the
-//! cargo target directory, not tmpfs, so appends hit the same class
-//! of filesystem the product writes to.
+//! The bench drives `demerzel::Runtime`, the same wiring the
+//! interfaces use. Session and engine construction, and session-file
+//! cleanup, run outside the timed span. Session files land under the
+//! cargo target directory, not tmpfs.
 //!
 //! The mock runs on its own single-worker runtime, so server work
 //! never shares the bench thread. The bench runtime is

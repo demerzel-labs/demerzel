@@ -1,37 +1,19 @@
-//! The transcript model: what one session has shown so far, as blocks.
+//! The transcript model: one block per prompt echo, reply segment,
+//! reasoning segment, tool call, notice, or error.
 //!
-//! A block is one unit of the session: a prompt echo, one streamed
-//! model reply segment, one reasoning segment, a tool call, a notice,
-//! or an error. A reasoning segment and a tool call hold a thought or
-//! a card and write their text on demand, at the layout after a
-//! change. Each block owns a layout cache: its styled rows at
-//! the last width. A plain block keeps its rows as byte offsets into
-//! its text. A model reply renders as markdown into a buffer of its
-//! own, with the rows and the face changes over that buffer. The
-//! renderer walks blocks from the bottom until the viewport is full,
-//! so a long session pays for its window, not its history. A streamed
-//! delta touches only the open block. A plain block's layout catches
-//! up from its last row, not from its start: a wrap break depends
-//! only on the text before it, so the rows already laid out stay
-//! valid. A markdown block renders again whole: a delta can close a
-//! fence or an emphasis that opened rows earlier. A block cut at the
-//! byte cap inside a fence hands the fence opener to the block that
-//! continues it, so the code stays code and the frame does not
-//! repeat at the seam.
+//! Each block owns its last layout. Plain blocks extend their row cache
+//! from the previous end. Markdown blocks render whole because a later
+//! delta can close syntax opened in earlier rows. The renderer walks
+//! from the bottom until the viewport is full, so a long session pays
+//! for the window, not the full history.
 //!
-//! Two caps bound memory and per-frame work. The block count cap
-//! drops the oldest blocks. The per-block byte cap closes a block that
-//! grows past it and continues the stream in a new one, so a full
-//! re-layout — a width change — never wraps more than one cap of
-//! text per block.
+//! The block count cap drops old blocks. The byte cap splits large
+//! blocks; a split inside a code fence passes the opener to the next
+//! block so the code stays framed once.
 //!
-//! The view is `scroll`: rows between the bottom of the viewport and
-//! the end of the transcript. Zero is follow mode, the view sticks to
-//! the bottom. A positive value is browse mode. Rows that arrive or
-//! change at or below the top of the viewport add to it, so the row
-//! the user reads stays where it is, and the same number names the
-//! rows below the viewport for the indicator. A width change returns
-//! to follow mode: the rows the number counted no longer exist.
+//! `scroll` counts rows below the viewport. Zero follows the bottom.
+//! Positive values browse history and adjust when rows change at or
+//! below the top of the viewport, which keeps the read row in place.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -51,6 +33,7 @@ const MAX_BLOCKS: usize = 2_000;
 
 /// Byte cap for one block. A streamed block that reaches it closes
 /// and the stream continues in a new block; a pushed block splits.
+/// This bounds the text re-wrapped per block when the width changes.
 pub const MAX_BLOCK_BYTES: usize = 32 * 1024;
 
 /// Byte cap for the rendered rows of one markdown block. Prefixes,

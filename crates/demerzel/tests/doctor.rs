@@ -221,7 +221,7 @@ fn a_project_file_cannot_raise_approval_or_move_the_endpoint() {
         "{out}"
     );
     assert!(
-        out.contains("approval = ask in the REPL, read-only for one-shot (default)"),
+        out.contains("approval = ask in an interactive session, read-only for one-shot (default)"),
         "{out}"
     );
     assert!(
@@ -361,18 +361,18 @@ fn doctor_reports_anthropic_credentials_per_source() {
     std::fs::create_dir_all(&key).unwrap();
     std::fs::write(
         key.join("auth.json"),
-        r#"{"version": 2, "anthropic": {"api_key": "sk-store-secret"}}"#,
+        r#"{"version": 2, "anthropic": {"api_key": "sk-fake-store-secret"}}"#,
     )
     .unwrap();
     let (out, code) = bed.doctor(&["--provider", "anthropic"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("anthropic: in the dmz store"), "{out}");
-    assert!(!out.contains("sk-store-secret"), "{out}");
+    assert!(!out.contains("sk-fake-store-secret"), "{out}");
 
     // The environment wins over the store.
     let output = bed
         .command()
-        .env("ANTHROPIC_API_KEY", "sk-env-secret")
+        .env("ANTHROPIC_API_KEY", "sk-fake-env-secret")
         .args(["--provider", "anthropic", "doctor"])
         .output()
         .unwrap();
@@ -382,7 +382,7 @@ fn doctor_reports_anthropic_credentials_per_source() {
         out.contains("anthropic: from the environment (ANTHROPIC_API_KEY)"),
         "{out}"
     );
-    assert!(!out.contains("sk-env-secret"), "{out}");
+    assert!(!out.contains("sk-fake-env-secret"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -402,7 +402,7 @@ async fn credential_order_prefers_the_environment_over_the_store() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("auth.json"),
-        r#"{"version": 2, "anthropic": {"api_key": "sk-store-key"}}"#,
+        r#"{"version": 2, "anthropic": {"api_key": "sk-fake-store-key"}}"#,
     )
     .unwrap();
     let run = |env_key: Option<&str>| {
@@ -418,13 +418,13 @@ async fn credential_order_prefers_the_environment_over_the_store() {
     let output = run(None);
     assert!(output.status.success(), "{output:?}");
     // The variable set: it wins over the store.
-    let output = run(Some("sk-env-key"));
+    let output = run(Some("sk-fake-env-key"));
     assert!(output.status.success(), "{output:?}");
 
     let received = mock.received();
     assert_eq!(received.len(), 2);
-    assert_eq!(received[0].api_key.as_deref(), Some("sk-store-key"));
-    assert_eq!(received[1].api_key.as_deref(), Some("sk-env-key"));
+    assert_eq!(received[0].api_key.as_deref(), Some("sk-fake-store-key"));
+    assert_eq!(received[1].api_key.as_deref(), Some("sk-fake-env-key"));
 }
 
 #[test]
