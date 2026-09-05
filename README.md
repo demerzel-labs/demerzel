@@ -164,6 +164,8 @@ can write wherever the process can write.
 
 ## Docs
 
+[Repository history](docs/history.md) explains commit IDs, benchmark receipts, and historical pull requests.
+
 [`docs/plan.md`](docs/plan.md) contains the product plan.
 [`docs/m2.5-plan.md`](docs/m2.5-plan.md) contains the current
 milestone state. [`bench/README.md`](bench/README.md) contains the

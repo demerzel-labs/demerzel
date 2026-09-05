@@ -1,5 +1,8 @@
 # Demerzel: Terminal Coding Agent — Product Plan
 
+Pull request numbers recorded before the 2026-09-04 migration refer to the
+[original private archive](history.md#historical-pull-requests).
+
 Demerzel is an open-source terminal coding agent written in Rust. One lightweight
 binary runs an interactive agent loop in your terminal against any model provider
 you point it at.
@@ -25,9 +28,9 @@ M3 and later milestones describe planned work. See the
 
 ## Lineage and boundaries
 
-This repository previously held a Python/Strands pipeline review harness. That
-code, its tests, and its product contract are preserved on
-`archive/python-pipeline-harness-2026-07-31` and do not constrain this plan.
+The earlier Python review prototype remains in this repository's sanitized history.
+Its design does not constrain this plan.
+See [Repository history](history.md) for the commit map and original archive.
 Concepts carried forward: append-only traces and sessions, cost awareness,
 and the bash-tool safety posture. The bash tool uses a constructed
 environment that omits credential variables by default. Credential files

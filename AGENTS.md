@@ -109,6 +109,15 @@ milestone plan lands:
   and the provider, and the word ChatGPT names the subscription a
   login signs into; neither is a product name under this rule.
 
+## Repository history
+
+The active repository uses the sanitized history from 2026-09-04.
+Start new work from its `main` branch.
+Do not merge or push original archive commits into the active repository.
+Do not fetch archive refs into its checkouts.
+Use [`docs/history.md`](docs/history.md) for the archive and commit map.
+Pull request numbers recorded before the migration refer to the original archive.
+
 ## Documentation placement
 
 - All documentation lands in `docs/` at the repo root.

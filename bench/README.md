@@ -1,5 +1,9 @@
 # Demerzel benchmark suite
 
+Historical receipts retain their original commit IDs and measurements.
+Use the [commit map](../docs/history-commit-map.tsv) to find the corresponding sanitized commit.
+See [Repository history](../docs/history.md) for details.
+
 Demerzel treats performance claims as product features. The scripts in this
 directory produce every performance number that Demerzel publishes. The raw
 data for each number goes into `results/`. The "Benchmark program" section of

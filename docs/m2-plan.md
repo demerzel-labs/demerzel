@@ -1,5 +1,8 @@
 # M2 Implementation Plan — Interface and Second Provider
 
+Pull request numbers recorded before the 2026-09-04 migration refer to the
+[original private archive](history.md#historical-pull-requests).
+
 Historical plan. M2 is complete. See [`README.md`](../README.md)
 and [`config.md`](config.md) for the current user-facing behavior.
 Later planning moved `openai-compat` to M3.

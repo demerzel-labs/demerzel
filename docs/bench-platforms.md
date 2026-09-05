@@ -1,5 +1,8 @@
 # Benchmark Platforms Plan — Linux and macOS
 
+Pull request numbers recorded before the 2026-09-04 migration refer to the
+[original private archive](history.md#historical-pull-requests).
+
 This plan makes the benchmark suite produce receipts on both release
 targets: Linux and macOS. Today the suite runs only on Linux. macOS is
 the platform most day-to-day developers use, so its numbers matter at
