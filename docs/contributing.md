@@ -56,6 +56,49 @@ engine events, tool names and schemas, config keys, session files,
 CLI flags, or CLI subcommands. Write `Contract growth: none` when
 there is no change.
 
+## Commit subjects
+
+Use this format for each new commit subject:
+
+```text
+<type>(area): short descriptive title
+```
+
+The type and area are required. Use lowercase for both.
+Choose the type that describes the change:
+
+| Type | Change |
+| --- | --- |
+| `feat` | New behavior |
+| `fix` | Bug fix |
+| `docs` | Documentation |
+| `style` | Formatting without a behavior change |
+| `refactor` | Code structure without a behavior change |
+| `perf` | Performance improvement |
+| `test` | Tests |
+| `build` | Build system or dependencies |
+| `ci` | Continuous integration |
+| `chore` | Repository maintenance |
+| `revert` | Reversal of an earlier commit |
+
+The area names the affected part of the project, such as `tui`,
+`providers`, `docs`, or `repo`.
+Write a short title that states the concrete change.
+Use the imperative, such as `add`, `fix`, or `remove`.
+Do not add a trailing period or AI attribution.
+
+Examples:
+
+```text
+feat(tui): add a session picker
+fix(providers): handle an expired login
+docs(repo): define commit subject conventions
+```
+
+Use the same format for pull request titles.
+Use the same format for squash and merge commit subjects.
+This rule applies to new commits. Leave existing history unchanged.
+
 ## Safety
 
 Do not put credentials, tokens, private endpoints, hostnames,
