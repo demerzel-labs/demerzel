@@ -1,5 +1,9 @@
 # Demerzel
 
+![Demerzel: a geometric archive with cyan and gold linework.](docs/assets/readme-header.png)
+
+[![CI on main](https://github.com/demerzel-labs/demerzel/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/demerzel-labs/demerzel/actions/workflows/ci.yml?query=branch%3Amain)
+
 Demerzel is an open-source terminal coding agent written in Rust. One
 small binary runs an agent loop in your terminal. It connects to the
 provider that you choose.
@@ -169,8 +173,13 @@ can write wherever the process can write.
 [`docs/plan.md`](docs/plan.md) contains the product plan.
 [`docs/m2.5-plan.md`](docs/m2.5-plan.md) contains the current
 milestone state. [`bench/README.md`](bench/README.md) contains the
-benchmark method. [`docs/contributing.md`](docs/contributing.md)
-contains contribution rules.
+benchmark method.
+
+## Contributing
+
+We welcome focused contributions, including work made with AI assistance.
+You are responsible for understanding and verifying every change you submit.
+See the [contribution guide](docs/contributing.md) for evidence and review requirements.
 
 ## Prior art
 
