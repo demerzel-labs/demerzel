@@ -17,7 +17,11 @@ current.
 
 - Each plan step is one pull request. Branch `agent/<step-name>` off
   `main`.
-- Write commit subjects in the imperative. Do not add AI attribution.
+- Use `<type>(area): short descriptive title` for commit subjects and
+  pull request titles. The type and area are required.
+  Write the title in the imperative. Do not add AI attribution.
+  See [Commit subjects](docs/contributing.md#commit-subjects) for types
+  and examples.
 - Before you open a pull request, run these checks and make them pass:
   1. `cargo fmt`
   2. `cargo clippy --workspace --all-targets -- -D warnings`
