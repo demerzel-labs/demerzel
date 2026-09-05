@@ -26,6 +26,11 @@ current.
   1. `cargo fmt`
   2. `cargo clippy --workspace --all-targets -- -D warnings`
   3. `cargo test --workspace`
+- Read [`docs/ci.md`](docs/ci.md) for the additional CI checks and
+  local verification commands. Use workflow status and logs as CI
+  evidence. Include the run link and tested revision when you cite CI.
+  Run affected repository checks before the pull request opens. Run
+  release tests when optimized behavior can change.
 - Publication check, before every pull request. Read the full diff.
   Reject content that must not become public:
   1. Other products named in source code, code comments, or READMEs
@@ -44,8 +49,9 @@ current.
   same list ran on 2026-08-12, so the diff scope covers everything
   after that date.
 - The final gate before every pull request that changes code: dispatch
-  adversarial review subagents (Opus 5, high reasoning effort) over the
-  full change set.
+  adversarial review subagents over the full change set.
+  The active harness chooses the reviewer models.
+  Use high reasoning effort or higher.
   Use three lenses: performance and memory, API and architecture
   stability, correctness. Fix the material findings. Verify the fixes
   with one more review pass. Record the review results in the pull

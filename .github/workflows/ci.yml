@@ -4,10 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -17,44 +20,126 @@ env:
 
 jobs:
   test:
+    needs: quality
+    # Keep both matrix check names present on documentation-only pull requests.
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    env:
+      RUN_RUST_CHECKS: ${{ github.event_name != 'pull_request' || needs.quality.result != 'success' || needs.quality.outputs.rust != 'false' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Stop stalled jobs before the six-hour runner limit.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Report skipped Rust checks
+        if: ${{ env.RUN_RUST_CHECKS != 'true' }}
+        run: echo 'Documentation-only pull request; Rust checks skipped.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
+        with:
+          persist-credentials: false
       - name: Update the stable toolchain
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: rustup update stable --no-self-update && rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo fmt --check
       - name: Lint
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo test --workspace --locked
 
   gates:
+    needs: quality
+    if: >-
+      ${{ !cancelled() && github.event_name != 'schedule' &&
+          (github.event_name != 'pull_request' || needs.quality.result != 'success' || needs.quality.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Update the stable toolchain
         run: rustup update stable --no-self-update && rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the documentation
         run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: Test the release profile
+        run: cargo test --workspace --release --locked
       - name: Build the release binary
         run: cargo build --release --locked
-      # The Layer-1 gate from docs/plan.md: the stripped release
-      # binary stays under 25 MB. The release profile strips.
+      # The Layer-1 size gate from docs/plan.md.
       - name: Check the binary size
         run: |
           limit=25000000
           size=$(wc -c < target/release/demerzel)
           echo "binary: ${size} bytes; gate: ${limit} bytes"
           test "$size" -lt "$limit"
+
+  quality:
+    if: ${{ github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Select Rust checks for the pull request
+        id: scope
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/ci/rust_scope.py "$PR_BASE_SHA" "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - name: Install workflow and link checkers
+        run: |
+          tools_dir="$RUNNER_TEMP/quality-tools"
+          mkdir -p "$tools_dir"
+          cd "$tools_dir"
+          curl --fail --location --retry 3 -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          curl --fail --location --retry 3 -o lychee.tar.gz https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-musl.tar.gz
+          echo '73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5  lychee.tar.gz' | sha256sum --check
+          tar -xzf lychee.tar.gz --strip-components=1 lychee-x86_64-unknown-linux-musl/lychee
+          echo "$tools_dir" >> "$GITHUB_PATH"
+      - name: Test the CI helpers
+        run: python -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Check the workflows
+        run: actionlint
+      - name: Check local documentation links
+        shell: bash
+        run: git ls-files -z '*.md' | xargs -0 lychee --offline --include-fragments --no-progress --
+
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        with:
+          tool: cargo-deny@0.20.2
+          checksum: true
+          fallback: none
+      - name: Check dependencies
+        run: cargo deny --locked check advisories licenses sources

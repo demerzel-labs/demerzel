@@ -35,6 +35,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo test --workspace
 ```
 
+CI also runs release tests, dependency checks, and repository checks.
+See [ci.md](ci.md) for commands, workflow logs, and required checks.
+Run the release tests when a change can affect optimized behavior.
+
 Run benchmark scripts only when the change can affect startup,
 memory, render cost, or harness overhead. See
 [`bench/README.md`](../bench/README.md).
@@ -84,6 +88,10 @@ Use these sections:
 - Verify
 - Review
 - Contract growth
+
+The pull request template provides these sections.
+CI checks the title, commit subjects, section order, and section content.
+Replace the template comments with evidence and decisions.
 
 Under `Contract growth`, name each change to provider traits,
 engine events, tool names and schemas, config keys, session files,
