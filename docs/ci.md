@@ -1,8 +1,9 @@
 # Continuous integration
 
 CI checks each pull request and each push to `main`.
-It also runs each Monday and supports manual runs.
-The weekly run checks new advisories against the current lockfile.
+A manual run starts all CI jobs.
+The Monday schedule starts only `dependencies`.
+It checks new advisories against the current lockfile.
 
 ## Required checks
 
@@ -24,36 +25,24 @@ Local link checks run without network access.
 They include Markdown anchors.
 External links do not block a pull request.
 
-## Verification evidence
+## CI evidence
 
-Each job in the `CI` workflow retains its verification report and command logs for 14 days.
-Open the workflow run to read its summary or download its artifacts.
-Log paths in each report are relative to its downloaded artifact.
-The report records:
-
-- The tested checkout SHA and the event SHA.
-- The pull request head and base SHAs, when available.
-- The runner platform and Rust version.
-- Each command, exit code, duration, and log.
-- The test counts from Cargo result lines.
-- The release binary size, when available.
+GitHub stores each job status and log on the workflow run.
+Use the run link when you cite a CI result.
+Include the tested revision with the result.
+Check each job log for the exact command and output.
 
 Pull request runs normally test a temporary merge commit.
 Its SHA can differ from the pull request head SHA.
 Use the tested checkout SHA when you cite these results.
 
-A missing expected result makes the report incomplete.
-A failed command still fails its workflow step.
-Test counts are not coverage data.
+A failed command fails its workflow step.
+Passing CI does not prove correctness.
+Test output is not coverage data.
 Durations from shared runners are not performance benchmarks.
 
-The release report also lists file changes in known contract areas.
-It compares the tested merge commit with its first parent.
-This list helps reviewers find changes; it does not detect every API or schema change.
-The author must still complete the `Contract growth` section.
-
-Artifacts contain command output.
-Do not add credentials, real session files, or private data to test fixtures or output.
+Job logs contain command output.
+Do not add credentials, real session files, or private data to fixtures or output.
 
 ## Pull request metadata
 
@@ -114,7 +103,7 @@ The checker versions and archive hashes require separate updates.
 ## Local verification
 
 Use the tool versions in [.github/workflows/ci.yml](../.github/workflows/ci.yml).
-The Python helpers require Python 3.11 or newer.
+The metadata checker requires Python 3.11 or newer.
 Run the relevant commands before you submit changes:
 
 ```bash

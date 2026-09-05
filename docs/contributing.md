@@ -36,7 +36,7 @@ cargo test --workspace
 ```
 
 CI also runs release tests, dependency checks, and repository checks.
-See [ci.md](ci.md) for commands, reports, and required checks.
+See [ci.md](ci.md) for commands, workflow logs, and required checks.
 Run the release tests when a change can affect optimized behavior.
 
 Run benchmark scripts only when the change can affect startup,

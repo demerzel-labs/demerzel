@@ -17,10 +17,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   test:
+    if: ${{ github.event_name != 'schedule' }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,81 +31,49 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
       - name: Update the stable toolchain
         run: rustup update stable --no-self-update && rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-test" --label format -- cargo fmt --check
+        run: cargo fmt --check
       - name: Lint
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-test" --label clippy -- cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-test" --label test -- cargo test --workspace --locked
-      - name: Summarize verification
-        if: always()
-        run: python scripts/ci/evidence.py summary --directory "$RUNNER_TEMP/ci-test" --expected format clippy test >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: verification-${{ matrix.os }}
-          path: ${{ runner.temp }}/ci-test/
-          retention-days: 14
+        run: cargo test --workspace --locked
 
   gates:
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          fetch-depth: 2
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
       - name: Update the stable toolchain
         run: rustup update stable --no-self-update && rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the documentation
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-gates" --label rustdoc -- cargo doc --workspace --no-deps --locked
+        run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Test the release profile
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-gates" --label release-test -- cargo test --workspace --release --locked
+        run: cargo test --workspace --release --locked
       - name: Build the release binary
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-gates" --label release-build -- cargo build --release --locked
+        run: cargo build --release --locked
       # The Layer-1 size gate from docs/plan.md.
       - name: Check the binary size
         run: |
-          # Variables expand in the child shell.
-          # shellcheck disable=SC2016
-          python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-gates" --label binary-size -- bash -c '
-            limit=25000000
-            size=$(wc -c < target/release/demerzel)
-            echo "binary: ${size} bytes; gate: ${limit} bytes"
-            test "$size" -lt "$limit"
-          '
-      - name: Summarize verification
-        if: always()
-        env:
-          BASE_REF: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
-        run: >-
-          python scripts/ci/evidence.py summary --directory "$RUNNER_TEMP/ci-gates"
-          --binary target/release/demerzel --base-ref "$BASE_REF"
-          --expected rustdoc release-build release-test binary-size >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: verification-release
-          path: ${{ runner.temp }}/ci-gates/
-          retention-days: 14
+          limit=25000000
+          size=$(wc -c < target/release/demerzel)
+          echo "binary: ${size} bytes; gate: ${limit} bytes"
+          test "$size" -lt "$limit"
 
   quality:
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -127,23 +95,13 @@ jobs:
           echo '73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5  lychee.tar.gz' | sha256sum --check
           tar -xzf lychee.tar.gz --strip-components=1 lychee-x86_64-unknown-linux-musl/lychee
           echo "$tools_dir" >> "$GITHUB_PATH"
-      - name: Test the CI helpers
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-quality" --label ci-tests -- python -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Test the PR metadata checker
+        run: python -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check the workflows
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-quality" --label workflows -- actionlint
+        run: actionlint
       - name: Check local documentation links
-        run: >-
-          python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-quality" --label links --
-          bash -o pipefail -c 'git ls-files -z "*.md" | xargs -0 lychee --offline --include-fragments --no-progress --'
-      - name: Summarize verification
-        if: always()
-        run: python scripts/ci/evidence.py summary --directory "$RUNNER_TEMP/ci-quality" --expected ci-tests workflows links >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: verification-quality
-          path: ${{ runner.temp }}/ci-quality/
-          retention-days: 14
+        shell: bash
+        run: git ls-files -z '*.md' | xargs -0 lychee --offline --include-fragments --no-progress --
 
   dependencies:
     runs-on: ubuntu-latest
@@ -152,24 +110,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
-      - name: Update the stable toolchain
-        run: rustup update stable --no-self-update && rustup default stable
       - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: cargo-deny@0.20.2
           checksum: true
           fallback: none
       - name: Check dependencies
-        run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-dependencies" --label dependencies -- cargo deny --locked check advisories licenses sources
-      - name: Summarize verification
-        if: always()
-        run: python scripts/ci/evidence.py summary --directory "$RUNNER_TEMP/ci-dependencies" --expected dependencies >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: verification-dependencies
-          path: ${{ runner.temp }}/ci-dependencies/
-          retention-days: 14
+        run: cargo deny --locked check advisories licenses sources

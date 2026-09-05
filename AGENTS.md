@@ -27,8 +27,10 @@ current.
   2. `cargo clippy --workspace --all-targets -- -D warnings`
   3. `cargo test --workspace`
 - Read [`docs/ci.md`](docs/ci.md) for the additional CI checks and
-  verification reports. Run affected repository checks before the pull
-  request opens. Run release tests when optimized behavior can change.
+  local verification commands. Use workflow status and logs as CI
+  evidence. Include the run link and tested revision when you cite CI.
+  Run affected repository checks before the pull request opens. Run
+  release tests when optimized behavior can change.
 - Publication check, before every pull request. Read the full diff.
   Reject content that must not become public:
   1. Other products named in source code, code comments, or READMEs

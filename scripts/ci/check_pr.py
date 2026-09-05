@@ -43,7 +43,6 @@ PLACEHOLDER_RE = re.compile(
         |fill\s+in
         |replace\s+this
         |template\s+instructions?
-        |write\s+(?:the|a)\s+
         |add\s+(?:details|summary|verification|review|decisions)
     )
     \s*[:.]?\s*$
@@ -115,12 +114,12 @@ def strip_html_comments_from_line(line: str, in_comment: bool) -> tuple[str, boo
     return visible, in_comment
 
 
-def iter_visible_body_lines(text: str) -> list[tuple[int, str, bool]]:
-    lines: list[tuple[int, str, bool]] = []
+def iter_visible_body_lines(text: str) -> list[tuple[str, bool]]:
+    lines: list[tuple[str, bool]] = []
     fence_marker: str | None = None
     fence_len = 0
     in_comment = False
-    for line_no, line in enumerate(text.splitlines(), 1):
+    for line in text.splitlines():
         if fence_marker is not None:
             closer = FENCE_RE.match(line)
             if (
@@ -132,7 +131,7 @@ def iter_visible_body_lines(text: str) -> list[tuple[int, str, bool]]:
                 fence_marker = None
                 fence_len = 0
                 continue
-            lines.append((line_no, line, True))
+            lines.append((line, True))
             continue
 
         visible, in_comment = strip_html_comments_from_line(line, in_comment)
@@ -141,28 +140,28 @@ def iter_visible_body_lines(text: str) -> list[tuple[int, str, bool]]:
             fence_marker = opener.group("marker")[0]
             fence_len = len(opener.group("marker"))
             continue
-        lines.append((line_no, visible, False))
+        lines.append((visible, False))
     return lines
 
 
 def parse_h2_sections(body: str) -> tuple[str, list[Heading]]:
     lines = iter_visible_body_lines(body)
-    headings: list[tuple[int, str, int]] = []
-    for index, (line_no, line, in_fence) in enumerate(lines):
+    headings: list[tuple[int, str]] = []
+    for index, (line, in_fence) in enumerate(lines):
         if in_fence:
             continue
         match = re.match(r"^##\s+(.+?)\s*$", line)
         if match:
-            headings.append((index, match.group(1).strip(), line_no))
+            headings.append((index, match.group(1).strip()))
 
     if not headings:
-        return "\n".join(line for _, line, _ in lines), []
+        return "\n".join(line for line, _ in lines), []
 
-    opening = "\n".join(line for _, line, _ in lines[: headings[0][0]])
+    opening = "\n".join(line for line, _ in lines[: headings[0][0]])
     sections: list[Heading] = []
-    for pos, (line_index, title, line_no) in enumerate(headings):
+    for pos, (line_index, title) in enumerate(headings):
         next_index = headings[pos + 1][0] if pos + 1 < len(headings) else len(lines)
-        content = "\n".join(line for _, line, _ in lines[line_index + 1 : next_index])
+        content = "\n".join(line for line, _ in lines[line_index + 1 : next_index])
         sections.append(Heading(title=title, content=content))
     return opening, sections
 
