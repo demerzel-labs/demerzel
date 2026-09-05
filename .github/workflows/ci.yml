@@ -82,6 +82,8 @@ jobs:
       # The Layer-1 size gate from docs/plan.md.
       - name: Check the binary size
         run: |
+          # Variables expand in the child shell.
+          # shellcheck disable=SC2016
           python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-gates" --label binary-size -- bash -c '
             limit=25000000
             size=$(wc -c < target/release/demerzel)
@@ -123,7 +125,7 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           curl --fail --location --retry 3 -o lychee.tar.gz https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-musl.tar.gz
           echo '73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5  lychee.tar.gz' | sha256sum --check
-          tar -xzf lychee.tar.gz lychee
+          tar -xzf lychee.tar.gz --strip-components=1 lychee-x86_64-unknown-linux-musl/lychee
           echo "$tools_dir" >> "$GITHUB_PATH"
       - name: Test the CI helpers
         run: python scripts/ci/evidence.py run --directory "$RUNNER_TEMP/ci-quality" --label ci-tests -- python -m unittest discover -s scripts/ci -p 'test_*.py'
