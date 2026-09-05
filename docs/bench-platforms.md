@@ -3,18 +3,16 @@
 Pull request numbers recorded before the 2026-09-04 migration refer to the
 [original private archive](history.md#historical-pull-requests).
 
-This plan makes the benchmark suite produce receipts on both release
-targets: Linux and macOS. Today the suite runs only on Linux. macOS is
-the platform most day-to-day developers use, so its numbers matter at
-least as much. The plan also restates the binary-size posture: size is
-a budget with receipts, not a wall.
+This plan extends the benchmark suite to Linux and macOS.
+Warm boot and Layer-2 benchmarks produce receipts on both platforms.
+The macOS memory probe and cold-boot decision remain open.
+Binary size has a budget that requires receipts for exceptions.
 
-Status (2026-08-23, updated at the M2 close-out): steps 1 and 2 are
-merged (PR #29, PR #30). The first macOS receipts are committed, on
-mains power. Steps 3 and 4 run alongside M2.5: they gate the M2.5
-measurement pass (step 10 of that plan), not its start. The Linux
-receipts for step 2 pend on the Linux reference machine and land as a
-follow-up receipts commit.
+**Status (2026-09-05):** steps 1 and 2 merged (PR #29, PR #30).
+The M2 close-out is complete, with macOS receipts in PR #32 and
+Linux receipts in PR #33 on 2026-08-24.
+Steps 3 and 4 remain prerequisites for the M2.5 measurement pass (step 10).
+See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
 
 ## Goals
 
@@ -164,7 +162,7 @@ The size posture, decided 2026-08-23:
 - The direction stays lightweight: prefer the smaller dependency at
   equal function, prefer lazy loading, and keep the M0 discipline of
   measuring before adding.
-- Size receipts are per platform. Current points: 7.9 MB Linux
+- Size receipts are per platform. M2 baseline sizes: 7.9 MB Linux
   x86_64, 6.7 MB macOS aarch64.
 
 `docs/plan.md` and `docs/m2.5-plan.md` change to this wording where
@@ -208,8 +206,8 @@ Each step is one PR.
    matrix updated.*
 5. **M2 close-out.** The alignment review and the metrics receipts.
    The close-out definition in `AGENTS.md` gains the second machine.
-   Done 2026-08-23; the Linux metrics receipt lands as a follow-up
-   when the Linux machine is up.
+   Done 2026-08-23, with macOS receipts in PR #32.
+   The Linux receipts landed on 2026-08-24 in PR #33.
 
 M2.5 starts after step 5. The M2.5 render-bench gates read
 per-machine: each machine compares against its own M2-era baseline,
