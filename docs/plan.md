@@ -21,6 +21,7 @@ License: MIT. Plan adopted 2026-07-31.
 
 **Implementation status (2026-09-04):** M0 through M2 are complete.
 M2.5 is complete through step 9; step 10, the measurement pass, remains.
+See the [next-session handoff](m2.5-plan.md#next-session-handoff) for prerequisites and the next action.
 M3 and later milestones describe planned work. See the
 [`README`](../README.md) for current features and source-build instructions.
 
@@ -443,8 +444,9 @@ and output, and a live progress line. It takes multi-line input with
 command completion. Colors come from a theme with config keys, and a
 first-run screen greets a machine without credentials. The plain REPL
 stays the low-dependency fallback with its M2 behavior. The Layer-1
-gates and the render bench hold; the stripped binary stays under
-15 MB. Plan: [`m2.5-plan.md`](m2.5-plan.md). **Verify:** a dogfood
+gates and the render bench hold. The stripped binary has a 15 MB working
+budget; a `cargo-bloat` receipt can justify an exception.
+Plan: [`m2.5-plan.md`](m2.5-plan.md). **Verify:** a dogfood
 session shows every element; a PTY scenario per element; the render
 bench inside its gates.
 
