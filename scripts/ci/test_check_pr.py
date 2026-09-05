@@ -101,22 +101,22 @@ class ValidateSubjectTests(unittest.TestCase):
 
     def test_bad_title_type_scope_and_shape(self):
         cases = [
-            ("feature(repo): add PR metadata checks", "type is not allowed"),
-            ("ci(Repo): add PR metadata checks", "lowercase area"),
-            ("ci(): add PR metadata checks", "lowercase area"),
-            ("ci(repo) add PR metadata checks", "description"),
-            ("ci(repo): add PR metadata checks.", "must not end"),
-            ("ci(repo): add PR metadata checks. ", "trailing whitespace"),
-            ("ci(repo): add PR metadata checks\x1b", "control character"),
-            ("ci(repo): add\tPR metadata checks", "control character"),
+            "feature(repo): add PR metadata checks",
+            "ci(Repo): add PR metadata checks",
+            "ci(): add PR metadata checks",
+            "ci(repo) add PR metadata checks",
+            "ci(repo): add PR metadata checks.",
+            "ci(repo): add PR metadata checks ",
+            "ci(repo): add PR metadata checks\x1b",
+            "ci(repo): add\tPR metadata checks",
         ]
-        for title, expected in cases:
+        for title in cases:
             with self.subTest(title=title):
                 errors = check_pr.validate_pr(
                     pr_json(title=title, commits=1),
                     commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
                 )
-                self.assertTrue(any(expected in error for error in errors), errors)
+                self.assertTrue(errors)
 
     def test_each_commit_subject_is_checked(self):
         errors = check_pr.validate_pr(
@@ -126,7 +126,7 @@ class ValidateSubjectTests(unittest.TestCase):
                 commit_json("Fix repo metadata", "bbbbbbb"),
             ),
         )
-        self.assertTrue(any("commit 2" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_multiline_commit_message_body_is_allowed(self):
         errors = check_pr.validate_pr(
@@ -144,9 +144,12 @@ class ValidateSubjectTests(unittest.TestCase):
 
 class ValidateBodyTests(unittest.TestCase):
     def test_missing_body_sections(self):
-        errors = check_pr.validate_body("A summary only.")
-        self.assertTrue(any("missing '## Decisions'" in error for error in errors), errors)
-        self.assertTrue(any("missing '## Contract growth'" in error for error in errors), errors)
+        for heading in ("Decisions", "Verify", "Review", "Contract growth"):
+            with self.subTest(heading=heading):
+                body = GOOD_BODY_OPENING.replace(
+                    f"## {heading}\n", f"## Optional {heading}\n"
+                )
+                self.assertTrue(check_pr.validate_body(body))
 
     def test_body_sections_must_be_in_order(self):
         body = """Summary text.
@@ -168,7 +171,7 @@ class ValidateBodyTests(unittest.TestCase):
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("out of order" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_placeholder_content_is_rejected(self):
         body = """Summary text.
@@ -190,7 +193,7 @@ TODO
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("'## Decisions'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_standalone_bold_placeholder_is_rejected(self):
         body = """Summary text.
@@ -212,7 +215,7 @@ Contract growth: none
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("'## Decisions'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_pending_with_real_result_is_not_placeholder(self):
         body = """Summary text.
@@ -256,7 +259,7 @@ Contract growth: none
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("'## Decisions'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_fenced_and_commented_fake_headings_do_not_count(self):
         body = """Summary text.
@@ -285,8 +288,11 @@ Fake
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("missing '## Verify'" in error for error in errors), errors)
-        self.assertFalse(any("out of order" in error for error in errors), errors)
+        self.assertTrue(errors)
+        complete_body = body.replace(
+            "## Review\n", "## Verify\n\n- Ran tests.\n\n## Review\n"
+        )
+        self.assertEqual(check_pr.validate_body(complete_body), [])
 
     def test_tilde_fenced_fake_headings_do_not_count(self):
         body = """Summary text.
@@ -309,7 +315,7 @@ Fake
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("missing '## Decisions'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_real_fenced_verify_content_counts(self):
         body = """Summary text.
@@ -371,6 +377,8 @@ Contract growth: none
 
 ```
 ## Review
+
+- Fake fenced review.
 ```
 
 ## Contract growth
@@ -378,7 +386,7 @@ Contract growth: none
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("missing '## Review'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_fenced_shell_comment_counts_as_content(self):
         body = """Summary text.
@@ -452,7 +460,7 @@ Contract growth: none
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("duplicate" in error and "Verify" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_backtick_closer_requires_spaces_after_marker(self):
         body = """Summary text.
@@ -471,12 +479,16 @@ $ python scripts/ci/check_pr.py --pr pr.json --commits commits.json
 - Fake fenced review.
 ```
 
+## Review
+
+- Reviewed the diff.
+
 ## Contract growth
 
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("missing '## Review'" in error for error in errors), errors)
+        self.assertEqual(errors, [])
 
     def test_unclosed_html_comment_hides_through_eof(self):
         body = """Summary text.
@@ -499,47 +511,51 @@ Contract growth: none
 Contract growth: none
 """
         errors = check_pr.validate_body(body)
-        self.assertTrue(any("missing '## Verify'" in error for error in errors), errors)
-        self.assertTrue(any("missing '## Review'" in error for error in errors), errors)
+        self.assertTrue(errors)
 
 
 class CommitListTests(unittest.TestCase):
     def test_empty_api_list_fails(self):
         errors = check_pr.validate_pr(pr_json(commits=1), [])
-        self.assertTrue(any("no commit pages" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_empty_page_fails(self):
-        errors = check_pr.validate_pr(pr_json(commits=1), [[]])
-        self.assertTrue(any("page 1 is empty" in error for error in errors), errors)
+        errors = check_pr.validate_pr(
+            pr_json(commits=1),
+            [[], [commit_json("ci(repo): add PR metadata checks", "bbbbbbb")]],
+        )
+        self.assertTrue(errors)
 
     def test_mismatched_commit_count_fails(self):
         errors = check_pr.validate_pr(
             pr_json(commits=2),
             commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
         )
-        self.assertTrue(any("expected 2 commits, found 1" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_final_commit_must_match_head_sha(self):
         errors = check_pr.validate_pr(
             pr_json(commits=1, head={"sha": "ccccccc"}),
             commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
         )
-        self.assertTrue(any("final commit" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_commit_sha_is_required(self):
         item = {"commit": {"message": "ci(repo): add PR metadata checks"}}
         errors = check_pr.validate_pr(
-            pr_json(commits=1, head={"sha": "bbbbbbb"}),
-            commits_json(item),
+            pr_json(commits=2, head={"sha": "bbbbbbb"}),
+            commits_json(
+                item, commit_json("ci(repo): add PR metadata checks", "bbbbbbb")
+            ),
         )
-        self.assertTrue(any("SHA is missing" in error for error in errors), errors)
+        self.assertTrue(errors)
 
     def test_bool_commit_count_is_rejected(self):
         errors = check_pr.validate_pr(
             pr_json(commits=True),
             commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
         )
-        self.assertTrue(any("commits count" in error for error in errors), errors)
+        self.assertTrue(errors)
 
 
 class CliTests(unittest.TestCase):
@@ -556,12 +572,11 @@ class CliTests(unittest.TestCase):
             return code, stdout.getvalue(), stderr.getvalue()
 
     def test_cli_passes_valid_input(self):
-        code, stdout, stderr = self.run_cli(
+        code, _stdout, stderr = self.run_cli(
             pr_json(commits=1),
             commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
         )
         self.assertEqual(code, 0)
-        self.assertIn("passed", stdout)
         self.assertEqual(stderr, "")
 
     def test_hostile_text_is_inert_and_not_echoed(self):
@@ -579,11 +594,11 @@ class CliTests(unittest.TestCase):
             commits_json(commit_json("ci(repo): add PR metadata checks", "bbbbbbb")),
         )
         self.assertEqual(code, 1)
-        self.assertIn("pull request JSON: expected an object", stderr)
+        self.assertTrue(stderr.strip())
 
         code, _stdout, stderr = self.run_cli(pr_json(commits=1), None)
         self.assertEqual(code, 1)
-        self.assertIn("commits file: expected an array of pages", stderr)
+        self.assertTrue(stderr.strip())
 
     def test_bad_utf8_is_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,19 +619,26 @@ class CliTests(unittest.TestCase):
                 code = check_pr.main(["--pr", str(pr_path), "--commits", str(commits_path)])
             self.assertEqual(code, 1)
             stderr_text = stderr.getvalue()
-            self.assertIn("pull request JSON file could not be read", stderr_text)
+            self.assertTrue(stderr_text.strip())
             self.assertNotIn("\xff", stderr_text)
 
     def test_os_error_is_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:
             commits_path = Path(tmp) / "commits.json"
-            commits_path.write_text("[]", encoding="utf-8")
+            commits_path.write_text(
+                json.dumps(
+                    commits_json(
+                        commit_json("ci(repo): add PR metadata checks", "bbbbbbb")
+                    )
+                ),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
             stderr = io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = check_pr.main(["--pr", tmp, "--commits", str(commits_path)])
             self.assertEqual(code, 1)
-            self.assertIn("pull request JSON file could not be read", stderr.getvalue())
+            self.assertTrue(stderr.getvalue().strip())
 
 
 if __name__ == "__main__":

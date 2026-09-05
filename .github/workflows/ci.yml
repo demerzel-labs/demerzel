@@ -20,7 +20,11 @@ env:
 
 jobs:
   test:
-    if: ${{ github.event_name != 'schedule' }}
+    needs: quality
+    # Keep both matrix check names present on documentation-only pull requests.
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    env:
+      RUN_RUST_CHECKS: ${{ github.event_name != 'pull_request' || needs.quality.result != 'success' || needs.quality.outputs.rust != 'false' }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,23 +32,35 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
+      - name: Report skipped Rust checks
+        if: ${{ env.RUN_RUST_CHECKS != 'true' }}
+        run: echo 'Documentation-only pull request; Rust checks skipped.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         with:
           persist-credentials: false
       - name: Update the stable toolchain
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: rustup update stable --no-self-update && rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo fmt --check
       - name: Lint
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo test --workspace --locked
 
   gates:
-    if: ${{ github.event_name != 'schedule' }}
+    needs: quality
+    if: >-
+      ${{ !cancelled() && github.event_name != 'schedule' &&
+          (github.event_name != 'pull_request' || needs.quality.result != 'success' || needs.quality.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -76,13 +92,23 @@ jobs:
     if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
+      - name: Select Rust checks for the pull request
+        id: scope
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/ci/rust_scope.py "$PR_BASE_SHA" "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
       - name: Install workflow and link checkers
         run: |
           tools_dir="$RUNNER_TEMP/quality-tools"
@@ -95,7 +121,7 @@ jobs:
           echo '73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5  lychee.tar.gz' | sha256sum --check
           tar -xzf lychee.tar.gz --strip-components=1 lychee-x86_64-unknown-linux-musl/lychee
           echo "$tools_dir" >> "$GITHUB_PATH"
-      - name: Test the PR metadata checker
+      - name: Test the CI helpers
         run: python -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check the workflows
         run: actionlint

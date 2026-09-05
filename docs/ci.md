@@ -25,6 +25,33 @@ Local link checks run without network access.
 They include Markdown anchors.
 External links do not block a pull request.
 
+## Documentation-only pull requests
+
+The `quality` job checks the complete pull request diff against its merge base.
+It omits the Rust checks only when every changed path appears in
+[the documentation list](../scripts/ci/rust_scope.py).
+The list covers the README, agent instructions, plans, contribution guide, and header image.
+It also includes other documentation that builds and tests do not read.
+
+Changes outside this list run all checks.
+This includes new paths, code, dependencies, build settings, and CI files.
+`docs/config.md` also runs all checks because a Rust test reads it.
+Keep build and test inputs out of the documentation list.
+Renames check both the old path and the new path.
+An empty diff or failed detection runs the Rust checks.
+
+The workflow still checks pull request metadata, documentation links, workflow syntax, and dependencies.
+The Rust jobs wait for `quality` and omit checks only after it succeeds.
+The test jobs keep both platform check names and skip their build steps.
+Each test job records the reason in its summary.
+The `gates` job skips as a whole.
+These results satisfy required checks without leaving them pending.
+A failed `quality` job still blocks merge when branch protection requires it.
+
+A documentation commit in a pull request with code changes still runs the Rust checks.
+Pushes to `main` and manual runs always run all checks.
+The Monday schedule still runs only dependency checks.
+
 ## CI evidence
 
 GitHub stores each job status and log on the workflow run.
