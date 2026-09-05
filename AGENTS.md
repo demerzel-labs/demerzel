@@ -49,8 +49,9 @@ current.
   same list ran on 2026-08-12, so the diff scope covers everything
   after that date.
 - The final gate before every pull request that changes code: dispatch
-  adversarial review subagents (Opus 5, high reasoning effort) over the
-  full change set.
+  adversarial review subagents over the full change set.
+  The active harness chooses the reviewer models.
+  Use high reasoning effort or higher.
   Use three lenses: performance and memory, API and architecture
   stability, correctness. Fix the material findings. Verify the fixes
   with one more review pass. Record the review results in the pull
