@@ -3,7 +3,7 @@
 `harness.py` loads this module on Linux. It owns everything that
 reads `/proc` or `/sys`, the libc access, and the Linux machine-spec
 fields. The interface is the same as `platform_macos.py`:
-`resident_pages`, `evict_once`, `SUPPORTS_EVICT`,
+`resident_pages`, `evict_once`, `process_memory`, `SUPPORTS_EVICT`,
 `SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 """
 
@@ -30,6 +30,24 @@ def _libc():
 
 def resident_pages(path: str) -> int:
     return _mincore.resident_pages(_libc(), path)
+
+
+def process_memory(pid: int) -> dict[str, int]:
+    """Read the existing Linux counters without substituting other metrics."""
+    fields = {}
+    with open(f"/proc/{pid}/smaps_rollup") as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            parts = rest.split()
+            if len(parts) >= 2 and parts[1] == "kB":
+                fields[key] = int(parts[0])
+    return {
+        "anonymous_kb": fields["Anonymous"],
+        "private_dirty_kb": fields["Private_Dirty"],
+        "pss_kb": fields["Pss"],
+        "uss_kb": fields["Private_Clean"] + fields["Private_Dirty"],
+        "rss_kb": fields["Rss"],
+    }
 
 
 def evict_once(path: str) -> None:

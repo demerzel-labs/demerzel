@@ -55,6 +55,9 @@ jobs:
       - name: Test
         if: ${{ env.RUN_RUST_CHECKS == 'true' }}
         run: cargo test --workspace --locked
+      - name: Test the benchmark probes
+        if: ${{ env.RUN_RUST_CHECKS == 'true' }}
+        run: python3 -m unittest discover -s bench -p 'test_*.py'
 
   gates:
     needs: quality

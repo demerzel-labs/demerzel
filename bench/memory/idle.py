@@ -2,17 +2,19 @@
 """Idle-session memory scenario: Layer 1 measurement.
 
 The driver launches an interactive session in a pseudo-terminal N
-times. For each launch it waits for the ready marker, lets the
-process settle, and samples `/proc/<pid>/smaps_rollup`. The report
+times. For each launch it waits for the first prompt, lets the
+process settle, and samples the native memory counters. The report
 names the interface the run measured.
 
-Anonymous memory is the headline: it is the harness's own heap and
+On Linux, anonymous memory is the headline: it is the harness's own heap and
 stacks, and it is stable across runs. PSS and USS also count clean
 mapped binary text, which moves with page-cache state; the report
-keeps them for comparison with external tools.
+keeps them for comparison with external tools. macOS reports current
+physical footprint and lifetime peak footprint. These are not PSS.
 """
 
 import argparse
+import math
 import os
 import sys
 import tempfile
@@ -21,25 +23,18 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import harness
-import pss
-
-METRICS = ("anonymous_kb", "private_dirty_kb", "pss_kb", "uss_kb", "rss_kb")
 
 
 def sample(bin_path: str, env: dict[str, str], settle_s: float) -> dict[str, int]:
     pid, master, _, seen = harness.spawn_ready(bin_path, env)
+    # Wait for the first frame before settling. wait_prompt owns cleanup
+    # on failure; after it succeeds this function owns the child.
+    _, seen = harness.wait_prompt(pid, master, seen)
     try:
         time.sleep(settle_s)
-        fields = pss.rollup(pid)
+        return harness.process_memory(pid)
     finally:
         harness.shutdown(pid, master, seen)
-    return {
-        "anonymous_kb": fields.get("Anonymous", 0),
-        "private_dirty_kb": fields.get("Private_Dirty", 0),
-        "pss_kb": fields.get("Pss", 0),
-        "uss_kb": fields.get("Private_Clean", 0) + fields.get("Private_Dirty", 0),
-        "rss_kb": fields.get("Rss", 0),
-    }
 
 
 def main() -> int:
@@ -56,14 +51,18 @@ def main() -> int:
     parser.add_argument("--out", help="output JSON path (default: under bench/results)")
     args = parser.parse_args()
 
+    if args.runs < 1:
+        parser.error("--runs must be at least 1")
+    if not math.isfinite(args.settle) or args.settle < 0:
+        parser.error("--settle must be finite and nonnegative")
+
     if not os.access(args.bin, os.X_OK):
         print(f"no binary at {args.bin} — run: cargo build --release", file=sys.stderr)
         return 1
 
     if not harness.supports_proc_memory():
         print(
-            "this platform has no per-process memory probe yet; the macOS "
-            "footprint probe is step 3 of docs/bench-platforms.md",
+            "this platform has no per-process memory probe",
             file=sys.stderr,
         )
         return 1
@@ -73,7 +72,7 @@ def main() -> int:
         env = harness.bench_env(data_home)
         runs = [sample(args.bin, env, args.settle) for _ in range(args.runs)]
 
-    samples = {metric: [run[metric] for run in runs] for metric in METRICS}
+    samples = {metric: [run[metric] for run in runs] for metric in runs[0]}
     report = harness.base_report("memory-idle-repl", args.bin)
     report.update(
         {
@@ -88,11 +87,20 @@ def main() -> int:
     )
     out_path = args.out or harness.result_path("memory-idle")
     harness.write_report(out_path, report)
-    anon = report["stats_kb"]["anonymous_kb"]["median"]
-    pss_median = report["stats_kb"]["pss_kb"]["median"]
+    medians = report["stats_kb"]
+    if "physical_footprint_kb" in medians:
+        summary = (
+            f"physical footprint {medians['physical_footprint_kb']['median']} KiB median, "
+            f"lifetime peak {medians['peak_physical_footprint_kb']['median']} KiB median"
+        )
+    else:
+        summary = (
+            f"anonymous {medians['anonymous_kb']['median']} KiB median, "
+            f"PSS {medians['pss_kb']['median']} KiB median"
+        )
     print(
         f"idle {report['interface']} session over {args.runs} launches: "
-        f"anonymous {anon} KiB median, PSS {pss_median} KiB median"
+        + summary
     )
     print(f"raw data: {out_path}")
     return 0

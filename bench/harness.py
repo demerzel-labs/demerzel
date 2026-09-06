@@ -136,6 +136,11 @@ def supports_proc_memory() -> bool:
     return _native.SUPPORTS_PROC_MEMORY
 
 
+def process_memory(pid: int) -> dict[str, int]:
+    """Read the platform's process memory counters, in KiB."""
+    return _native.process_memory(pid)
+
+
 def bench_env(data_home: str) -> dict[str, str]:
     """Environment for a spawned run: private data home and HOME, no
     demerzel overrides. HOME must move too, or a future auth-store
