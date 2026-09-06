@@ -1,0 +1,713 @@
+{
+  "benchmark": "historical-ingest-instructions",
+  "git_rev": "b0fc879",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "linux-x86_64",
+  "machine": "machine-2026-09-06-linux-x86_64.json",
+  "compiler": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "profile": "release",
+  "driver": {
+    "source": "bench/render/ingest_instructions.rs",
+    "sha256": "af9ea50451a4a41c74c1f0773b3a1fdffd54e099658449a7d9f6daefb1f2b40b"
+  },
+  "build_command": "cargo +stable build --release --locked -p demerzel-tui --example ingest_instructions --target-dir target/ingest-count",
+  "build_working_directory": "The corresponding detached worktree.",
+  "note": "The report revision contains the driver. Each historical worktree has clean tracked sources plus the identical, disclosed example overlay. Counts include one owned ingestion routine and counter control overhead, not full Criterion batching. No empty-span subtraction is applied.",
+  "before": {
+    "git_rev": "b84e253095a79a41a99c26d651fffc7e43e08b3b",
+    "git_dirty": false,
+    "driver_overlay": "crates/demerzel-tui/examples/ingest_instructions.rs",
+    "binary_sha256": "d7add72fba818e2de4fa2d4da2017c01a93571093da61596c332f2e6078d9f21",
+    "run_command": "target/m25-ingest-before/target/ingest-count/release/examples/ingest_instructions",
+    "run_working_directory": "repository root",
+    "result": {
+      "counter": "instructions:user",
+      "scope": "calling thread",
+      "stream_bytes": 65536,
+      "delta_bytes": 16,
+      "history_blocks": 200,
+      "screen": [
+        120,
+        40
+      ],
+      "markdown": false,
+      "warmups": 10,
+      "sample_count": 31,
+      "note": "Raw counts include counter control overhead and the owned screen transfer. Empty spans estimate control overhead; no subtraction is applied. Fixture setup, initial draw, assertions, and drop stay outside the counter.",
+      "empty_samples": [
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3460,
+          "time_running_ns": 3460
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2750,
+          "time_running_ns": 2750
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3520,
+          "time_running_ns": 3520
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3150,
+          "time_running_ns": 3150
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 4000,
+          "time_running_ns": 4000
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3000,
+          "time_running_ns": 3000
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3450,
+          "time_running_ns": 3450
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3050,
+          "time_running_ns": 3050
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2860,
+          "time_running_ns": 2860
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2850,
+          "time_running_ns": 2850
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2910,
+          "time_running_ns": 2910
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2900,
+          "time_running_ns": 2900
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2890,
+          "time_running_ns": 2890
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2920,
+          "time_running_ns": 2920
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2800,
+          "time_running_ns": 2800
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3070,
+          "time_running_ns": 3070
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2810,
+          "time_running_ns": 2810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2830,
+          "time_running_ns": 2830
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2890,
+          "time_running_ns": 2890
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2890,
+          "time_running_ns": 2890
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2790,
+          "time_running_ns": 2790
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2810,
+          "time_running_ns": 2810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2880,
+          "time_running_ns": 2880
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2820,
+          "time_running_ns": 2820
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2910,
+          "time_running_ns": 2910
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2950,
+          "time_running_ns": 2950
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2970,
+          "time_running_ns": 2970
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2900,
+          "time_running_ns": 2900
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2910,
+          "time_running_ns": 2910
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2850,
+          "time_running_ns": 2850
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2860,
+          "time_running_ns": 2860
+        }
+      ],
+      "samples": [
+        {
+          "instructions": 2374944,
+          "time_enabled_ns": 125071,
+          "time_running_ns": 125071
+        },
+        {
+          "instructions": 2375607,
+          "time_enabled_ns": 144800,
+          "time_running_ns": 144800
+        },
+        {
+          "instructions": 2375036,
+          "time_enabled_ns": 120460,
+          "time_running_ns": 120460
+        },
+        {
+          "instructions": 2374773,
+          "time_enabled_ns": 144250,
+          "time_running_ns": 144250
+        },
+        {
+          "instructions": 2373960,
+          "time_enabled_ns": 128970,
+          "time_running_ns": 128970
+        },
+        {
+          "instructions": 2376786,
+          "time_enabled_ns": 192210,
+          "time_running_ns": 192210
+        },
+        {
+          "instructions": 2375169,
+          "time_enabled_ns": 129290,
+          "time_running_ns": 129290
+        },
+        {
+          "instructions": 2376378,
+          "time_enabled_ns": 125771,
+          "time_running_ns": 125771
+        },
+        {
+          "instructions": 2374198,
+          "time_enabled_ns": 125980,
+          "time_running_ns": 125980
+        },
+        {
+          "instructions": 2374905,
+          "time_enabled_ns": 128110,
+          "time_running_ns": 128110
+        },
+        {
+          "instructions": 2375409,
+          "time_enabled_ns": 128150,
+          "time_running_ns": 128150
+        },
+        {
+          "instructions": 2375219,
+          "time_enabled_ns": 128141,
+          "time_running_ns": 128141
+        },
+        {
+          "instructions": 2376388,
+          "time_enabled_ns": 128240,
+          "time_running_ns": 128240
+        },
+        {
+          "instructions": 2374771,
+          "time_enabled_ns": 123730,
+          "time_running_ns": 123730
+        },
+        {
+          "instructions": 2374939,
+          "time_enabled_ns": 115030,
+          "time_running_ns": 115030
+        },
+        {
+          "instructions": 2374286,
+          "time_enabled_ns": 126160,
+          "time_running_ns": 126160
+        },
+        {
+          "instructions": 2374192,
+          "time_enabled_ns": 125840,
+          "time_running_ns": 125840
+        },
+        {
+          "instructions": 2374325,
+          "time_enabled_ns": 126890,
+          "time_running_ns": 126890
+        },
+        {
+          "instructions": 2375818,
+          "time_enabled_ns": 126910,
+          "time_running_ns": 126910
+        },
+        {
+          "instructions": 2373663,
+          "time_enabled_ns": 125490,
+          "time_running_ns": 125490
+        },
+        {
+          "instructions": 2375249,
+          "time_enabled_ns": 125380,
+          "time_running_ns": 125380
+        },
+        {
+          "instructions": 2374324,
+          "time_enabled_ns": 126160,
+          "time_running_ns": 126160
+        },
+        {
+          "instructions": 2374769,
+          "time_enabled_ns": 124330,
+          "time_running_ns": 124330
+        },
+        {
+          "instructions": 2375027,
+          "time_enabled_ns": 116650,
+          "time_running_ns": 116650
+        },
+        {
+          "instructions": 2374689,
+          "time_enabled_ns": 117740,
+          "time_running_ns": 117740
+        },
+        {
+          "instructions": 2375174,
+          "time_enabled_ns": 135640,
+          "time_running_ns": 135640
+        },
+        {
+          "instructions": 2376236,
+          "time_enabled_ns": 128520,
+          "time_running_ns": 128520
+        },
+        {
+          "instructions": 2375117,
+          "time_enabled_ns": 134990,
+          "time_running_ns": 134990
+        },
+        {
+          "instructions": 2375487,
+          "time_enabled_ns": 128150,
+          "time_running_ns": 128150
+        },
+        {
+          "instructions": 2375597,
+          "time_enabled_ns": 132460,
+          "time_running_ns": 132460
+        },
+        {
+          "instructions": 2375178,
+          "time_enabled_ns": 128001,
+          "time_running_ns": 128001
+        }
+      ]
+    },
+    "stats": {
+      "median_instructions": 2375036,
+      "mean_instructions": 2375084.290322581,
+      "min_instructions": 2373663,
+      "max_instructions": 2376786,
+      "median_empty_instructions": 32
+    }
+  },
+  "after": {
+    "git_rev": "2e7e0a1177555a2cf9efcfc2094974baa2289fc4",
+    "git_dirty": false,
+    "driver_overlay": "crates/demerzel-tui/examples/ingest_instructions.rs",
+    "binary_sha256": "498009ab27e23e785c9b346abd28f8e9f17cff39c3cd52085cf0f1641a61d873",
+    "run_command": "target/m25-ingest-after/target/ingest-count/release/examples/ingest_instructions",
+    "run_working_directory": "repository root",
+    "result": {
+      "counter": "instructions:user",
+      "scope": "calling thread",
+      "stream_bytes": 65536,
+      "delta_bytes": 16,
+      "history_blocks": 200,
+      "screen": [
+        120,
+        40
+      ],
+      "markdown": false,
+      "warmups": 10,
+      "sample_count": 31,
+      "note": "Raw counts include counter control overhead and the owned screen transfer. Empty spans estimate control overhead; no subtraction is applied. Fixture setup, initial draw, assertions, and drop stay outside the counter.",
+      "empty_samples": [
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3010,
+          "time_running_ns": 3010
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 4550,
+          "time_running_ns": 4550
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 4260,
+          "time_running_ns": 4260
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3520,
+          "time_running_ns": 3520
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2970,
+          "time_running_ns": 2970
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2840,
+          "time_running_ns": 2840
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2860,
+          "time_running_ns": 2860
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2790,
+          "time_running_ns": 2790
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2740,
+          "time_running_ns": 2740
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3810,
+          "time_running_ns": 3810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3460,
+          "time_running_ns": 3460
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2810,
+          "time_running_ns": 2810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2770,
+          "time_running_ns": 2770
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3170,
+          "time_running_ns": 3170
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2860,
+          "time_running_ns": 2860
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2850,
+          "time_running_ns": 2850
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2900,
+          "time_running_ns": 2900
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2910,
+          "time_running_ns": 2910
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2810,
+          "time_running_ns": 2810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2790,
+          "time_running_ns": 2790
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3660,
+          "time_running_ns": 3660
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3210,
+          "time_running_ns": 3210
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3090,
+          "time_running_ns": 3090
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3090,
+          "time_running_ns": 3090
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3070,
+          "time_running_ns": 3070
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2960,
+          "time_running_ns": 2960
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2810,
+          "time_running_ns": 2810
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2820,
+          "time_running_ns": 2820
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2770,
+          "time_running_ns": 2770
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 2940,
+          "time_running_ns": 2940
+        },
+        {
+          "instructions": 32,
+          "time_enabled_ns": 3250,
+          "time_running_ns": 3250
+        }
+      ],
+      "samples": [
+        {
+          "instructions": 2373993,
+          "time_enabled_ns": 110050,
+          "time_running_ns": 110050
+        },
+        {
+          "instructions": 2375451,
+          "time_enabled_ns": 117610,
+          "time_running_ns": 117610
+        },
+        {
+          "instructions": 2374665,
+          "time_enabled_ns": 164510,
+          "time_running_ns": 164510
+        },
+        {
+          "instructions": 2374766,
+          "time_enabled_ns": 106210,
+          "time_running_ns": 106210
+        },
+        {
+          "instructions": 2374222,
+          "time_enabled_ns": 107320,
+          "time_running_ns": 107320
+        },
+        {
+          "instructions": 2375604,
+          "time_enabled_ns": 104150,
+          "time_running_ns": 104150
+        },
+        {
+          "instructions": 2374531,
+          "time_enabled_ns": 104060,
+          "time_running_ns": 104060
+        },
+        {
+          "instructions": 2376106,
+          "time_enabled_ns": 103990,
+          "time_running_ns": 103990
+        },
+        {
+          "instructions": 2375492,
+          "time_enabled_ns": 121700,
+          "time_running_ns": 121700
+        },
+        {
+          "instructions": 2375347,
+          "time_enabled_ns": 130220,
+          "time_running_ns": 130220
+        },
+        {
+          "instructions": 2374793,
+          "time_enabled_ns": 103850,
+          "time_running_ns": 103850
+        },
+        {
+          "instructions": 2375647,
+          "time_enabled_ns": 108590,
+          "time_running_ns": 108590
+        },
+        {
+          "instructions": 2375063,
+          "time_enabled_ns": 105470,
+          "time_running_ns": 105470
+        },
+        {
+          "instructions": 2374776,
+          "time_enabled_ns": 104230,
+          "time_running_ns": 104230
+        },
+        {
+          "instructions": 2375154,
+          "time_enabled_ns": 105860,
+          "time_running_ns": 105860
+        },
+        {
+          "instructions": 2374656,
+          "time_enabled_ns": 107660,
+          "time_running_ns": 107660
+        },
+        {
+          "instructions": 2375814,
+          "time_enabled_ns": 105100,
+          "time_running_ns": 105100
+        },
+        {
+          "instructions": 2374293,
+          "time_enabled_ns": 103570,
+          "time_running_ns": 103570
+        },
+        {
+          "instructions": 2374990,
+          "time_enabled_ns": 103340,
+          "time_running_ns": 103340
+        },
+        {
+          "instructions": 2375523,
+          "time_enabled_ns": 103720,
+          "time_running_ns": 103720
+        },
+        {
+          "instructions": 2374962,
+          "time_enabled_ns": 115430,
+          "time_running_ns": 115430
+        },
+        {
+          "instructions": 2374919,
+          "time_enabled_ns": 114340,
+          "time_running_ns": 114340
+        },
+        {
+          "instructions": 2375505,
+          "time_enabled_ns": 114460,
+          "time_running_ns": 114460
+        },
+        {
+          "instructions": 2375834,
+          "time_enabled_ns": 121111,
+          "time_running_ns": 121111
+        },
+        {
+          "instructions": 2374228,
+          "time_enabled_ns": 103670,
+          "time_running_ns": 103670
+        },
+        {
+          "instructions": 2374555,
+          "time_enabled_ns": 103420,
+          "time_running_ns": 103420
+        },
+        {
+          "instructions": 2373355,
+          "time_enabled_ns": 102370,
+          "time_running_ns": 102370
+        },
+        {
+          "instructions": 2374798,
+          "time_enabled_ns": 103691,
+          "time_running_ns": 103691
+        },
+        {
+          "instructions": 2373709,
+          "time_enabled_ns": 104520,
+          "time_running_ns": 104520
+        },
+        {
+          "instructions": 2374793,
+          "time_enabled_ns": 121370,
+          "time_running_ns": 121370
+        },
+        {
+          "instructions": 2375678,
+          "time_enabled_ns": 116850,
+          "time_running_ns": 116850
+        }
+      ]
+    },
+    "stats": {
+      "median_instructions": 2374919,
+      "mean_instructions": 2374942.64516129,
+      "min_instructions": 2373355,
+      "max_instructions": 2376106,
+      "median_empty_instructions": 32
+    }
+  },
+  "identical_historical_files": {
+    "Cargo.toml": "d5675756e59ce83bf6726dba33e6f20834942645d5397c9878715ac27f179706",
+    "Cargo.lock": "e1b1b133886ee834d9b8686d0658bb92d682d893ca84aaf9d0ed783bedf74efb",
+    "crates/demerzel-tui/benches/render.rs": "22c2a7d14c639111c87a13a9ee96c09b2861db66d2c6f5ab9a87ad34555f1c4f",
+    "crates/demerzel-tui/src/transcript.rs": "00bbfea115bc9b02ff981eb935707dc31931659cf001f117f779e79d89b7d1c6"
+  },
+  "median_change_percent": -0.004926241118030639,
+  "interpretation": "Median instruction counts differ by less than 0.01%. This routine shows no added retired instruction work. The result does not explain the historical wall-time difference or measure the full Criterion batching machinery."
+}

@@ -14,6 +14,8 @@ Linux receipts in PR #33 on 2026-08-24.
 Step 3 is complete, with idle receipts from both reference machines and macOS idle gate calibration.
 Step 4 verifies macOS system-cache eviction and adds an explicit `--cold-system` mode.
 The [decision receipt](#macos-cold-boot-decision) records the evidence and limits.
+The [M2.5 results](m2.5-measurements.md) complete the measurement pass on both reference machines.
+Mac system-cold timing remains deferred; its latency gate is uncalibrated.
 See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
 
 ## Goals
@@ -149,6 +151,7 @@ These already hold and become explicit requirements:
 
 The verified eviction support does not yet provide a practical unattended batch.
 The first full batch requested administrator authorization before each purge and stopped without a complete latency receipt.
+The 2026-09-06 close-out decision defers this timing work without changing the warm-start gate.
 Do not repeat that batch until the authorization path changes.
 See the [attempt record](m2.5-measurements.md#system-cold-status).
 
@@ -285,7 +288,10 @@ The new receipt excludes that client; the previous receipt includes it.
 PSS and USS also vary with the page-cache state of mapped files.
 These differences prevent a direct claim of improved memory use for the same workload.
 This idle receipt does not measure loaded transcripts, active turns, or concurrent sessions.
-The full measurement pass and milestone close-out remain open.
+The subsequent [M2.5 measurement pass](m2.5-measurements.md) completes the Linux evidence at `5e057db`.
+Its idle PSS median is 4,848 KiB, 1.49% below the M2 baseline.
+Anonymous memory is 1,080 KiB, 7.57% above the baseline.
+These values remain within the 10% band.
 
 Receipts:
 
@@ -339,6 +345,8 @@ and the first macOS baseline comes from step 2's receipts.
   calibration uses the observed spread.
 - **`purge` needs root and flushes everything.** Mitigation: step 4
   decides with a receipt; warm-only is an acceptable outcome.
-- **Toolchain skew.** Different rustc versions across machines blur a
-  comparison. Mitigation: the machine spec records rustc; a close-out
-  updates both machines to the same toolchain first.
+- **Toolchain skew.** Compiler changes can affect each machine's trend.
+  Compare revisions with the same compiler on each reference machine.
+  Record each compiler version. Disclose compiler changes before interpreting a result.
+  M2 and M2.5 both use Rust 1.97.0 on Linux and Rust 1.96.1 on macOS.
+  The versions differ between platforms; performance comparisons stay within each machine's trend.
