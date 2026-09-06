@@ -9,6 +9,7 @@ only the fixed purge command with elevated privileges.
 import argparse
 import hashlib
 import os
+import platform
 import subprocess
 import sys
 
@@ -66,6 +67,19 @@ def main() -> int:
         "attempts": [],
         "note": "This experiment measures file residency, not cold-boot latency.",
     })
+    # A decision experiment can precede the timing session. Keep its
+    # actual machine conditions instead of overwriting that day's spec.
+    machine_path = harness.result_path("machine-eviction")
+    report["machine"] = os.path.basename(machine_path)
+    machine = {
+        **report.pop("machine_conditions"),
+        "date": report["date"], "os": report["os"],
+        "git_rev": report["git_rev"], "git_dirty": report["git_dirty"],
+        "cores": os.cpu_count(), "kernel": platform.release(),
+        "binary_bytes": size,
+        "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+    }
+    harness.write_report(machine_path, machine)
     for _ in range(args.runs):
         digest = hashlib.sha256()
         with open(args.bin, "rb") as binary:

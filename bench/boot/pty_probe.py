@@ -18,8 +18,9 @@ Modes:
   before each run. Verify the binary's eviction with mincore.
   Shared libraries and metadata can also become cold.
 
-The report records the probe's spawn floor through the identical path
-with `printf`. The floor sits inside every sample.
+The report records a warm spawn calibration through the same path
+with `printf`. System-cold runs have different loader conditions.
+The probe does not subtract the calibration from any sample.
 """
 
 import argparse
@@ -116,6 +117,7 @@ def main() -> int:
             "runs": args.runs,
             "env_size": len(env),
             "spawn_floor_ms": floor,
+            "spawn_floor_mode": "warm",
             "samples_ms": [round(s, 3) for s in ready_samples],
             "stats_ms": harness.stats(ready_samples),
             "prompt_samples_ms": [round(s, 3) for s in prompt_samples],
