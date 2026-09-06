@@ -1,0 +1,381 @@
+{
+  "bin": "target/release/demerzel",
+  "git_rev": "a465acc",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "macos-aarch64",
+  "machine": "machine-m25-metrics-2026-09-06-a465acc-macos-aarch64.json",
+  "binary_bytes": 7256144,
+  "binary_sha256": "eaa3c47d74ec9e502c4fda533826709bbe12689df0deced1e54f699f97be825a",
+  "benchmark": "production-binary-size-breakdown",
+  "tool": "cargo-bloat",
+  "tool_version": "0.12.1",
+  "command": "cargo bloat --release --locked -p demerzel --bin demerzel --crates -n 0 --message-format json --target-dir target/m25-bloat",
+  "note": "The analysis build keeps symbols. Its file-size is not the stripped production binary_bytes. Crate attribution covers the text section and is approximate under thin LTO. This untimed receipt does not establish latency.",
+  "cargo_bloat": {
+    "file-size": 8457992,
+    "text-section-size": 4671496,
+    "crates": [
+      {
+        "name": "std",
+        "size": 1232644
+      },
+      {
+        "name": "regex_automata",
+        "size": 338956
+      },
+      {
+        "name": "rustls",
+        "size": 318448
+      },
+      {
+        "name": "demerzel",
+        "size": 218280
+      },
+      {
+        "name": "clap_builder",
+        "size": 178128
+      },
+      {
+        "name": "regex_syntax",
+        "size": 166072
+      },
+      {
+        "name": "demerzel_tui",
+        "size": 152932
+      },
+      {
+        "name": "ring",
+        "size": 143288
+      },
+      {
+        "name": "rustyline",
+        "size": 129116
+      },
+      {
+        "name": "tokio",
+        "size": 126816
+      },
+      {
+        "name": "demerzel_core",
+        "size": 123200
+      },
+      {
+        "name": "reqwest",
+        "size": 109176
+      },
+      {
+        "name": "demerzel_providers",
+        "size": 108644
+      },
+      {
+        "name": "pulldown_cmark",
+        "size": 105548
+      },
+      {
+        "name": "aho_corasick",
+        "size": 101328
+      },
+      {
+        "name": "demerzel_tools",
+        "size": 92912
+      },
+      {
+        "name": "serde_json",
+        "size": 82624
+      },
+      {
+        "name": "hyper_util",
+        "size": 72760
+      },
+      {
+        "name": "hyper",
+        "size": 63464
+      },
+      {
+        "name": "http",
+        "size": 57132
+      },
+      {
+        "name": "ignore",
+        "size": 55988
+      },
+      {
+        "name": "webpki",
+        "size": 53348
+      },
+      {
+        "name": "url",
+        "size": 46388
+      },
+      {
+        "name": "globset",
+        "size": 41676
+      },
+      {
+        "name": "toml_parser",
+        "size": 38428
+      },
+      {
+        "name": "ratatui_core",
+        "size": 34584
+      },
+      {
+        "name": "grep_searcher",
+        "size": 32848
+      },
+      {
+        "name": "[Unknown]",
+        "size": 30468
+      },
+      {
+        "name": "toml",
+        "size": 29576
+      },
+      {
+        "name": "encoding_rs",
+        "size": 28904
+      },
+      {
+        "name": "crossterm",
+        "size": 26696
+      },
+      {
+        "name": "grep_regex",
+        "size": 26216
+      },
+      {
+        "name": "idna",
+        "size": 25832
+      },
+      {
+        "name": "ratatui_widgets",
+        "size": 24040
+      },
+      {
+        "name": "serde_core",
+        "size": 22204
+      },
+      {
+        "name": "futures_util",
+        "size": 20124
+      },
+      {
+        "name": "unicode_segmentation",
+        "size": 18852
+      },
+      {
+        "name": "rustls_pki_types",
+        "size": 13760
+      },
+      {
+        "name": "walkdir",
+        "size": 13380
+      },
+      {
+        "name": "hyper_rustls",
+        "size": 12944
+      },
+      {
+        "name": "hashbrown",
+        "size": 11052
+      },
+      {
+        "name": "http_body_util",
+        "size": 10768
+      },
+      {
+        "name": "memchr",
+        "size": 9628
+      },
+      {
+        "name": "icu_normalizer",
+        "size": 9616
+      },
+      {
+        "name": "serde",
+        "size": 8508
+      },
+      {
+        "name": "tokio_rustls",
+        "size": 7784
+      },
+      {
+        "name": "sha2",
+        "size": 7776
+      },
+      {
+        "name": "bytes",
+        "size": 7528
+      },
+      {
+        "name": "unicase",
+        "size": 6856
+      },
+      {
+        "name": "tower",
+        "size": 6440
+      },
+      {
+        "name": "smallvec",
+        "size": 5468
+      },
+      {
+        "name": "toml_datetime",
+        "size": 5404
+      },
+      {
+        "name": "ipnet",
+        "size": 5004
+      },
+      {
+        "name": "httparse",
+        "size": 4532
+      },
+      {
+        "name": "signal_hook_registry",
+        "size": 4368
+      },
+      {
+        "name": "base64",
+        "size": 3948
+      },
+      {
+        "name": "parking_lot",
+        "size": 3720
+      },
+      {
+        "name": "encoding_rs_io",
+        "size": 3332
+      },
+      {
+        "name": "mio",
+        "size": 3172
+      },
+      {
+        "name": "humantime",
+        "size": 3096
+      },
+      {
+        "name": "parking_lot_core",
+        "size": 2880
+      },
+      {
+        "name": "futures_channel",
+        "size": 2780
+      },
+      {
+        "name": "anstream",
+        "size": 2540
+      },
+      {
+        "name": "unicode_width",
+        "size": 2500
+      },
+      {
+        "name": "percent_encoding",
+        "size": 2016
+      },
+      {
+        "name": "strsim",
+        "size": 2000
+      },
+      {
+        "name": "signal_hook",
+        "size": 1768
+      },
+      {
+        "name": "tracing_core",
+        "size": 1620
+      },
+      {
+        "name": "anstyle",
+        "size": 1620
+      },
+      {
+        "name": "clap_lex",
+        "size": 1456
+      },
+      {
+        "name": "serde_urlencoded",
+        "size": 1264
+      },
+      {
+        "name": "icu_collections",
+        "size": 1256
+      },
+      {
+        "name": "zmij",
+        "size": 1048
+      },
+      {
+        "name": "itoa",
+        "size": 960
+      },
+      {
+        "name": "tower_http",
+        "size": 892
+      },
+      {
+        "name": "log",
+        "size": 660
+      },
+      {
+        "name": "compact_str",
+        "size": 624
+      },
+      {
+        "name": "form_urlencoded",
+        "size": 576
+      },
+      {
+        "name": "tracing",
+        "size": 488
+      },
+      {
+        "name": "socket2",
+        "size": 480
+      },
+      {
+        "name": "__rustc",
+        "size": 428
+      },
+      {
+        "name": "nix",
+        "size": 424
+      },
+      {
+        "name": "want",
+        "size": 376
+      },
+      {
+        "name": "utf8_iter",
+        "size": 344
+      },
+      {
+        "name": "winnow",
+        "size": 312
+      },
+      {
+        "name": "grep_matcher",
+        "size": 292
+      },
+      {
+        "name": "getrandom",
+        "size": 180
+      },
+      {
+        "name": "ratatui_crossterm",
+        "size": 172
+      },
+      {
+        "name": "untrusted",
+        "size": 72
+      },
+      {
+        "name": "futures_core",
+        "size": 8
+      }
+    ]
+  }
+}

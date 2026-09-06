@@ -69,8 +69,8 @@ crates are extracted when a second consumer exists, not before:
 ```text
 crates/
   demerzel/        # bin: CLI, wiring          (exists from M0)
-  demerzel-core/   # loop, sessions, compaction (split in M1)
-  demerzel-providers/  # provider trait + adapters
+  demerzel-core/   # provider contract, loop, sessions (split in M1)
+  demerzel-providers/  # provider adapters
   demerzel-tools/  # read, edit, create, bash, grep, glob
   demerzel-tui/    # ratatui interface
 bench/             # benchmark suite (exists from M0, see below)
