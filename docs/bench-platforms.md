@@ -147,6 +147,11 @@ These already hold and become explicit requirements:
 
 ### macOS cold-boot decision
 
+The verified eviction support does not yet provide a practical unattended batch.
+The first full batch requested administrator authorization before each purge and stopped without a complete latency receipt.
+Do not repeat that batch until the authorization path changes.
+See the [attempt record](m2.5-measurements.md#system-cold-status).
+
 The 2026-09-06 experiment at `6e00cec` verified binary eviction after each of three system-cache purges.
 The release binary contains 7,256,144 bytes across 443 pages of 16,384 bytes each.
 Every attempt started with all 443 pages resident and ended with zero resident pages.

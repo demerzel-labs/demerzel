@@ -1,0 +1,19 @@
+{
+  "benchmark": "pty-time-to-interactive-attempt",
+  "bin": "target/release/demerzel",
+  "git_rev": "585ceaf",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "macos-aarch64",
+  "machine": "machine-2026-09-06-macos-aarch64.json",
+  "mode": "cold-system",
+  "eviction_scope": "system",
+  "interface": "tui",
+  "requested_warmup": 3,
+  "requested_runs": 50,
+  "status": "incomplete",
+  "timing_receipt": false,
+  "binary_sha256": "8ac0d2383c9cb68a0fd0c7c7614203a1384da4a3f986975797b5fb7becc037dd",
+  "error": "macOS did not authorize or complete the system cache purge",
+  "note": "The per-sample purge requested administrator authorization repeatedly. The batch stopped without a complete timing receipt. It was not retried after the repeated prompts were reported. No latency or gate result is claimed."
+}
