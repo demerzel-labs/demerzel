@@ -11,9 +11,8 @@ Binary size has a budget that requires receipts for exceptions.
 **Status (2026-09-05):** steps 1 and 2 merged (PR #29, PR #30).
 The M2 close-out is complete, with macOS receipts in PR #32 and
 Linux receipts in PR #33 on 2026-08-24.
-Step 3 has its macOS receipt and idle gate calibration.
-The Linux reference machine was unreachable; its idle receipt remains due.
-That receipt and step 4 remain prerequisites for the M2.5 measurement pass (step 10).
+Step 3 is complete, with idle receipts from both reference machines and macOS idle gate calibration.
+Step 4 remains a prerequisite for the M2.5 measurement pass (step 10).
 See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
 
 ## Goals
@@ -217,14 +216,47 @@ Receipts:
 - [Idle memory, macOS](../bench/results/memory-idle-2026-09-05-33f631d-macos-aarch64.json).
 - [Machine specification, macOS](../bench/results/machine-2026-09-05-macos-aarch64.json).
 
-The Linux reference machine timed out over SSH during this session.
-Run these commands there before the M2.5 measurement pass:
+## Linux idle memory comparison
+
+The 2026-09-05 receipt measures 10 idle TUI launches at `8ef6851`, with a clean tree.
+Each launch uses the synthetic login fixture and a 120x40 PTY.
+The driver waits for the first prompt and settles for one second before each sample.
+The reference machine uses the `performance` CPU governor.
+
+The receipt uses these commands, in order:
 
 1. `cargo build --release --locked`
 2. `python3 bench/machine.py`
 3. `python3 bench/memory/idle.py`
 
-Compare the Linux result with its previous Linux receipt.
+The comparison uses the previous Linux receipt from 2026-08-24 at `bd667b4`.
+Memory values are in KiB. PSS means proportional set size. USS means unique set size.
+
+| Metric | Previous median | Current median | Change | Current range | Current standard deviation |
+|---|---|---|---|---|---|
+| Anonymous memory | 1,004 | 1,080 | +7.6% | 1,076–1,084 | 2.271 |
+| PSS | 4,921.5 | 4,798 | -2.5% | 4,698–4,998 | 83.342 |
+| USS | 4,904 | 4,784 | -2.4% | 4,684–4,984 | 83.331 |
+
+The PSS median is 4.91 decimal MB, below the 40 MB Linux idle gate.
+These medians remain within the M2.5 10% band against the previous Linux receipt.
+The Linux gate stays unchanged.
+
+The CPU, governor, filesystem, and Rust compiler match the previous machine specification.
+The kernel changed from `7.1.8-arch1-3` to `7.2.3-arch1-2`.
+Step 9 also moved HTTP client construction from startup to the first model turn.
+The new receipt excludes that client; the previous receipt includes it.
+PSS and USS also vary with the page-cache state of mapped files.
+These differences prevent a direct claim of improved memory use for the same workload.
+This idle receipt does not measure loaded transcripts, active turns, or concurrent sessions.
+The full measurement pass and milestone close-out remain open.
+
+Receipts:
+
+- [Idle memory, Linux](../bench/results/memory-idle-2026-09-05-8ef6851-linux-x86_64.json).
+- [Machine specification, Linux](../bench/results/machine-2026-09-05-linux-x86_64.json).
+- [Previous idle memory, Linux](../bench/results/memory-idle-2026-08-24-bd667b4-linux-x86_64.json).
+- [Previous machine specification, Linux](../bench/results/machine-2026-08-24-linux-x86_64.json).
 
 ## Build order
 
@@ -243,8 +275,8 @@ Each step is one PR.
    `memory/idle.py` reports footprint on macOS. Runs alongside M2.5;
    must land before the M2.5 measurement pass. *Verify: idle receipts
    from both machines; the macOS gate calibration lands in
-   `docs/plan.md`.* The implementation, macOS receipt, and idle gate calibration
-   are complete. The Linux reference receipt remains due.
+   `docs/plan.md`.* The implementation, both reference receipts, and macOS idle gate calibration
+   are complete. See the [Linux comparison](#linux-idle-memory-comparison).
 4. **macOS cold boot decision.** Try `purge` with `mincore`
    verification. Runs alongside M2.5; must land before the M2.5
    measurement pass. *Verify: a receipt either way; the support
