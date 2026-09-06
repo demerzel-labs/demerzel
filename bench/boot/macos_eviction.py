@@ -62,6 +62,7 @@ def main() -> int:
         "runs_requested": args.runs,
         "command": command,
         "scope": "whole-system disk cache",
+        "machine_conditions": harness.machine_fields(),
         "attempts": [],
         "note": "This experiment measures file residency, not cold-boot latency.",
     })

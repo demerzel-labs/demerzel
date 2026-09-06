@@ -136,6 +136,11 @@ def resident_pages(path: str) -> int:
     return _native.resident_pages(path)
 
 
+def eviction_scope() -> str:
+    """Whether the native method evicts one file or the system cache."""
+    return _native.EVICTION_SCOPE
+
+
 def supports_proc_memory() -> bool:
     """Whether this platform has the per-process memory probe."""
     return _native.SUPPORTS_PROC_MEMORY
@@ -364,6 +369,8 @@ def evict_verified(path: str, attempts: int = 6) -> None:
     platform without eviction (`supports_evict` is false) the first
     attempt raises with the reason. The retry loop fits advisory
     per-file eviction; a global mechanism must replace the loop."""
+    if eviction_scope() == "system":
+        attempts = 1
     resident = -1
     for _ in range(attempts):
         _native.evict_once(path)

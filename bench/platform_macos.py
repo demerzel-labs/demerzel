@@ -5,9 +5,9 @@ and the macOS machine-spec fields. The interface is the same as
 `platform_linux.py`: `resident_pages`, `evict_once`, `process_memory`,
 `SUPPORTS_EVICT`, `SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 
-Cold-boot eviction is disabled on macOS: `purge` flushes the whole
-disk cache and needs root. Until an eviction method is selected,
-`evict_once` refuses.
+Cold-boot eviction uses `purge`, which flushes the whole disk cache.
+The caller must select system-wide cold mode. macOS authorizes only
+the fixed purge command; the benchmark process stays unprivileged.
 """
 
 import ctypes
@@ -16,7 +16,8 @@ import subprocess
 
 import _mincore
 
-SUPPORTS_EVICT = False
+SUPPORTS_EVICT = True
+EVICTION_SCOPE = "system"
 SUPPORTS_PROC_MEMORY = True
 
 _RUSAGE_INFO_V4 = 4
@@ -86,10 +87,13 @@ def resident_pages(path: str) -> int:
 
 
 def evict_once(path: str) -> None:
-    raise RuntimeError(
-        "macOS has no verified page-cache eviction yet; "
-        "the decision is step 4 of docs/bench-platforms.md"
+    result = subprocess.run(
+        ["/usr/bin/osascript", "-e",
+         'do shell script "/usr/sbin/purge" with administrator privileges'],
+        capture_output=True, text=True, timeout=180,
     )
+    if result.returncode != 0:
+        raise RuntimeError("macOS did not authorize or complete the system cache purge")
 
 
 def process_memory(pid: int) -> dict[str, int]:
