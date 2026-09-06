@@ -2,12 +2,12 @@
 
 `harness.py` loads this module on macOS. It owns the libSystem access
 and the macOS machine-spec fields. The interface is the same as
-`platform_linux.py`: `resident_pages`, `evict_once`, `SUPPORTS_EVICT`,
-`SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
+`platform_linux.py`: `resident_pages`, `evict_once`, `process_memory`,
+`SUPPORTS_EVICT`, `SUPPORTS_PROC_MEMORY`, `filesystem`, and `machine_fields`.
 
 Cold-boot eviction is disabled on macOS: `purge` flushes the whole
 disk cache and needs root. Until an eviction method is selected,
-`evict_once` refuses. The per-process memory probe is not implemented.
+`evict_once` refuses.
 """
 
 import ctypes
@@ -17,7 +17,52 @@ import subprocess
 import _mincore
 
 SUPPORTS_EVICT = False
-SUPPORTS_PROC_MEMORY = False
+SUPPORTS_PROC_MEMORY = True
+
+_RUSAGE_INFO_V4 = 4
+
+
+class _RusageInfoV4(ctypes.Structure):
+    # The complete sys/resource.h layout. The kernel writes all fields,
+    # including those after the two footprint counters that we read.
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_cpu_time_qos_default", ctypes.c_uint64),
+        ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+        ("ri_cpu_time_qos_background", ctypes.c_uint64),
+        ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+        ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+        ("ri_billed_system_time", ctypes.c_uint64),
+        ("ri_serviced_system_time", ctypes.c_uint64),
+        ("ri_logical_writes", ctypes.c_uint64),
+        ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+        ("ri_instructions", ctypes.c_uint64),
+        ("ri_cycles", ctypes.c_uint64),
+        ("ri_billed_energy", ctypes.c_uint64),
+        ("ri_serviced_energy", ctypes.c_uint64),
+        ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+        ("ri_runnable_time", ctypes.c_uint64),
+    ]
 
 _libc_handle = None
 
@@ -27,6 +72,12 @@ def _libc():
     global _libc_handle
     if _libc_handle is None:
         _libc_handle = ctypes.CDLL("libSystem.B.dylib", use_errno=True)
+        _libc_handle.proc_pid_rusage.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        _libc_handle.proc_pid_rusage.restype = ctypes.c_int
     return _libc_handle
 
 
@@ -39,6 +90,24 @@ def evict_once(path: str) -> None:
         "macOS has no verified page-cache eviction yet; "
         "the decision is step 4 of docs/bench-platforms.md"
     )
+
+
+def process_memory(pid: int) -> dict[str, int]:
+    """Current and lifetime peak physical footprint, in integer KiB."""
+    if type(pid) is not int:
+        raise TypeError("The process ID must be an integer")
+    if not 0 < pid <= 0x7FFFFFFF:
+        raise ValueError("The process ID must be a positive signed 32-bit integer")
+    usage = _RusageInfoV4()
+    # rusage_info_t is void *, but the API writes the structure directly
+    # at the supplied address, as the SDK's callers do.
+    buffer = ctypes.cast(ctypes.byref(usage), ctypes.POINTER(ctypes.c_void_p))
+    if _libc().proc_pid_rusage(pid, _RUSAGE_INFO_V4, buffer) != 0:
+        raise OSError(ctypes.get_errno(), f"Cannot read process memory for PID {pid}")
+    return {
+        "physical_footprint_kb": usage.ri_phys_footprint // 1024,
+        "peak_physical_footprint_kb": usage.ri_lifetime_max_phys_footprint // 1024,
+    }
 
 
 def _run(cmd: list[str]) -> str:

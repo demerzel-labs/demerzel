@@ -382,16 +382,22 @@ sections below carry the details.
 
 Honest ordering: first beat the incumbent class, then chase jcode with
 profiling receipts. The jcode bar is a Linux-PSS claim and gates the
-Linux track only. The macOS memory gates are provisional until the
-first macOS receipt calibrates them
-([`bench-platforms.md`](bench-platforms.md)).
+Linux track only. The first macOS memory receipt calibrates the idle startup gate.
+The marginal-session gate remains provisional until the concurrent-session scenario runs.
+See the [macOS calibration record](bench-platforms.md#macos-memory-calibration).
 
 | Metric | Linux gate | macOS gate | Bar (jcode, Linux) |
 |---|---|---|---|
 | Boot to interactive | < 50 ms | < 50 ms | 14 ms |
-| Single session memory | PSS < 40 MB | footprint < 60 MB, provisional | 27.8 MB |
+| Single idle session memory | PSS < 40 MB | footprint < 10 MB | 27.8 MB |
 | Marginal session memory | PSS < 15 MB | footprint < 20 MB, provisional | ~9.9 MB |
 | Stripped binary | 25 MB budget | 25 MB budget | — |
+
+The macOS idle receipt from 2026-09-05 records a 2,112 KiB median and a 2,096–2,112 KiB range across 10 launches.
+The 10 MB gate leaves more than four times the observed maximum.
+This gate covers startup before the first model turn and before HTTP client construction.
+It does not measure active turns, loaded transcripts, or the marginal cost of concurrent sessions.
+M2 has no macOS memory receipt, so this result starts the Mac memory trend.
 
 Binary size is a budget, not a wall (decided 2026-08-23). Function and
 measured performance never get cut only to stay under a size number.

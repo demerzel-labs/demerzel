@@ -69,8 +69,8 @@ bench/boot/pty_probe.py --cold
 # Layer 1: memory of an idle REPL session, over 10 launches.
 bench/memory/idle.py
 
-# Layer 1: PSS and USS of running agent processes.
-bench/memory/pss.py <pid> [pid...]
+# Layer 1: native memory counters for running agent processes.
+bench/memory/memory.py <pid> [pid...]
 
 # Layer 2: harness-added latency per turn, against the mock server.
 bench/turn/run.sh
@@ -87,9 +87,10 @@ bench/cache/replay.py --provider openai-codex
 The suite runs on Linux and macOS, the two reference platforms
 ([`docs/bench-platforms.md`](../docs/bench-platforms.md)). Result files
 carry an OS-arch slug, for example `boot-2026-08-23-abc1234-macos-aarch64.json`.
-Three gaps remain on macOS. The idle memory driver and `pss.py` run
-only on Linux until the footprint probe lands (step 3). Cold mode runs
-only on Linux until the eviction decision lands (step 4).
+The memory probes run on both platforms. Linux reports PSS and USS.
+macOS reports current physical footprint and lifetime peak physical footprint.
+The old `memory/pss.py` command forwards to `memory/memory.py`.
+Cold mode runs only on Linux until the eviction decision lands (step 4).
 
 The boot benchmark needs `hyperfine`. On Arch, install it with
 `pacman -S hyperfine`. On macOS, install it with
@@ -108,10 +109,18 @@ Method notes:
   and verifies the eviction with `mincore`. Shared libraries and
   metadata caches stay warm, so the cold number tracks the binary read
   and moves with binary size. A true cold start needs a fresh boot.
-- The memory driver samples N launches. Anonymous memory is the
-  headline: it is the harness's own heap and it is stable. PSS and USS
-  also count clean mapped binary text, which moves with page-cache
-  state; reports keep them because cross-agent comparisons use PSS.
+- The memory driver waits for the first prompt, settles for one second,
+  and samples each of 10 launches by default.
+  On Linux, anonymous memory measures the harness's heap and stacks.
+  PSS and USS also count clean mapped binary text, which changes with page-cache state.
+  On macOS, `proc_pid_rusage` supplies current and lifetime peak physical footprint.
+  The JSON fields end in `_kb`, but all values use KiB (1,024 bytes).
+  Footprint and PSS do not compare across platforms.
+  The peak belongs to one process, from launch through the sample.
+  It is not a concurrent-session peak.
+  The PID command samples processes in sequence and does not add their peaks.
+  Step 9 delays HTTP client construction until the first model turn.
+  The idle fixture now measures startup without an HTTP client.
 - The turn suite reports `transport_floor` next to the turn benches.
   Harness-added latency per turn is `turn_text` minus
   `transport_floor`. Session files land under the cargo target
@@ -142,3 +151,7 @@ Method notes:
      under the provider's minimum cacheable length.
   Session totals move with the model's tool choices, so they do not
   compare.
+
+Run the probe checks with `python3 -m unittest discover -s bench -p 'test_*.py'`.
+On macOS, they check the native structure against the installed SDK.
+They also check current footprint growth and lifetime peak retention after memory release.

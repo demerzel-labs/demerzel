@@ -9,7 +9,7 @@ It checks new advisories against the current lockfile.
 
 | Check name | Checks |
 | --- | --- |
-| `test (ubuntu-latest)` | Formatting, Clippy, and workspace tests on stable Rust |
+| `test (ubuntu-latest)` | Formatting, Clippy, workspace tests, and benchmark probe tests |
 | `test (macos-latest)` | The same checks on macOS |
 | `gates` | Rustdoc, release build, release tests, and binary size on Linux |
 | `quality` | CI helper tests, workflow syntax, and local Markdown links and anchors |
@@ -135,6 +135,7 @@ Run the relevant commands before you submit changes:
 
 ```bash
 python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+python3 -m unittest discover -s bench -p 'test_*.py'
 actionlint
 git ls-files -z '*.md' | xargs -0 lychee --offline --include-fragments --no-progress --
 cargo deny --locked check advisories licenses sources
