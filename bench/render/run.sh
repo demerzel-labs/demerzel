@@ -62,8 +62,11 @@ report["note"] = (
     "frame-filled-editor-m25 redraws that filled editor with cached layout. "
     "The near browse case keeps 400 capped cards and starts 400 collapsed rows "
     "above the end; the cap case keeps 2,000 cards and starts at the first row. "
-    "Each browse-toggle iteration toggles all cards and draws once, alternating "
-    "expand and collapse while preserving the browse anchor. "
+    "Separate browse-expand and browse-collapse distributions change all cards "
+    "and draw once. Each expansion starts with fresh collapsed layouts. "
+    "Each collapse starts after an untimed expansion/draw at the same anchor. "
+    "Fixture creation, anchor setup, opposite-state preparation, and drop stay "
+    "outside timing; the timed draw includes layouts changed by the operation. "
     "frame-browse measures the cached, collapsed state."
 )
 report["benches"] = harness.criterion_benches(target, group="render", since=start)
@@ -72,7 +75,8 @@ required = {
     "frame-replayed", "replay", "ingest", "stream", "ingest-formatted", "stream-formatted",
     "frame-m25", "frame-thinking-open-m25", "frame-filled-editor-m25", "editor-edit-m25",
     "reflow-m25", "frame-browse-near-m25", "frame-browse-cap-m25",
-    "browse-toggle-near-m25", "browse-toggle-cap-m25", "ingest-m25", "stream-m25",
+    "browse-expand-near-m25", "browse-expand-cap-m25",
+    "browse-collapse-near-m25", "browse-collapse-cap-m25", "ingest-m25", "stream-m25",
 }
 missing = required - report["benches"].keys()
 if missing:

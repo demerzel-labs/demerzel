@@ -68,10 +68,16 @@ The near case has 400 cards and starts 400 collapsed rows above the end.
 The cap case has 2,000 cards and starts at the first row.
 
 The `frame-browse-near-m25` and `frame-browse-cap-m25` benchmarks draw the unchanged, collapsed state.
-The `browse-toggle-near-m25` and `browse-toggle-cap-m25` benchmarks toggle every card and draw once.
-Successive iterations alternate between expansion and collapse.
+The `browse-expand-near-m25` and `browse-expand-cap-m25` benchmarks expand every card and draw once.
+The `browse-collapse-near-m25` and `browse-collapse-cap-m25` benchmarks collapse every card and draw once.
+Separate distributions show the cost of each operation.
+
+Each expansion starts with fresh collapsed layouts at the specified anchor.
+Each collapse starts after an untimed expansion and draw at that same anchor.
 The transcript keeps the browse anchor through each change.
-The measured work includes the toggle across all cards and layout below the anchor.
+The measured work includes the state change across all cards and the changed layouts below the anchor.
+Fixture creation, anchor setup, and preparation of the opposite form stay outside timing.
+The fixture drops outside timing.
 
 ## Layout buffer retention
 

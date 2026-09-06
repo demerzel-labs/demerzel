@@ -121,6 +121,20 @@ fn cards(count: usize) -> Screen {
     screen
 }
 
+/// Establish the anchor in the collapsed form, then prepare the
+/// starting form outside the timed region. A collapse starts from
+/// the same logical row after an untimed expansion and draw.
+fn browsed_cards(count: usize, rows: usize, expanded: bool) -> Screen {
+    let mut screen = cards(count);
+    screen.scroll_up(rows);
+    screen.draw();
+    if expanded {
+        screen.set_cards_expanded(true);
+        screen.draw();
+    }
+    screen
+}
+
 fn buffer_json(buffers: &Buffers) -> String {
     format!(
         "{{\"blocks\":{},\"laid_out_blocks\":{},\"rendered_blocks\":{},\"text_capacity_bytes\":{},\"layout_capacity_bytes\":{}}}",
@@ -259,23 +273,28 @@ pub(super) fn bench(group: &mut BenchmarkGroup<'_, WallTime>) {
 
     // The near case keeps 400 capped cards and starts 400 collapsed
     // rows above the end. The cap case keeps 2,000 cards and starts
-    // at the first row. Expand and collapse are separate iterations,
-    // alternating, and each includes the toggle and one changed frame.
+    // at the first row. Each expansion/collapse sample starts from
+    // freshly prepared layouts in the opposite form at that anchor.
     for (name, count, rows) in [("near", 400, 400), ("cap", CAP_BLOCKS, usize::MAX / 2)] {
-        let mut browse = cards(count);
-        browse.scroll_up(rows);
-        browse.draw();
-        group.bench_function(format!("frame-browse-{name}-m25"), |b| {
-            b.iter(|| browse.draw())
-        });
-        let mut expanded = false;
-        group.bench_function(format!("browse-toggle-{name}-m25"), |b| {
-            b.iter(|| {
-                expanded = !expanded;
-                browse.set_cards_expanded(expanded);
-                browse.draw();
-            })
-        });
+        {
+            let mut browse = browsed_cards(count, rows, false);
+            group.bench_function(format!("frame-browse-{name}-m25"), |b| {
+                b.iter(|| browse.draw())
+            });
+        }
+        for (operation, expanded) in [("expand", true), ("collapse", false)] {
+            group.bench_function(format!("browse-{operation}-{name}-m25"), |b| {
+                b.iter_batched(
+                    || browsed_cards(count, rows, !expanded),
+                    |mut browse| {
+                        browse.set_cards_expanded(expanded);
+                        browse.draw();
+                        browse
+                    },
+                    BatchSize::PerIteration,
+                )
+            });
+        }
     }
     group.throughput(Throughput::Bytes(STREAM as u64));
     group.bench_function("ingest-m25", |b| {
