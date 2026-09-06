@@ -5,14 +5,15 @@ Pull request numbers recorded before the 2026-09-04 migration refer to the
 
 This plan extends the benchmark suite to Linux and macOS.
 Warm boot and Layer-2 benchmarks produce receipts on both platforms.
-The macOS memory probe is implemented. The cold-boot decision remains open.
+The macOS memory probe and system-cache eviction are implemented.
 Binary size has a budget that requires receipts for exceptions.
 
-**Status (2026-09-05):** steps 1 and 2 merged (PR #29, PR #30).
+**Status (2026-09-06):** steps 1 and 2 merged (PR #29, PR #30).
 The M2 close-out is complete, with macOS receipts in PR #32 and
 Linux receipts in PR #33 on 2026-08-24.
 Step 3 is complete, with idle receipts from both reference machines and macOS idle gate calibration.
-Step 4 remains a prerequisite for the M2.5 measurement pass (step 10).
+Step 4 verifies macOS system-cache eviction and adds an explicit `--cold-system` mode.
+The [decision receipt](#macos-cold-boot-decision) records the evidence and limits.
 See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
 
 ## Goals
@@ -61,7 +62,7 @@ receipt, as today. Machine hostnames stay out of the repository.
 |---|---|---|
 | Boot, binary start | hyperfine over `--version` | same |
 | Boot, time to interactive | PTY probe, `posix_spawn` | same |
-| Cold boot | `posix_fadvise` eviction, `mincore` verify | `purge` eviction, `mincore` verify; step 4 decides |
+| Cold boot | Per-file `posix_fadvise` eviction, `mincore` verification | System-cache `purge` eviction, binary `mincore` verification |
 | Memory, per process | PSS and USS from `/proc/<pid>/smaps_rollup` | physical footprint from `proc_pid_rusage` |
 | Memory, peak | cgroup-v2 `memory.peak` | `ri_lifetime_max_phys_footprint` |
 | Page-cache residency | `mincore` via libc | `mincore` via libSystem |
@@ -135,7 +136,8 @@ These already hold and become explicit requirements:
 |---|---|---|
 | boot/run.sh | yes | yes |
 | boot/pty_probe.py warm | yes | yes |
-| boot/pty_probe.py --cold | yes | step 4 decides |
+| boot/pty_probe.py --cold | yes | no: no per-file eviction |
+| boot/pty_probe.py --cold-system | no | yes: administrator authorization required |
 | memory/idle.py | yes (PSS, USS, anon) | yes (footprint) |
 | memory/memory.py | yes (PSS, USS) | yes (current and lifetime peak footprint) |
 | turn/run.sh | yes | yes |
@@ -143,10 +145,39 @@ These already hold and become explicit requirements:
 | cache/replay.py | yes | yes |
 | metrics.py | yes | yes |
 
-Cold boot on macOS: `purge` flushes the whole disk cache and needs
-root. Step 4 tries it, verifies the eviction with `mincore`, and
-decides with a receipt. If `purge` cannot give a verified eviction,
-macOS cold is marked unsupported and the warm number stands alone.
+### macOS cold-boot decision
+
+The 2026-09-06 experiment at `6e00cec` verified binary eviction after each of three system-cache purges.
+The release binary contains 7,256,144 bytes across 443 pages of 16,384 bytes each.
+Every attempt started with all 443 pages resident and ended with zero resident pages.
+Each `purge` command returned success.
+
+The experiment ran on battery power with Low Power Mode off and nominal thermal state.
+It verifies eviction, not latency or a performance gate.
+The timing receipts still require the [macOS run conditions](#macos-run-conditions).
+
+- [Eviction receipt](../bench/results/macos-eviction-2026-09-06-6e00cec-macos-aarch64.json).
+- [Experiment machine record](../bench/results/machine-eviction-2026-09-06-6e00cec-macos-aarch64.json).
+
+Use `python3 bench/boot/pty_probe.py --cold-system` for macOS system-cold timing.
+The mode requires an explicit flag because `purge` clears the system disk cache.
+macOS authorizes only the fixed `/usr/sbin/purge` command.
+The benchmark process stays unprivileged.
+Each sample follows one purge and a zero-residency check for the binary.
+A failed purge or residency check stops the run.
+The harness does not retry a system purge within one sample.
+
+The receipt records `mode: cold-system` and `eviction_scope: system`.
+Shared libraries and filesystem metadata can also become cold.
+Their residency is not measured.
+This scope differs from Linux per-file eviction, and neither method represents a fresh operating-system boot.
+The warm `printf` calibration does not measure the system-cold loader cost.
+The probe does not subtract that calibration from any sample.
+Keep the 50 ms target for warm startup.
+Treat system-cold results as a separate baseline until its gate is set.
+
+Repeat the eviction experiment with `python3 bench/boot/macos_eviction.py --administrator`.
+Its machine record has a separate filename, so later timing runs cannot overwrite its conditions.
 
 ## Binary size: budget, not wall
 
@@ -173,7 +204,7 @@ they state size gates.
 
 | Metric | Linux gate | macOS gate | Bar (jcode, Linux) |
 |---|---|---|---|
-| Boot to interactive | < 50 ms | < 50 ms | 14 ms |
+| Boot to interactive | < 50 ms | < 50 ms, warm | 14 ms |
 | Single idle session memory | PSS < 40 MB | footprint < 10 MB | 27.8 MB |
 | Marginal session memory | PSS < 15 MB | footprint < 20 MB, provisional | ~9.9 MB |
 | Stripped binary | 25 MB budget | 25 MB budget | — |
@@ -280,7 +311,8 @@ Each step is one PR.
 4. **macOS cold boot decision.** Try `purge` with `mincore`
    verification. Runs alongside M2.5; must land before the M2.5
    measurement pass. *Verify: a receipt either way; the support
-   matrix updated.*
+   matrix updated.* Complete: the [decision](#macos-cold-boot-decision) verifies system-cache eviction.
+   Per-file cold mode remains unavailable on macOS.
 5. **M2 close-out.** The alignment review and the metrics receipts.
    The close-out definition in `AGENTS.md` gains the second machine.
    Done 2026-08-23, with macOS receipts in PR #32.

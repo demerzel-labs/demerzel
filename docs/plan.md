@@ -388,7 +388,7 @@ See the [macOS calibration record](bench-platforms.md#macos-memory-calibration).
 
 | Metric | Linux gate | macOS gate | Bar (jcode, Linux) |
 |---|---|---|---|
-| Boot to interactive | < 50 ms | < 50 ms | 14 ms |
+| Boot to interactive | < 50 ms | < 50 ms, warm | 14 ms |
 | Single idle session memory | PSS < 40 MB | footprint < 10 MB | 27.8 MB |
 | Marginal session memory | PSS < 15 MB | footprint < 20 MB, provisional | ~9.9 MB |
 | Stripped binary | 25 MB budget | 25 MB budget | — |
