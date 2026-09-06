@@ -90,7 +90,9 @@ carry an OS-arch slug, for example `boot-2026-08-23-abc1234-macos-aarch64.json`.
 The memory probes run on both platforms. Linux reports PSS and USS.
 macOS reports current physical footprint and lifetime peak physical footprint.
 The old `memory/pss.py` command forwards to `memory/memory.py`.
-Cold mode runs only on Linux until the eviction decision lands (step 4).
+Per-file cold mode (`--cold`) runs on Linux.
+macOS uses explicit `--cold-system` mode, which purges the system disk cache and requires administrator authorization.
+The [cold-boot decision](../docs/bench-platforms.md#macos-cold-boot-decision) records the scope and verification.
 
 The boot benchmark needs `hyperfine`. On Arch, install it with
 `pacman -S hyperfine`. On macOS, install it with

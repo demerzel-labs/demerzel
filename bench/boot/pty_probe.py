@@ -14,9 +14,13 @@ Modes:
   measured run, verified with mincore. Shared libraries and metadata
   caches stay warm, so the cold number tracks the binary read; a true
   cold start needs a fresh boot.
+- system cold (--cold-system, macOS): purge the system disk cache
+  before each run. Verify the binary's eviction with mincore.
+  Shared libraries and metadata can also become cold.
 
-The report records the probe's spawn floor through the identical path
-with `printf`. The floor sits inside every sample.
+The report records a warm spawn calibration through the same path
+with `printf`. System-cold runs have different loader conditions.
+The probe does not subtract the calibration from any sample.
 """
 
 import argparse
@@ -51,10 +55,15 @@ def main() -> int:
     )
     parser.add_argument("--runs", type=int, default=50, help="measured runs (default: 50)")
     parser.add_argument("--warmup", type=int, default=3, help="warmup runs (default: 3)")
-    parser.add_argument(
+    cold_modes = parser.add_mutually_exclusive_group()
+    cold_modes.add_argument(
         "--cold",
         action="store_true",
         help="evict the binary from the page cache before each measured run",
+    )
+    cold_modes.add_argument(
+        "--cold-system", action="store_true",
+        help="Purge the macOS system disk cache before each run. Requires administrator authorization.",
     )
     parser.add_argument(
         "--plain",
@@ -68,15 +77,19 @@ def main() -> int:
         print(f"no binary at {args.bin} — run: cargo build --release", file=sys.stderr)
         return 1
 
-    if args.cold and not harness.supports_evict():
+    cold = args.cold or args.cold_system
+    if args.cold and harness.eviction_scope() != "file":
+        parser.error("Per-file eviction is unavailable. Use --cold-system for the macOS system cache purge.")
+    if args.cold_system and harness.eviction_scope() != "system":
+        parser.error("System cache eviction is unavailable. Use --cold for Linux per-file eviction.")
+    if cold and not harness.supports_evict():
         print(
-            "cold mode needs page-cache eviction, and this platform has none yet; "
-            "the decision is step 4 of docs/bench-platforms.md",
+            "This platform does not support verified page-cache eviction.",
             file=sys.stderr,
         )
         return 1
 
-    mode = "cold" if args.cold else "warm"
+    mode = "cold-system" if args.cold_system else "cold" if args.cold else "warm"
     interface = "plain" if args.plain else "tui"
     argv = [args.bin, "--plain"] if args.plain else None
     with tempfile.TemporaryDirectory(prefix="demerzel-bench-") as data_home:
@@ -86,9 +99,9 @@ def main() -> int:
         # Warmup runs use the same mode as the measured runs, so the
         # first cold sample is not the only unwarmed one.
         for _ in range(args.warmup):
-            measure_once(args.bin, env, cold=args.cold, argv=argv)
+            measure_once(args.bin, env, cold=cold, argv=argv)
         pairs = [
-            measure_once(args.bin, env, cold=args.cold, argv=argv)
+            measure_once(args.bin, env, cold=cold, argv=argv)
             for _ in range(args.runs)
         ]
     ready_samples = [ready for ready, _ in pairs]
@@ -98,11 +111,13 @@ def main() -> int:
     report.update(
         {
             "mode": mode,
+            "eviction_scope": harness.eviction_scope() if cold else "none",
             "interface": interface,
             "warmup": args.warmup,
             "runs": args.runs,
             "env_size": len(env),
             "spawn_floor_ms": floor,
+            "spawn_floor_mode": "warm",
             "samples_ms": [round(s, 3) for s in ready_samples],
             "stats_ms": harness.stats(ready_samples),
             "prompt_samples_ms": [round(s, 3) for s in prompt_samples],
