@@ -127,7 +127,8 @@ Method notes:
   directory, so appends hit a real filesystem.
 - The render suite draws into a headless frame buffer. The layout and
   the buffer diff are the live interface's work; the terminal write is
-  not. Three benches:
+  not. The [fixture guide](../docs/render-bench.md) explains the M2.5 workloads and comparison limits.
+  The three core benchmarks are:
   1. `frame` is one redraw with no new content, the floor of a frame.
   2. `ingest` pushes 64 KiB of text in 16-byte deltas with no frames.
   3. `stream` pushes the same text with a frame every 64 deltas. It is

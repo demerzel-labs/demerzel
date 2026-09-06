@@ -198,11 +198,19 @@ impl Block {
     /// Bytes the text and the layout buffers hold, at their capacity.
     #[cfg(test)]
     pub(crate) fn retained(&self) -> usize {
+        let (_, text, layout) = self.bench_buffers();
+        text + layout
+    }
+
+    /// Layout state and retained buffer capacities for the benchmark
+    /// receipt. Card and thought backing stores are outside these
+    /// numbers, as are allocator overhead and the block itself.
+    pub(crate) fn bench_buffers(&self) -> (bool, usize, usize) {
         let layout = &self.layout;
-        self.text.capacity()
-            + layout.rendered.as_ref().map_or(0, String::capacity)
+        let capacity = layout.rendered.as_ref().map_or(0, String::capacity)
             + layout.rows.capacity() * std::mem::size_of::<u32>()
-            + layout.faces.capacity() * std::mem::size_of::<(u32, Face)>()
+            + layout.faces.capacity() * std::mem::size_of::<(u32, Face)>();
+        (self.laid(), self.text.capacity(), capacity)
     }
 
     /// Whether the rows hold for `width` with no text pending.
