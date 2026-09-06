@@ -131,6 +131,11 @@ def supports_evict() -> bool:
     return _native.SUPPORTS_EVICT
 
 
+def resident_pages(path: str) -> int:
+    """Read the number of resident file pages through the native probe."""
+    return _native.resident_pages(path)
+
+
 def supports_proc_memory() -> bool:
     """Whether this platform has the per-process memory probe."""
     return _native.SUPPORTS_PROC_MEMORY
