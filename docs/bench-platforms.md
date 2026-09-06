@@ -5,13 +5,15 @@ Pull request numbers recorded before the 2026-09-04 migration refer to the
 
 This plan extends the benchmark suite to Linux and macOS.
 Warm boot and Layer-2 benchmarks produce receipts on both platforms.
-The macOS memory probe and cold-boot decision remain open.
+The macOS memory probe is implemented. The cold-boot decision remains open.
 Binary size has a budget that requires receipts for exceptions.
 
 **Status (2026-09-05):** steps 1 and 2 merged (PR #29, PR #30).
 The M2 close-out is complete, with macOS receipts in PR #32 and
 Linux receipts in PR #33 on 2026-08-24.
-Steps 3 and 4 remain prerequisites for the M2.5 measurement pass (step 10).
+Step 3 has its macOS receipt and idle gate calibration.
+The Linux reference machine was unreachable; its idle receipt remains due.
+That receipt and step 4 remain prerequisites for the M2.5 measurement pass (step 10).
 See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
 
 ## Goals
@@ -136,7 +138,7 @@ These already hold and become explicit requirements:
 | boot/pty_probe.py warm | yes | yes |
 | boot/pty_probe.py --cold | yes | step 4 decides |
 | memory/idle.py | yes (PSS, USS, anon) | yes (footprint) |
-| memory/pss.py | yes | yes, renamed probe |
+| memory/memory.py | yes (PSS, USS) | yes (current and lifetime peak footprint) |
 | turn/run.sh | yes | yes |
 | render/run.sh | yes | yes |
 | cache/replay.py | yes | yes |
@@ -173,14 +175,56 @@ they state size gates.
 | Metric | Linux gate | macOS gate | Bar (jcode, Linux) |
 |---|---|---|---|
 | Boot to interactive | < 50 ms | < 50 ms | 14 ms |
-| Single session memory | PSS < 40 MB | footprint < 60 MB, provisional | 27.8 MB |
+| Single idle session memory | PSS < 40 MB | footprint < 10 MB | 27.8 MB |
 | Marginal session memory | PSS < 15 MB | footprint < 20 MB, provisional | ~9.9 MB |
 | Stripped binary | 25 MB budget | 25 MB budget | — |
 
-The macOS memory gates are provisional: footprint counts shared and
-compressed pages differently from PSS. The first macOS receipt
-calibrates them, and the calibrated numbers replace these in
-`docs/plan.md` with a note.
+The first macOS receipt calibrates the idle startup gate to 10 MB.
+The marginal-session gate remains provisional until a concurrent-session scenario measures it.
+See the [calibration record](#macos-memory-calibration).
+
+## macOS memory calibration
+
+The 2026-09-05 receipt measures 10 idle TUI launches at `33f631d`, with a clean tree.
+The driver waits for the first prompt and settles for one second before each sample.
+The machine uses AC power, with Low Power Mode off and nominal thermal state.
+
+| Metric | Median | Range | Standard deviation |
+|---|---|---|---|
+| Current physical footprint | 2,112 KiB | 2,096–2,112 KiB | 7.729 KiB |
+| Lifetime peak physical footprint | 2,112 KiB | 2,096–2,112 KiB | 7.729 KiB |
+
+The median is 2.16 MB, using decimal MB.
+Set the idle startup gate to less than 10 MB, replacing the provisional 60 MB gate.
+This leaves more than four times the observed maximum for future startup work.
+It does not set a limit for loaded transcripts or active model turns.
+The provisional marginal-session gate stays at 20 MB; sequential launches cannot calibrate it.
+
+This is the first macOS memory baseline. M2 has no macOS memory receipt.
+M2.5 step 9 delays HTTP client construction until the first model turn.
+The new idle baseline excludes that client and does not establish an M2 memory trend.
+Linux PSS and macOS footprint do not compare.
+
+The probe reads `ri_phys_footprint` and `ri_lifetime_max_phys_footprint` through `proc_pid_rusage`, using `RUSAGE_INFO_V4`.
+The full native structure prevents writes beyond the Python buffer.
+Tests compare its size, alignment, and field offsets against the installed SDK.
+The [Apple structure definition](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h) defines the fields.
+The [Apple kernel implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c) supplies their values.
+The PID command reads processes in sequence. It does not add lifetime peaks into a group peak.
+
+Receipts:
+
+- [Idle memory, macOS](../bench/results/memory-idle-2026-09-05-33f631d-macos-aarch64.json).
+- [Machine specification, macOS](../bench/results/machine-2026-09-05-macos-aarch64.json).
+
+The Linux reference machine timed out over SSH during this session.
+Run these commands there before the M2.5 measurement pass:
+
+1. `cargo build --release --locked`
+2. `python3 bench/machine.py`
+3. `python3 bench/memory/idle.py`
+
+Compare the Linux result with its previous Linux receipt.
 
 ## Build order
 
@@ -199,7 +243,8 @@ Each step is one PR.
    `memory/idle.py` reports footprint on macOS. Runs alongside M2.5;
    must land before the M2.5 measurement pass. *Verify: idle receipts
    from both machines; the macOS gate calibration lands in
-   `docs/plan.md`.*
+   `docs/plan.md`.* The implementation, macOS receipt, and idle gate calibration
+   are complete. The Linux reference receipt remains due.
 4. **macOS cold boot decision.** Try `purge` with `mincore`
    verification. Runs alongside M2.5; must land before the M2.5
    measurement pass. *Verify: a receipt either way; the support
