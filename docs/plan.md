@@ -19,9 +19,10 @@ Three pillars, in order:
 
 License: MIT. Plan adopted 2026-07-31.
 
-**Implementation status (2026-09-04):** M0 through M2 are complete.
-M2.5 is complete through step 9; step 10, the measurement pass, remains.
+**Implementation status (2026-09-06):** M0 through M2 are complete.
+M2.5 meets its exit criteria, and the milestone close-out is complete.
 See the [next-session handoff](m2.5-plan.md#next-session-handoff) for prerequisites and the next action.
+The next work is the M3 implementation plan, with `openai-compat` and named provider instances first.
 M3 and later milestones describe planned work. See the
 [`README`](../README.md) for current features and source-build instructions.
 
@@ -456,6 +457,10 @@ Plan: [`m2.5-plan.md`](m2.5-plan.md). **Verify:** a dogfood
 session shows every element; a PTY scenario per element; the render
 bench inside its gates.
 
+The [close-out review](m2.5-closeout.md) records the completed evidence from both reference machines.
+Mac system-cold timing remains deferred; the warm-start gate stays unchanged.
+Layout-cache retention and bulk card expansion have receipt-backed follow-ups in M4.
+
 ### M3 — Ecosystem
 
 The `openai-compat` adapter with named provider instances first, then
@@ -482,6 +487,14 @@ fixed-model A/B pairs against a minimal scaffold and one reproducible
 production harness — same model snapshot, effort, budgets, task versions,
 and environment. Then profile against Layer 1/2 gates; land prefix
 stability, compaction with distillation into memory, connection reuse.
+The M2.5 close-out adds two targeted follow-ups after the public baseline:
+
+1. Bound layout retention for transcript blocks outside the viewport.
+2. Profile bulk card expansion. Use the results to optimize the anchor or layout walk.
+
+M3 keeps the current cache retention and row-count browse anchor.
+The [M2.5 measurements](m2.5-measurements.md) record the costs and comparison limits.
+
 Publish the first full report: pinned competitor versions, machine spec,
 raw data, all four layers. **Verify:** every gate in the targets table met or
 the miss documented with a profile trace.

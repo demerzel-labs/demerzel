@@ -1,0 +1,131 @@
+{
+  "benchmark": "metrics",
+  "bin": "target/release/demerzel",
+  "git_rev": "5e057db",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "linux-x86_64",
+  "machine": "machine-2026-09-06-linux-x86_64.json",
+  "crates": {
+    "demerzel": {
+      "lines": 6167,
+      "pub_items": 65
+    },
+    "demerzel-core": {
+      "lines": 4621,
+      "pub_items": 93
+    },
+    "demerzel-mock": {
+      "lines": 501,
+      "pub_items": 22
+    },
+    "demerzel-providers": {
+      "lines": 2956,
+      "pub_items": 57
+    },
+    "demerzel-tools": {
+      "lines": 3008,
+      "pub_items": 24
+    },
+    "demerzel-tui": {
+      "lines": 14007,
+      "pub_items": 170
+    }
+  },
+  "lines_total": 31260,
+  "pub_items_total": 431,
+  "external_deps": [
+    "axum",
+    "base64",
+    "clap",
+    "criterion",
+    "futures-core",
+    "getrandom",
+    "globset",
+    "grep-regex",
+    "grep-searcher",
+    "humantime",
+    "ignore",
+    "libc",
+    "log",
+    "pulldown-cmark",
+    "ratatui",
+    "reqwest",
+    "rustyline",
+    "serde",
+    "serde_json",
+    "sha2",
+    "tempfile",
+    "thiserror",
+    "tokio",
+    "toml",
+    "unicode-width"
+  ],
+  "external_dep_count": 25,
+  "binary_bytes": 8590752,
+  "contracts": {
+    "provider_trait": [
+      "id",
+      "capabilities",
+      "stream"
+    ],
+    "engine_events": [
+      "TextDelta",
+      "ReasoningDelta",
+      "ReasoningEnd",
+      "ToolStart",
+      "ToolRun",
+      "ToolEnd",
+      "ModelUsage"
+    ],
+    "tools": [
+      "read",
+      "edit",
+      "create",
+      "bash",
+      "grep",
+      "glob"
+    ],
+    "config_keys": [
+      "approval",
+      "base_url",
+      "context_window",
+      "effort",
+      "history_file",
+      "markdown",
+      "max_model_calls",
+      "model",
+      "mouse",
+      "provider",
+      "providers",
+      "theme",
+      "thinking",
+      "tui"
+    ],
+    "cli_fields": [
+      "prompt",
+      "continue_last",
+      "session",
+      "plain",
+      "provider",
+      "model",
+      "base_url",
+      "effort",
+      "auto",
+      "read_only"
+    ],
+    "cli_subcommands": [
+      "Doctor",
+      "Login"
+    ]
+  },
+  "contract_counts": {
+    "provider_trait": 3,
+    "engine_events": 7,
+    "tools": 6,
+    "config_keys": 14,
+    "cli_fields": 10,
+    "cli_subcommands": 2
+  },
+  "binary_sha256": "449c31d94e2e2da9ed57bceb6db196cd35196c74eab400998b1812cda18f3d7b"
+}

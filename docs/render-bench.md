@@ -105,6 +105,39 @@ They exclude these allocations:
 The Linux instruction-count comparison remains separate from wall-clock timing.
 It must use matched legacy fixtures and revisions to assess the historical `ingest` timing change.
 
+## Historical ingest instruction counts
+
+The standalone [driver](../bench/render/ingest_instructions.rs) measures the step-7 plain-ingest routine on Linux x86_64.
+It uses a per-thread `instructions:user` hardware counter through `perf_event_open`.
+The counter excludes kernel and hypervisor execution.
+A zero count or incomplete counter coverage fails the run.
+The driver requires access to user-space performance counters.
+
+The [receipt](../bench/results/ingest-instructions-2026-09-06-b0fc879-linux-x86_64.json) uses Rust 1.97.0 for both release builds.
+Check that `stable` resolves to that compiler before reproducing this receipt.
+Each historical checkout receives the same example overlay; its tracked sources stay unchanged.
+Run these commands from the repository root:
+
+```bash
+rustc +stable --version
+git worktree add --detach target/m25-ingest-before b84e253095a79a41a99c26d651fffc7e43e08b3b
+git worktree add --detach target/m25-ingest-after 2e7e0a1177555a2cf9efcfc2094974baa2289fc4
+mkdir -p target/m25-ingest-before/crates/demerzel-tui/examples target/m25-ingest-after/crates/demerzel-tui/examples
+git show b0fc879:bench/render/ingest_instructions.rs > target/m25-ingest-driver.rs
+cp target/m25-ingest-driver.rs target/m25-ingest-before/crates/demerzel-tui/examples/ingest_instructions.rs
+cp target/m25-ingest-driver.rs target/m25-ingest-after/crates/demerzel-tui/examples/ingest_instructions.rs
+(cd target/m25-ingest-before && cargo +stable build --release --locked -p demerzel-tui --example ingest_instructions --target-dir target/ingest-count)
+(cd target/m25-ingest-after && cargo +stable build --release --locked -p demerzel-tui --example ingest_instructions --target-dir target/ingest-count)
+target/m25-ingest-before/target/ingest-count/release/examples/ingest_instructions > target/m25-ingest-before/target/ingest-count/result.json
+target/m25-ingest-after/target/ingest-count/release/examples/ingest_instructions > target/m25-ingest-after/target/ingest-count/result.json
+```
+
+Each sample includes the owned screen transfer and the counter control overhead.
+Fixture setup, its initial draw, assertions, and destruction stay outside the measured span.
+The output retains 31 raw samples after 10 warmups, plus empty-span counts without subtraction.
+Compare the medians and preserve the raw counts, source revision, driver hash, and compiler with the result.
+This routine does not measure Criterion's full batching machinery or explain a wall-time change by itself.
+
 ## Workload checks
 
 Run `cargo bench -p demerzel-tui --bench render -- --test` to execute each workload once without timing samples.
