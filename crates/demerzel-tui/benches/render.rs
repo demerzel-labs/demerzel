@@ -44,6 +44,13 @@
 //! block cap throughout, so the drop path is outside it. The stream
 //! crosses the per-block byte cap once, so one block split is inside
 //! `ingest` and `stream`.
+//!
+//! The `*-m25` benches add a separate mixed fixture, with a substantial
+//! code-fence share, cards, thinking, reflow, and a filled editor.
+//! The legacy fixtures above keep their names and contents.
+
+#[path = "render/m25.rs"]
+mod m25;
 
 use std::time::Duration;
 
@@ -288,6 +295,8 @@ fn bench_render(c: &mut Criterion) {
             BatchSize::LargeInput,
         )
     });
+
+    m25::bench(&mut group);
 
     for (suffix, markdown, text) in workloads {
         let deltas = deltas(text);

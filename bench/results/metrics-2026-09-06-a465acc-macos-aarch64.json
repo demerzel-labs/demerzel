@@ -1,0 +1,132 @@
+{
+  "benchmark": "metrics",
+  "bin": "target/release/demerzel",
+  "git_rev": "a465acc",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "macos-aarch64",
+  "machine": "machine-m25-metrics-2026-09-06-a465acc-macos-aarch64.json",
+  "crates": {
+    "demerzel": {
+      "lines": 6167,
+      "pub_items": 65
+    },
+    "demerzel-core": {
+      "lines": 4621,
+      "pub_items": 93
+    },
+    "demerzel-mock": {
+      "lines": 501,
+      "pub_items": 22
+    },
+    "demerzel-providers": {
+      "lines": 2956,
+      "pub_items": 57
+    },
+    "demerzel-tools": {
+      "lines": 3008,
+      "pub_items": 24
+    },
+    "demerzel-tui": {
+      "lines": 14007,
+      "pub_items": 170
+    }
+  },
+  "lines_total": 31260,
+  "pub_items_total": 431,
+  "external_deps": [
+    "axum",
+    "base64",
+    "clap",
+    "criterion",
+    "futures-core",
+    "getrandom",
+    "globset",
+    "grep-regex",
+    "grep-searcher",
+    "humantime",
+    "ignore",
+    "libc",
+    "log",
+    "pulldown-cmark",
+    "ratatui",
+    "reqwest",
+    "rustyline",
+    "serde",
+    "serde_json",
+    "sha2",
+    "tempfile",
+    "thiserror",
+    "tokio",
+    "toml",
+    "unicode-width"
+  ],
+  "external_dep_count": 25,
+  "binary_bytes": 7256144,
+  "contracts": {
+    "provider_trait": [
+      "id",
+      "capabilities",
+      "stream"
+    ],
+    "engine_events": [
+      "TextDelta",
+      "ReasoningDelta",
+      "ReasoningEnd",
+      "ToolStart",
+      "ToolRun",
+      "ToolEnd",
+      "ModelUsage"
+    ],
+    "tools": [
+      "read",
+      "edit",
+      "create",
+      "bash",
+      "grep",
+      "glob"
+    ],
+    "config_keys": [
+      "approval",
+      "base_url",
+      "context_window",
+      "effort",
+      "history_file",
+      "markdown",
+      "max_model_calls",
+      "model",
+      "mouse",
+      "provider",
+      "providers",
+      "theme",
+      "thinking",
+      "tui"
+    ],
+    "cli_fields": [
+      "prompt",
+      "continue_last",
+      "session",
+      "plain",
+      "provider",
+      "model",
+      "base_url",
+      "effort",
+      "auto",
+      "read_only"
+    ],
+    "cli_subcommands": [
+      "Doctor",
+      "Login"
+    ]
+  },
+  "contract_counts": {
+    "provider_trait": 3,
+    "engine_events": 7,
+    "tools": 6,
+    "config_keys": 14,
+    "cli_fields": 10,
+    "cli_subcommands": 2
+  },
+  "binary_sha256": "eaa3c47d74ec9e502c4fda533826709bbe12689df0deced1e54f699f97be825a",
+  "note": "Untimed source counts and stripped binary size. Battery power does not establish a performance result. The machine record has a separate name so later timing cannot replace its conditions."
+}

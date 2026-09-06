@@ -16,6 +16,19 @@ use crate::transcript::{Kind, Transcript};
 
 pub use crate::transcript::MAX_BLOCK_BYTES;
 
+/// Buffer capacities, not process memory. The layout total includes
+/// rendered text, row offsets, and faces. The text total excludes
+/// card and thought backing stores. Neither includes allocator
+/// overhead, the frame buffers, or the block objects.
+#[derive(Debug)]
+pub struct Buffers {
+    pub blocks: usize,
+    pub laid_out_blocks: usize,
+    pub rendered_blocks: usize,
+    pub text_capacity_bytes: usize,
+    pub layout_capacity_bytes: usize,
+}
+
 /// A transcript, an input editor, a status bar, and a frame buffer
 /// of one size. Frames render into the buffer and go nowhere.
 pub struct Screen {
@@ -65,6 +78,66 @@ impl Screen {
     /// of a resumed session does.
     pub fn replay(&mut self, replay: Replay) {
         self.transcript.replay(replay);
+    }
+
+    /// Resize the headless backend. The next draw resizes the frame
+    /// buffers and reflows the visible transcript, as the live loop does.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.terminal.backend_mut().resize(width, height);
+    }
+
+    /// Replace the editor's text, including its next layout in a draw.
+    pub fn set_editor(&mut self, text: &str) {
+        self.editor.set(text);
+    }
+
+    /// Toggle the newest thinking block through the interface's path.
+    pub fn toggle_thinking(&mut self) {
+        self.transcript.toggle_thinking();
+    }
+
+    /// Expand or collapse all tool cards through the interface's path.
+    pub fn set_cards_expanded(&mut self, expanded: bool) {
+        self.transcript.set_expanded(expanded);
+    }
+
+    /// Browse toward the first row; the next draw clamps the offset.
+    pub fn scroll_up(&mut self, rows: usize) {
+        self.transcript.scroll_up(rows);
+    }
+
+    /// Return to the live end of the transcript.
+    pub fn follow(&mut self) {
+        self.transcript.follow();
+    }
+
+    /// Read retained text and layout buffer capacities.
+    pub fn buffers(&self) -> Buffers {
+        let mut buffers = Buffers {
+            blocks: self.blocks(),
+            laid_out_blocks: 0,
+            rendered_blocks: self.rendered_blocks(),
+            text_capacity_bytes: 0,
+            layout_capacity_bytes: 0,
+        };
+        for block in self.transcript.blocks() {
+            let (laid, text, layout) = block.bench_buffers();
+            buffers.laid_out_blocks += usize::from(laid);
+            buffers.text_capacity_bytes += text;
+            buffers.layout_capacity_bytes += layout;
+        }
+        buffers
+    }
+
+    /// Read the current frame's cell text for fixture checks.
+    pub fn visible_text(&self) -> String {
+        self.terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     /// Draw one frame: the same layout and the same buffer diff the

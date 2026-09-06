@@ -1,0 +1,63 @@
+{
+  "benchmark": "memory-idle-repl",
+  "bin": "target/release/demerzel",
+  "git_rev": "585ceaf",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "macos-aarch64",
+  "machine": "machine-2026-09-06-macos-aarch64.json",
+  "interface": "tui",
+  "runs": 10,
+  "settle_s": 1.0,
+  "samples_kb": {
+    "physical_footprint_kb": [
+      1568,
+      1552,
+      1536,
+      1568,
+      1568,
+      1536,
+      1568,
+      1552,
+      1584,
+      1568
+    ],
+    "peak_physical_footprint_kb": [
+      1568,
+      1552,
+      1536,
+      1568,
+      1568,
+      1536,
+      1568,
+      1552,
+      1584,
+      1568
+    ]
+  },
+  "stats_kb": {
+    "physical_footprint_kb": {
+      "mean": 1560,
+      "median": 1568.0,
+      "stddev": 15.549,
+      "min": 1536,
+      "max": 1584,
+      "ci95_mean": [
+        1550.363,
+        1569.637
+      ]
+    },
+    "peak_physical_footprint_kb": {
+      "mean": 1560,
+      "median": 1568.0,
+      "stddev": 15.549,
+      "min": 1536,
+      "max": 1584,
+      "ci95_mean": [
+        1550.363,
+        1569.637
+      ]
+    }
+  },
+  "binary_sha256": "8ac0d2383c9cb68a0fd0c7c7614203a1384da4a3f986975797b5fb7becc037dd"
+}

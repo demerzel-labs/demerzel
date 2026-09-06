@@ -14,6 +14,7 @@ import subprocess
 import _mincore
 
 SUPPORTS_EVICT = True
+EVICTION_SCOPE = "file"
 SUPPORTS_PROC_MEMORY = True
 
 _libc_handle = None

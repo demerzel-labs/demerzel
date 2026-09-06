@@ -1,0 +1,45 @@
+{
+  "benchmark": "macos-cache-eviction-decision",
+  "bin": "target/release/demerzel",
+  "git_rev": "6e00cec",
+  "git_dirty": false,
+  "date": "2026-09-06",
+  "os": "macos-aarch64",
+  "machine": "machine-eviction-2026-09-06-6e00cec-macos-aarch64.json",
+  "binary_bytes": 7256144,
+  "page_size": 16384,
+  "binary_pages": 443,
+  "runs_requested": 3,
+  "command": [
+    "/usr/bin/osascript",
+    "-e",
+    "do shell script \"/usr/sbin/purge\" with administrator privileges"
+  ],
+  "scope": "whole-system disk cache",
+  "attempts": [
+    {
+      "before_pages": 443,
+      "purge_returncode": 0,
+      "purge_stdout": "",
+      "purge_stderr": "",
+      "after_pages": 0
+    },
+    {
+      "before_pages": 443,
+      "purge_returncode": 0,
+      "purge_stdout": "",
+      "purge_stderr": "",
+      "after_pages": 0
+    },
+    {
+      "before_pages": 443,
+      "purge_returncode": 0,
+      "purge_stdout": "",
+      "purge_stderr": "",
+      "after_pages": 0
+    }
+  ],
+  "note": "This experiment measures file residency, not cold-boot latency.",
+  "binary_sha256": "2dec716018b40d70e23b7d9b79882fd61f56dd1ef08848806495d45a05e1bc75",
+  "eviction_verified": true
+}

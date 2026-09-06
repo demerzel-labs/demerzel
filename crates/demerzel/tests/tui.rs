@@ -1477,6 +1477,66 @@ async fn a_drag_selects_transcript_text_and_the_release_copies_it() {
     pty.wait_exit();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_code_fence_can_be_browsed_and_its_diagram_copied() {
+    let diagram = concat!(
+        "+------------+      +--------------+\n",
+        "|  terminal  | ---> |    engine    |\n",
+        "+------------+      +--------------+\n",
+        "                           |\n",
+        "                           v\n",
+        "                    +--------------+\n",
+        "                    |    tools     |\n",
+        "                    +--------------+",
+    );
+    // The diagram starts a fence taller than the screen. It must be
+    // reached by browsing before a drag can copy it.
+    let details: String = (0..60)
+        .map(|row| format!("detail {row:02}: messages travel through the engine\n"))
+        .collect();
+    let reply = format!("```text\n{diagram}\n{details}```\n");
+    let mock = MockServer::start(vec![text_turn(&reply)], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &[]);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"diagram\r");
+    pty.wait_for("detail 59");
+    pty.wait_for("2 cached");
+    // Browse to the start. A height change forces a repaint, so the
+    // wait reads the diagram from the browsed view, not an old frame.
+    pty.send(&PAGE_UP.repeat(4));
+    pty.resize(100, 29);
+    pty.send(WHEEL_UP);
+    pty.wait_for("╭─ text");
+    pty.wait_for("|  terminal  | ---> |    engine    |");
+    pty.wait_for("|    tools     |");
+
+    // The banner and prompt occupy two rows; the fence frame is row
+    // three. Select from that frame through the diagram's eighth row.
+    // The OSC 52 payload must retain the diagram's spaces and lines
+    // while dropping the fence frame and its per-row prefix.
+    pty.send(&mouse_press(1, 3));
+    pty.send(&mouse_drag(100, 11));
+    pty.send(&mouse_release(100, 11));
+    let expected = format!("\x1b]52;c;{}\x07", base64(diagram));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !String::from_utf8_lossy(&pty.seen).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "no diagram OSC 52 write; raw: {:?}",
+            String::from_utf8_lossy(&pty.seen)
+        );
+        pty.poll_read();
+    }
+    pty.send(END);
+    pty.resize(100, 30);
+    pty.send(b"x");
+    pty.wait_for("detail 59");
+    pty.send(CTRL_C);
+    pty.send(CTRL_D);
+    pty.wait_exit();
+}
+
 /// A reply with one of each markdown element the renderer formats.
 const FORMATTED_REPLY: &str = "# Title\n\nSome prose.\n\n- first item\n- second item\n\n\
                                | name | n |\n|---|---|\n| ab | 1 |\n\n\

@@ -90,7 +90,9 @@ carry an OS-arch slug, for example `boot-2026-08-23-abc1234-macos-aarch64.json`.
 The memory probes run on both platforms. Linux reports PSS and USS.
 macOS reports current physical footprint and lifetime peak physical footprint.
 The old `memory/pss.py` command forwards to `memory/memory.py`.
-Cold mode runs only on Linux until the eviction decision lands (step 4).
+Per-file cold mode (`--cold`) runs on Linux.
+macOS uses explicit `--cold-system` mode, which purges the system disk cache and requires administrator authorization.
+The [cold-boot decision](../docs/bench-platforms.md#macos-cold-boot-decision) records the scope and verification.
 
 The boot benchmark needs `hyperfine`. On Arch, install it with
 `pacman -S hyperfine`. On macOS, install it with
@@ -127,7 +129,8 @@ Method notes:
   directory, so appends hit a real filesystem.
 - The render suite draws into a headless frame buffer. The layout and
   the buffer diff are the live interface's work; the terminal write is
-  not. Three benches:
+  not. The [fixture guide](../docs/render-bench.md) explains the M2.5 workloads and comparison limits.
+  The three core benchmarks are:
   1. `frame` is one redraw with no new content, the floor of a frame.
   2. `ingest` pushes 64 KiB of text in 16-byte deltas with no frames.
   3. `stream` pushes the same text with a frame every 64 deltas. It is
