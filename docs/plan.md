@@ -141,6 +141,11 @@ translate. No adapter is privileged.
   Ollama, vLLM, LM Studio, llama.cpp. A new vendor is a `base_url`
   and a key in config, not an adapter. Moved here from the post-M5
   local track on 2026-08-26 (see the decisions below).
+- **M3: `openai-responses`** — the general Responses API with a
+  configurable endpoint, model, and API key. It follows Chat Completions
+  as a separate step. Local history and opaque reasoning items support
+  tool continuations and resume without server storage. Codex authentication
+  and subscription defaults stay in `openai-codex`.
 - **Post-M5: the local-model track** — a managed local engine behind
   the M3 adapter. See the post-M5 milestone.
 - Later, by demand, and only for what a compatible endpoint cannot
@@ -173,6 +178,24 @@ not go stale when a model or a vendor ships:
 - A vendor adapter exists only for what a compatible endpoint cannot
   carry: prompt-cache control, subscription OAuth, a native tool.
   xAI, Gemini, and Bedrock arrive through `openai-compat` first.
+
+Provider resilience decision, 2026-09-06:
+
+- M3 supports both Chat Completions and general Responses through
+  named instances. The general Responses adapter is M3 step 3.
+  A vendor uses either protocol when its endpoint supports the tested
+  contract. Chat Completions remains the first implementation step.
+- New model ids remain configuration. Adapters contain protocol and
+  authentication changes; the engine and tools use the harness contract.
+- Provider switches retain local text and tool history. Opaque reasoning
+  returns only to its matching adapter, instance, and model.
+- Fixtures from independent implementations and live local and hosted
+  checks establish compatibility. Each upstream regression adds a fixture
+  before its adapter fix. The milestone close-out checks protocol
+  deprecations and confirms that vendor branches stay outside the core.
+- Shared protocol code requires matching implementations and tests.
+  Native capabilities can add deliberate contracts when a use case
+  requires them. M3 does not require vendor-hosted tools or server storage.
 
 Decisions from the alignment review of 2026-08-23 (the M2 close-out):
 
@@ -465,17 +488,24 @@ Layout-cache retention and bulk card expansion have receipt-backed follow-ups in
 
 ### M3 — Ecosystem
 
-The `openai-compat` adapter with named provider instances first, then
-skills, hooks, MCP client with deferred discovery, subagents with typed
-results, competitor-config auto-discovery, project memory (store,
-tools, auto-recall), and the personality profile. At the M3 exit, the
-evaluation runner foundation: the Harbor agent adapter, versioned candidate
-and scenario manifests, the evidence-bundle serializer, artifact and
-state-oracle interfaces, and a 10–20 task private bank built from reproduced
-dogfood failures, with a 3–5 task hermetic smoke subset cheap enough for CI.
+The `openai-compat` adapter with named provider instances lands first.
+The general `openai-responses` adapter follows in a separate step.
+Later steps add:
+
+- skills and hooks;
+- an MCP client with deferred discovery;
+- subagents with typed results;
+- discovery of existing agent configuration;
+- project memory with storage, tools, and automatic recall;
+- the personality profile.
+
+M3 also adds the evaluation runner foundation: a Harbor agent adapter,
+versioned candidate and scenario manifests, and evidence bundles.
+Artifact and state-oracle interfaces support a private bank of 10 to 20
+tasks from reproduced dogfood failures. CI runs 3 to 5 hermetic smoke tasks.
 Plan: [`m3-plan.md`](m3-plan.md).
-**Verify:** a session against a
-compatible endpoint the mock server stands in for; a skill, a hook,
+**Verify:** local Chat Completions and hosted Responses tool sessions,
+with resume and fixtures from independent implementations; a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
 existing `.claude`/`.cursor` config with zero edits; a fact saved in one
 session comes back in a fresh session inside the token budget; the smoke
@@ -572,10 +602,10 @@ claim.
   agent proposes and never writes. See
   [`m3-plan.md`](m3-plan.md#the-personality-profile).
 - Subagent transport: decided in the M3 plan. In process, depth 1,
-  sequential; step 16 measures the in-process footprint to confirm. See
+  sequential; step 17 measures the in-process footprint to confirm. See
   [`m3-plan.md`](m3-plan.md#subagents).
 - Whether the Harbor agent adapter accepts a third-party agent cleanly or
-  needs a shim: answered at M3 step 17, where one task runs through the
+  needs a shim: answered at M3 step 18, where one task runs through the
   adapter. See [`m3-plan.md`](m3-plan.md#the-evaluation-foundation).
 - Name collision hygiene: crates.io names (`demerzel` availability) checked
   before M5.

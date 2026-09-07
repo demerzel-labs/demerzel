@@ -17,7 +17,8 @@ Start the next work in this order:
 1. Branch `agent/m3-openai-compat` from `main`.
 2. Build step 2 from the [build order](#build-order): the
    `openai-compat` adapter, the `kind` key, and named provider instances.
-3. Follow the steps in order. Each step names its dependencies.
+3. Build the general Responses adapter as step 3, in a separate pull request.
+4. Follow the remaining steps in order. Each step names its dependencies.
 
 Read [`config.md`](config.md) before you change config behavior. Read
 the [trust rules](#trust-rules-for-extension-content) before you add a
@@ -28,7 +29,9 @@ step. Do not fold them into a step without a decision in this document.
 
 ## Status (2026-09-06)
 
-Step 1, this plan, is open. The M2.5 close-out
+Step 1 merged in [PR #18](https://github.com/demerzel-labs/demerzel/pull/18).
+Step 3 adds general Responses support after the Chat Completions adapter.
+The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
 reference machines and the decisions that carry into M3:
 
@@ -39,8 +42,10 @@ reference machines and the decisions that carry into M3:
 
 ## Goal
 
-After M3, Demerzel talks to any endpoint that speaks Chat Completions. A
-model role names a chain of provider instances, and a session records
+After M3, Demerzel supports Chat Completions and Responses through
+configured provider instances. New model ids need config changes only.
+Adapters contain protocol changes and vendor differences. A model role
+names a chain of provider instances, and a session records
 which one answered. Project files extend the agent: instructions, skills,
 custom commands, hooks, MCP servers, and subagent definitions. Demerzel
 finds the config that other agents left in a repository and uses it with
@@ -48,15 +53,17 @@ zero edits. The agent remembers facts per project and proposes changes
 to a personality profile that only the user edits. A background command
 can outlive its tool call. At the exit, the evaluation runner has its
 foundation: a Harbor adapter, versioned manifests, evidence bundles, and
-a hermetic smoke subset that guards every step from step 8 on.
+a hermetic smoke subset that guards every step from step 9 on.
 
 ## Exit criteria
 
 M3 is done when all of these hold:
 
-1. A live session through a named `openai-compat` instance completes a
-   tool turn against a real compatible server. Hermetic adapter tests
-   run the same shapes against the mock server.
+1. Both compatible adapters complete live tool turns and pass hermetic
+   tests against fixtures from independent protocol implementations.
+   Step 2 tests Chat Completions against a local server. Step 3 tests
+   Responses against a hosted server, including session resume.
+   Each receipt names the server, model, protocol, and tested revision.
 2. A role chain falls back to its second target in a hermetic test and
    in one dogfood session. The session file names the target that
    answered each call.
@@ -92,7 +99,8 @@ M3 is done when all of these hold:
 
 In:
 
-- the `openai-compat` adapter, `kind`, and named provider instances;
+- the `openai-compat` and `openai-responses` adapters, `kind`, and
+  named provider instances;
 - model roles with fallback chains, session model identity, and one
   runtime call that opens a session with its route;
 - prompt composition with fixed segment positions;
@@ -135,7 +143,9 @@ Out, with the milestone that owns each item:
 - a per-server approval grant for MCP tools (a dogfood decision, see
   the MCP design);
 - local embeddings for memory (only if the Layer-4 recall measurement
-  shows lexical recall failing).
+  shows lexical recall failing);
+- vendor-hosted tools and server-managed conversation state (by demand,
+  when a concrete use case justifies a separate contract change).
 
 ## Workspace after M3
 
@@ -147,12 +157,12 @@ crates/
                        #      hooks, subagents, background tasks
   demerzel-core/       # + lexical (BM25), Route, ProviderHost, HookHost,
                        #   ToolContext, EngineParts
-  demerzel-providers/  # + openai_compat adapter, instance config
+  demerzel-providers/  # + openai_compat, openai_responses, instance config
   demerzel-tools/      # + task tools, the skill tool, the mcp module
   demerzel-tui/        # + agent cards, the /profile and /tasks notes
   demerzel-memory/     # SQLite fact store, memory tools, recall (new)
-  demerzel-mock/       # + /v1/chat/completions, an MCP echo server,
-                       #   a standalone mock binary for the smoke runner
+  demerzel-mock/       # + Chat Completions and Responses routes,
+                       #   MCP echo server, standalone smoke-runner binary
 bench/
   eval/                # manifests, bundles, oracle, Harbor adapter,
                        #   smoke runner, public hermetic tasks (new)
@@ -174,11 +184,12 @@ each one wires providers, tools, config, and sessions together.
 
 ## Design
 
-### Named provider instances and the `openai-compat` adapter
+### Named provider instances
 
 A `[providers.<name>]` table names one instance. `kind` names the
-adapter: `openai-codex`, `anthropic`, or `openai-compat`. A table without
-`kind` keeps today's meaning: the name is the adapter id. The two shipped
+adapter: `openai-codex`, `anthropic`, `openai-compat`, or
+`openai-responses`. A table without `kind` keeps today's meaning:
+the name is the adapter id. The two shipped
 adapters stay implicit instances, so an existing config file resolves as
 before.
 
@@ -198,11 +209,11 @@ model = "qwen3-coder"
 
 Rules:
 
-- An `openai-compat` instance must set `base_url` and `model`. The run
+- Both compatible adapters require `base_url` and `model`. The run
   stops at boot with a clear error when either is missing. The adapter
   has no default endpoint and no model catalog. A model id is a string
   the config names and the server accepts or refuses.
-- `context_window` is the only window source for a compat instance. A
+- `context_window` is the only window source for a compatible instance. A
   missing key shows the count with no share. The lookup keys on the
   instance's key first and on the shipped catalog by `kind` and model
   second.
@@ -222,7 +233,8 @@ Rules:
   the user file defines and can set `model`, `effort`, `context_window`,
   and `thinking` under the existing rules. It cannot define an instance
   or pick a credential.
-- `dmz login <instance>` prompts for a key with echo off and checks it
+- Step 4 adds `dmz login <instance>` for both compatible adapters.
+  It prompts for a key with echo off and checks it
   with `GET {base_url}/models`. A 401 refuses the key. Any other
   failure warns and stores the key, because many compatible servers do
   not serve that route. The auth store gains a `keys` section, file
@@ -244,6 +256,8 @@ Rules:
 - `doctor` lists each instance with its kind, endpoint, model, and
   credential state. Its secret scanner allows `api_key_env`, because the
   value is a variable name.
+
+### Chat Completions adapter
 
 The wire contract is the Chat Completions streaming shape. The adapter
 sends `model`, `messages`, `stream: true`, `stream_options` with
@@ -285,7 +299,7 @@ Stream mapping:
 Step 2 adds optional `model` and `instance` fields to `SealedPayload`.
 The compat adapter records both. Replay requires a matching adapter and
 matching values for every identity field present in the payload.
-Step 4 applies this rule to the shipped adapters and model switching.
+Step 5 applies this rule to the shipped adapters and model switching.
 
 Capabilities: `tool_calls` true and the other fields at their defaults.
 The close-out decision below removes the fields without a consumer.
@@ -298,10 +312,82 @@ id are equal there. `meta` gains `kind`, optional: the adapter id
 behind the instance. A file without it reads as before. This is a
 redefinition of an existing field and an added field; step 2 declares
 both. `SessionMeta::now` and `SessionStore::create` take one
-`SessionOpen` struct in place of their five parameters, so steps 16 and
-17 add fields without touching a signature. The mock server gains
+`SessionOpen` struct in place of their five parameters, so steps 17 and
+18 add fields without touching a signature. The mock server gains
 `POST /v1/chat/completions` and fixture builders next to the Codex and
 Anthropic ones.
+
+### General Responses API adapter
+
+Step 3 adds `kind = "openai-responses"`. It sends requests to
+`{base_url}/responses` with the configured model and optional bearer key.
+The instance, credential, context-window, and trust rules above apply.
+Codex OAuth, account headers, and subscription defaults stay in
+`openai-codex`. A protocol change must not require vendor branches in
+the engine, tools, memory, or interface.
+
+The request sends `model`, `instructions`, `input`, `stream: true`, and
+`store: false`. It includes the full local conversation on each turn.
+It does not depend on `previous_response_id` or server conversation state.
+Tool definitions use the Responses function shape with `strict: false`.
+Tool results use `function_call_output` and preserve `call_id`.
+`max_output_tokens` appears only when the request sets it.
+`reasoning.effort` appears only when the user sets effort.
+The adapter adds no implicit effort or summary setting. Optional vendor
+fields require an observed need and an adapter or instance contract.
+
+Text, tool calls, reasoning, and usage map to existing neutral events.
+Both reasoning text and reasoning-summary deltas can supply display text.
+The adapter requests `reasoning.encrypted_content` and preserves complete
+reasoning output items in `SealedPayload`. Replay checks adapter,
+instance, and model identity, and keeps each item's original position.
+Display text never replaces opaque state.
+Local text and tool history remain usable across provider switches;
+foreign reasoning payloads stay off the wire.
+
+`response.completed` ends the response. Refusal content maps to display
+text and `StopReason::Refusal`, even when the response completes normally.
+The tests cover `response.refusal.delta` and `response.refusal.done`.
+`response.incomplete`
+maps known reasons to the matching stop reason, including output limits
+and refusal. Unknown reasons fail the call. `response.failed`, a top-level
+`error`, or a missing terminal event fails the call.
+The adapter never treats a transport close as successful completion.
+It never executes incomplete tool calls. Wire item ids and `call_id`
+remain distinct during assembly and dispatch.
+Unknown optional fields and events do not break a valid tool turn.
+Required fields and terminal failures still receive explicit checks.
+Retries follow the existing error classes and must not replay emitted events.
+
+Protocol code is shared with `openai-codex` only where fixtures prove
+the behavior matches. Codex regression tests remain in the gate.
+The new adapter uses the existing HTTP and streaming dependencies.
+
+The wire references are the [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events),
+the [function-calling contract](https://developers.openai.com/api/docs/guides/function-calling),
+and the [reasoning contract](https://developers.openai.com/api/docs/guides/reasoning).
+The [xAI Responses guide](https://docs.x.ai/developers/model-capabilities/text/generate-text)
+and [reasoning guide](https://docs.x.ai/developers/model-capabilities/text/reasoning)
+define the second implementation's fixtures.
+
+### Provider compatibility checks
+
+Steps 2 and 3 use sanitized fixtures from independent implementations.
+Chat Completions covers a hosted provider and a local server. Responses
+covers the public OpenAI and xAI contracts. Live checks cover a local
+Chat Completions tool turn and a hosted Responses tool turn with resume.
+CI replays the fixtures without credentials or network calls.
+
+Each fixture records its source protocol and capture or documentation
+revision. New model ids, extra optional fields, fragmented tool calls,
+and terminal failures receive tests. A provider regression adds a fixture
+before the adapter fix. Compatibility receipts describe the tested subset;
+they do not claim every vendor feature works.
+
+Steps 5 and 6 test provider switches and fallback across protocols.
+Tools, approvals, memory access, and local history keep their harness
+contracts. Opaque reasoning replay follows the identity rules above.
+The close-out checks these boundaries and the current upstream contracts.
 
 ### Model routing: roles, chains, and session identity
 
@@ -351,12 +437,12 @@ Rules:
   `set_approval` write their `meta` record from the route's head
   target: instance name, kind, and model.
 - Sealed reasoning is bound to its adapter, instance, and model.
-  Step 4 records the step-2 identity fields on the shipped adapters.
+  Step 5 records the step-2 identity fields on the shipped adapters.
   Replay checks every recorded identity field, as the compat design states.
   `set_model` stops dropping payloads from the history: the wire filter
   makes the drop unnecessary, and a switch back restores continuity. A
   file from before the field replays as before, so the M2 gap closes
-  for files written from step 4 on.
+  for files written from step 5 on.
 - Resume adopts the head target from the session's last `meta` record
   when no flag or variable names a provider or model. The tail comes
   from config. A config file key does not override the session's head:
@@ -385,7 +471,7 @@ The system prompt is fixed for the life of a session run. The runtime
 composes it once, at the first prompt, and the engine sends the same
 bytes on every call. Volatile state never enters it. A resumed session
 composes again, so its prompt can differ from the one its history ran
-under; the file's `prompt_hash` from step 17 records each.
+under; the file's `prompt_hash` from step 18 records each.
 
 The segments, in this order:
 
@@ -421,7 +507,7 @@ use bytes divided by four.
 Every extension file is plain text. Frontmatter is YAML between `---`
 fences, as the [Agent Skills format](https://agentskills.io/specification)
 requires. Parsing covers quoted scalars, folded and literal text, inline
-and block lists, and nested metadata. Step 9 selects a maintained parser
+and block lists, and nested metadata. Step 10 selects a maintained parser
 with compatibility fixtures and a size receipt. It rejects malformed
 frontmatter and duplicate keys with a `doctor` notice; it never guesses
 activation flags from an unreadable value. The parser bounds input size
@@ -447,7 +533,7 @@ Discovered paths, when `discovery` lists the source:
 
 The `agents` source is the shared skills layout that more than one
 agent reads. The default is every source. `discovery = []` turns
-discovery off. This table is the decision. Step 11 builds it, and
+discovery off. This table is the decision. Step 12 builds it, and
 [`config.md`](config.md) becomes the list of record. A path or field
 found wrong at build time is corrected in both places, with a note in
 this plan; nothing drops out in silence.
@@ -478,8 +564,8 @@ Compatibility limits:
   completion popup.
 - A discovered agent definition maps `description`, `tools`, and the
   body. A `model` line maps to a role when a role of that name exists,
-  and warns otherwise. Step 11 finds and lists agent definitions; step
-  16 parses and uses them.
+  and warns otherwise. Step 12 finds and lists agent definitions; step
+  17 parses and uses them.
 - Hooks in another tool's settings never run. Their contracts differ,
   and a translation would run commands the user did not write for this
   harness.
@@ -504,9 +590,9 @@ the arguments into a user turn. The model loads a skill through the
 `skill` tool, input `{ "name": string }`, read-only access. The tool
 returns the body and the skill's file list.
 
-Credit and naming: the formats above come from other products. Step 9
+Credit and naming: the formats above come from other products. Step 10
 adds their rows to [`prior-art.md`](prior-art.md), with each license.
-Step 11 adds a Source-rules exception to `AGENTS.md` for the discovery
+Step 12 adds a Source-rules exception to `AGENTS.md` for the discovery
 module and its config surface, on the same wire-contract argument the
 Codex adapter uses: the module names the tools whose files it reads,
 and the file layouts are the contract.
@@ -776,7 +862,7 @@ reasons: the marginal-session memory gate is 15 MB PSS on Linux, a
 second process of this binary would pay the whole idle baseline again,
 and an in-process engine shares the HTTP client, the config, and the
 tools at no extra cost. A subprocess buys isolation that the approval
-policy already provides. Step 16 measures the in-process PSS delta
+policy already provides. Step 17 measures the in-process PSS delta
 during a subagent turn as a sanity check on the choice; the marginal
 gate itself measures a second process and stays provisional.
 
@@ -797,7 +883,7 @@ the subagent's instructions and its frontmatter supplies defaults for
 `role` and `tools`. The subagent's system prompt is the parent's
 segments 1 to 3, then the definition body: no skill index and no
 recall. It is fixed for the subagent's run, and the child file records
-its own `prompt_hash` from step 17 on. `task` is the subagent's first
+its own `prompt_hash` from step 18 on. `task` is the subagent's first
 prompt.
 `result_schema` is optional; without it the result is the text. The
 subagent's registry is built for the call: the named tools and
@@ -884,7 +970,7 @@ trace: schema 1 with the M3 fields. Pieces:
   before it lands. One Terminal-Bench task runs through it locally;
   this answers the open question about a shim.
 
-Step 17 records `meta.prompt_hash` and the initial `meta.tools_hash`
+Step 18 records `meta.prompt_hash` and the initial `meta.tools_hash`
 on each open or resume. A `tool_set` record stores the canonical
 advertised definitions and their hash before the first model call and
 whenever they change. Each record applies until the next one in that
@@ -914,21 +1000,21 @@ contract.
 
 | Family | Proposed growth |
 |---|---|
-| Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 18 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. |
-| Engine events | `ModelStart { provider, model }` (step 5); `AgentStart { id, name }` and `AgentEnd { id }` (step 16). |
-| Tool names and schemas | `bash` gains `background` (step 8); new tools `task_output`, `task_stop` (8), `skill` (9), `memory_save`, `memory_search`, `memory_forget` (12), `profile_propose` (13), `search_tools` and `<server>__<tool>` (15), `agent` and `submit_result` (16). |
-| Config keys | `providers.<name>.kind`, `.api_key_env` (2); `.thinking` (3); `[roles.<name>] chain` (5); `[prompt] base_file` (6); `discovery` (11); `[memory] enabled`, `recall_tokens` (12); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (14); `[mcp.<name>] command`, `args`, `env`, `always` (15); `[subagents] max_model_calls`, `timeout_seconds` (16). The environment gains `DEMERZEL_EVAL_BANK` (7), a variable and not a key, like `DEMERZEL_LOG`. |
-| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (4); `usage.provider`, `usage.model` (5); the `recall` record (12); the `hook` record and the `answer` value `hook` (14); `meta.parent` and the `agent_child` record (16); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (17). The schema version stays 1. |
-| CLI | `login <instance>` for compat instances (3); `/model <provider> <model>` (5); `/skill` (9); custom commands (10); `/tasks` (8); `/remember`, `/memory` (12); `/profile` (13); `trust` subcommand (14); `/mcp` (15); `-c` excludes children and `--session` refuses a child id (16). |
+| Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 19 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. |
+| Engine events | `ModelStart { provider, model }` (step 6); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
+| Tool names and schemas | `bash` gains `background` (step 9); new tools `task_output`, `task_stop` (9), `skill` (10), `memory_save`, `memory_search`, `memory_forget` (13), `profile_propose` (14), `search_tools` and `<server>__<tool>` (16), `agent` and `submit_result` (17). |
+| Config keys | `providers.<name>.kind`, `.api_key_env` (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
+| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
+| CLI | `login <instance>` for both compatible adapters (4); `/model <provider> <model>` (6); `/skill` (10); custom commands (11); `/tasks` (9); `/remember`, `/memory` (13); `/profile` (14); `trust` subcommand (15); `/mcp` (16); `-c` excludes children and `--session` refuses a child id (17). |
 
 Crate API changes that are not in the six families: `SessionOpen`
 replaces the parameters of `SessionMeta::now` and `SessionStore::create`
 (step 2); `Runtime::open` replaces `open_session` and `engine`,
 `Engine::new` takes `EngineParts`, and core gains `Route` and
-`ProviderHost` (4); `RunConfig` carries the route origin (4); core gains
-`lexical` (12), `HookHost` (14), and `ToolContext` on
-`ToolHost::run_approved` (16); the tools crate exports its environment
-builder (14). Each step names its share.
+`ProviderHost` (5); `RunConfig` carries the route origin (5); core gains
+`lexical` (13), `HookHost` (15), and `ToolContext` on
+`ToolHost::run_approved` (17); the tools crate exports its environment
+builder (15). Each step names its share.
 
 ## Dependencies
 
@@ -940,18 +1026,18 @@ Dev-only crates are exempt.
 | Crate | Purpose | Note |
 |---|---|---|
 | rusqlite (`bundled`) | the memory store | MIT; SQLite is public domain. Expected to cross the 10% line: the receipt is required. |
-| YAML parser, selected in step 9 | extension frontmatter | Maintained, bounded parsing; the compatibility fixtures and size receipt decide the library. |
+| YAML parser, selected in step 10 | extension frontmatter | Maintained, bounded parsing; the compatibility fixtures and size receipt decide the library. |
 
 Not added, with the reason:
 
-- The unmaintained `serde_yaml` crate. Step 9 selects a maintained
+- The unmaintained `serde_yaml` crate. Step 10 selects a maintained
   alternative under the repository's dependency policy.
 - A JSON Schema crate. The subagent result validator covers the
   keywords above in a few hundred lines. MCP servers validate their own
   inputs.
 - An MCP SDK crate. The stdio client is one framing rule and a handful
   of methods; the hand-rolled SSE parser and loopback listener set the
-  precedent. Step 15 measures the official Rust SDK's size before it
+  precedent. Step 16 measures the official Rust SDK's size before it
   decides, and records the receipt.
 - A search-engine crate. BM25 over short documents is a small module.
 
@@ -961,12 +1047,13 @@ Each step is one pull request, except the close-out sequence. Each
 block names the outcome, the scope, the dependencies, the crates, the
 contract changes, the compatibility rules, the verification, the
 completion rule, and the measurements. Each step's dogfood records every
-failure as a bank candidate under `DEMERZEL_EVAL_BANK`, so step 17
+failure as a bank candidate under `DEMERZEL_EVAL_BANK`, so step 18
 assembles the bank rather than invents it.
 
 ### 1. M3 plan
 
-This document. *Verify: review.*
+This document, merged in PR #18. This revision adds step 3 and
+renumbers the later steps. *Verify: review.*
 
 ### 2. `openai-compat` and named provider instances
 
@@ -1003,27 +1090,62 @@ This document. *Verify: review.*
   `api_key_env` in a project file. A `doctor` test lists instances and
   raises no secret warning on `api_key_env`. Dogfood: a tool session
   against a local compatible server on the Linux reference machine.
+  Fixtures cover a hosted provider and a local implementation, including
+  a new model id and unknown optional response fields.
 - **Done when:** the dogfood completes a tool turn and every test above
   passes.
 - **Measure:** the turn bench gains `turn_text_compat`; boot and idle are
   unchanged because the provider builds at the first turn.
 
-### 3. Instance login and the thinking key
+### 3. General Responses API adapter
 
-- **Outcome:** a user stores a key for a compat instance without an
-  environment variable, and an `anthropic` instance can turn adaptive
+- **Outcome:** a named instance runs a coding session through the
+  Responses API with an API key and a configurable endpoint.
+- **Scope:** `openai-responses`; instance resolution and `doctor`;
+  the request and stream mappings above; lossless reasoning replay;
+  the mock route and compatibility fixtures; the `config.md` update.
+  Shared protocol code stays private to `demerzel-providers` and needs
+  matching fixtures before extraction. Codex authentication stays separate.
+- **Depends on:** step 2.
+- **Crates:** `demerzel-providers`, `demerzel`, and `demerzel-mock`.
+- **Contracts:** provider trait none; engine events none; tools none;
+  config adds the `openai-responses` value to `providers.<name>.kind`;
+  session uses the existing identity fields and opaque payload; CLI none.
+- **Compatibility:** existing instances and sessions keep their behavior.
+  Model ids remain config values. The adapter preserves local text and
+  tool history without server storage or Codex credentials.
+- **Verify:** sanitized fixtures cover the public OpenAI and xAI
+  Responses contracts. Tests cover text, usage, fragmented tool calls,
+  optional tool inputs, and distinct item and call ids. A strict fixture
+  requires the original reasoning items on a tool continuation and resume.
+  A different instance or model receives no foreign payload. Tests cover
+  completed refusals, incomplete, failed, error, and truncated streams;
+  partial tool calls never execute. Extra optional fields and new model ids pass.
+  Effort stays absent by default. A retry never duplicates emitted events.
+  Instance tests cover required endpoint/model, credential isolation,
+  and `doctor`. Existing Codex tests pass after any shared-code change.
+  Dogfood: a hosted API-key instance completes a tool turn and resumes
+  its session, with the provider and model in the receipt.
+- **Done when:** the tests pass and the hosted tool/resume receipt lands.
+- **Measure:** the turn bench gains `turn_text_responses`; boot and idle
+  keep lazy provider construction. The existing size budget applies.
+
+### 4. Instance login and the thinking key
+
+- **Outcome:** a user stores a key for either compatible adapter without
+  an environment variable. An `anthropic` instance can turn adaptive
   thinking and effort fields off.
 - **Scope:** `dmz login <instance>`; the `keys` auth section, file
   version 3; the benchmark auth fixture under version 3; `thinking`;
   the [`config.md`](config.md) update.
-- **Depends on:** step 2.
+- **Depends on:** steps 2 and 3.
 - **Crates:** `demerzel-providers`, `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `providers.<name>.thinking`; session none; CLI
   `login <instance>`.
 - **Compatibility:** an M2.5 binary reads a version-3 store. A store
   without the section behaves as today.
-- **Verify:** a login test stores a key after a mock `/models` check,
+- **Verify:** each compatible adapter stores a key after a mock `/models` check,
   refuses it on 401, and stores it with a warning on 404. A config test
   resolves `thinking` and sends the request shape. A strict fixture accepts
   disabled thinking and refuses adaptive thinking or `output_config.effort`.
@@ -1033,7 +1155,7 @@ This document. *Verify: review.*
 - **Done when:** the tests pass and the boot probe runs.
 - **Measure:** none.
 
-### 4. One runtime call and model identity
+### 5. One runtime call and model identity
 
 - **Outcome:** a resumed session keeps its own model, new payloads retain
   their identity across model switches, and the runtime opens through one call.
@@ -1042,7 +1164,7 @@ This document. *Verify: review.*
   `RunConfig`; the step-2 payload identity fields and the wire filter in each
   adapter; the resume rule; `set_model` without the payload drop; the
   `config.md` line on what resumes from the file.
-- **Depends on:** step 2.
+- **Depends on:** steps 2 and 3.
 - **Crates:** `demerzel-core`, `demerzel-providers`, `demerzel`,
   `demerzel-tui` (the open path).
 - **Contracts:** provider trait none; engine events none; tools none;
@@ -1054,13 +1176,14 @@ This document. *Verify: review.*
   overrides it; a recorded instance missing from config falls back
   with a notice; a payload from another model stays off the wire; a
   switch back restores same-model payloads; the M2.5 replay-on-resume
-  PTY scenario still passes. Dogfood: `/model` to a second model and
-  back, then resume.
+  PTY scenario still passes. Cross-protocol tests preserve text and tool
+  history while filtering foreign reasoning. Dogfood: `/model` to a
+  second model and back, then resume.
 - **Done when:** the tests pass and the dogfood resumes on the session's
   model.
 - **Measure:** the turn bench stays flat.
 
-### 5. Roles and fallback chains
+### 6. Roles and fallback chains
 
 - **Outcome:** a failed instance falls back to the next in its chain,
   and the session file names the target that answered.
@@ -1069,7 +1192,7 @@ This document. *Verify: review.*
   `usage.provider` and `usage.model`; `/model <provider> <model>`; the
   target on the status and the progress line; the trust line and the
   `config.md` update.
-- **Depends on:** step 4.
+- **Depends on:** step 5.
 - **Crates:** `demerzel-core`, `demerzel`, `demerzel-tui`.
 - **Contracts:** provider trait none; engine events `ModelStart`; tools
   none; config `roles.<name>.chain`; session `usage.provider`,
@@ -1082,10 +1205,11 @@ This document. *Verify: review.*
   answering target; a project role over an undefined instance is
   refused; `/model` with two tokens switches the instance. Dogfood: two
   instances, the first with a bad key; the status names the second.
+  A cross-protocol chain runs through the same tools and approval policy.
 - **Done when:** exit criterion 2 holds.
 - **Measure:** the turn bench stays flat: one route lookup per call.
 
-### 6. Prompt composition and instruction files
+### 7. Prompt composition and instruction files
 
 - **Outcome:** `AGENTS.md` and the user's instruction file shape every
   session; a user can replace the base prompt; the profile file joins
@@ -1094,7 +1218,7 @@ This document. *Verify: review.*
   positions; segments 1 to 3; the personality file read;
   `prompt.base_file`; the caps; the first-prompt argument of
   `Runtime::open`; the `config.md` update.
-- **Depends on:** step 4.
+- **Depends on:** step 5.
 - **Crates:** `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `prompt.base_file`; session none; CLI none.
@@ -1110,7 +1234,7 @@ This document. *Verify: review.*
 - **Measure:** the composer runs once per session; the cache-hit replay
   is the measurement.
 
-### 7. The hermetic smoke runner
+### 8. The hermetic smoke runner
 
 - **Outcome:** CI checks the harness end to end against replayed
   transcripts, before the ecosystem steps land.
@@ -1128,7 +1252,7 @@ This document. *Verify: review.*
 - **Done when:** the smoke part of exit criterion 9 holds.
 - **Measure:** the smoke subset's CI duration is logged, not gated.
 
-### 8. Background tasks
+### 9. Background tasks
 
 - **Outcome:** a session can start a server, use it, and stop it.
 - **Scope:** `background` on `bash`; the task list; the log file and its
@@ -1148,7 +1272,7 @@ This document. *Verify: review.*
 - **Done when:** exit criterion 8 holds.
 - **Measure:** none; the path is off the turn bench.
 
-### 9. Skills
+### 10. Skills
 
 - **Outcome:** a skill in the project or the user directory is one line
   in the prompt and one tool call away.
@@ -1157,7 +1281,7 @@ This document. *Verify: review.*
   `/skill`; invocation restrictions; the parser dependency and size receipt;
   the [`prior-art.md`](prior-art.md) rows for the borrowed
   formats.
-- **Depends on:** step 6.
+- **Depends on:** step 7.
 - **Crates:** `demerzel`, `demerzel-tools` (the `skill` tool).
 - **Contracts:** provider trait none; engine events none; tools `skill`;
   config none; session none; CLI `/skill`.
@@ -1172,13 +1296,13 @@ This document. *Verify: review.*
 - **Done when:** the tests pass and the dogfood skill runs.
 - **Measure:** the YAML parser's size receipt.
 
-### 10. Custom commands
+### 11. Custom commands
 
 - **Outcome:** a Markdown file becomes a slash command with completion
   and help.
 - **Scope:** native command paths; `$ARGUMENTS`; the registry's second
   table; `/help` and the popup; the built-in name rule.
-- **Depends on:** step 9 (the parser).
+- **Depends on:** step 10 (the parser).
 - **Crates:** `demerzel`, `demerzel-tui` (the popup takes a longer list).
 - **Contracts:** provider trait none; engine events none; tools none;
   config none; session none; CLI `/<command>`.
@@ -1189,7 +1313,7 @@ This document. *Verify: review.*
 - **Done when:** the command part of exit criterion 3 holds.
 - **Measure:** none.
 
-### 11. Config discovery
+### 12. Config discovery
 
 - **Outcome:** a repository's Claude Code, Cursor, and Codex CLI
   instruction, skill, command, and agent files work with zero edits.
@@ -1197,8 +1321,8 @@ This document. *Verify: review.*
   and agent definitions; `discovery`; precedence and shadowing with the
   `doctor` list and the use-time notice; the `AGENTS.md` Source-rules
   exception; the `config.md` update. MCP definition discovery waits for
-  step 15.
-- **Depends on:** steps 9 and 10.
+  step 16.
+- **Depends on:** steps 10 and 11.
 - **Crates:** `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `discovery`; session none; CLI none.
@@ -1217,7 +1341,7 @@ This document. *Verify: review.*
   recursion beyond the named directories; the first-prompt cost is
   logged at `info`.
 
-### 12. Project memory
+### 13. Project memory
 
 - **Outcome:** the agent saves facts, searches them, and recalls them in
   later sessions without a second brain built by hand.
@@ -1225,7 +1349,7 @@ This document. *Verify: review.*
   three tools; `/remember` and `/memory`; auto-recall as segment 5;
   the `recall` record; `memory.enabled` and `memory.recall_tokens`
   with their trust lines; the `config.md` update.
-- **Depends on:** step 6.
+- **Depends on:** step 7.
 - **Crates:** `demerzel-core`, `demerzel-memory` (new), `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools
   `memory_save`, `memory_search`, `memory_forget`; config
@@ -1247,13 +1371,13 @@ This document. *Verify: review.*
   session-open cost with 10,000 facts, logged at `info`, under 50 ms on
   the Linux reference machine.
 
-### 13. Personality proposals
+### 14. Personality proposals
 
 - **Outcome:** the agent proposes profile changes; the user accepts or
   rejects them; the file never changes otherwise.
 - **Scope:** `profile_propose`; the proposals file; `/profile` with
   `accept` and `reject`; the notice.
-- **Depends on:** step 6.
+- **Depends on:** step 7.
 - **Crates:** `demerzel`, `demerzel-tools`.
 - **Contracts:** provider trait none; engine events none; tools
   `profile_propose`; config none; session none; CLI `/profile`.
@@ -1268,7 +1392,7 @@ This document. *Verify: review.*
 - **Done when:** exit criterion 7 holds.
 - **Measure:** none.
 
-### 14. Hooks and the trust gate
+### 15. Hooks and the trust gate
 
 - **Outcome:** a user runs a script at loop events, blocks a tool call
   from it, and adds context to a turn; project hooks run only after an
@@ -1278,7 +1402,7 @@ This document. *Verify: review.*
   their JSON; `[[hooks]]`; the `hook` record and the `answer` value;
   `trust.json`; `dmz trust`; the first-prompt question; the one-shot
   skip; the `config.md` update.
-- **Depends on:** step 6.
+- **Depends on:** step 7.
 - **Crates:** `demerzel-core`, `demerzel-tools`, `demerzel`,
   `demerzel-tui` (the trust question through the approval channel).
 - **Contracts:** provider trait none; engine events none; tools none;
@@ -1299,7 +1423,7 @@ This document. *Verify: review.*
   `tool_before` hook, so the fork-exec cost per tool call is a number
   on both reference machines.
 
-### 15. The MCP client and deferred discovery
+### 16. The MCP client and deferred discovery
 
 - **Outcome:** a configured MCP server's tools are one search away, and
   a repository's `.mcp.json` works after one grant.
@@ -1308,7 +1432,7 @@ This document. *Verify: review.*
   refresh after each batch; `[mcp.<name>]`; MCP definition discovery
   for the `claude`, `cursor`, and `codex` sources; `/mcp`; `doctor`;
   the mock crate's echo server; the `config.md` update.
-- **Depends on:** steps 12 (`lexical`) and 14 (the trust gate).
+- **Depends on:** steps 13 (`lexical`) and 15 (the trust gate).
 - **Crates:** `demerzel-tools`, `demerzel-core` (the refresh),
   `demerzel`, `demerzel-mock`.
 - **Contracts:** provider trait none; engine events none; tools
@@ -1334,7 +1458,7 @@ This document. *Verify: review.*
 - **Measure:** the session-open cost with one server, logged at `info`;
   the `cargo-bloat` receipt.
 
-### 16. Subagents
+### 17. Subagents
 
 - **Outcome:** the agent delegates a bounded task and gets a typed
   result back, no prose parsing.
@@ -1345,7 +1469,7 @@ This document. *Verify: review.*
   `AgentStart` and `AgentEnd`; the child session file and
   `meta.parent` and `agent_child`; latest-session filtering and child-resume refusal;
   the agent card; the `config.md` update.
-- **Depends on:** steps 5 and 11.
+- **Depends on:** steps 6 and 12.
 - **Crates:** `demerzel` (the subagent runner), `demerzel-core`
   (`ToolContext`, events, session records), `demerzel-tui` (the card),
   `demerzel-tools` (the validator next to input parsing).
@@ -1372,7 +1496,7 @@ This document. *Verify: review.*
   Linux reference machine, as a sanity check on the in-process choice;
   the render bench with an agent card on screen.
 
-### 17. Manifests, bundles, the oracle, and the Harbor adapter
+### 18. Manifests, bundles, the oracle, and the Harbor adapter
 
 - **Outcome:** a task runs through Harbor with Demerzel as the agent,
   and every run leaves a validated evidence bundle.
@@ -1380,7 +1504,7 @@ This document. *Verify: review.*
   `meta.prompt_hash`, `meta.tools_hash`, and `tool_set` records;
   joined parent and child evidence; the process probe for
   memory and I/O; one local Harbor run; the bank at 10 to 20 tasks.
-- **Depends on:** steps 7, 15, and 16; every dogfood before it for the bank.
+- **Depends on:** steps 8, 16, and 17; every dogfood before it for the bank.
 - **Crates:** `demerzel-core` (hashes and tool-set records). The rest is Python.
 - **Contracts:** provider trait none; engine events none; tools none;
   config none; session `meta.prompt_hash`, `meta.tools_hash`, `tool_set`;
@@ -1399,7 +1523,7 @@ This document. *Verify: review.*
 - **Done when:** exit criterion 9 holds.
 - **Measure:** none beyond the bundle's own fields.
 
-### 18. Close-out sequence
+### 19. Close-out sequence
 
 Three pull requests, in order:
 
@@ -1418,6 +1542,13 @@ Three pull requests, in order:
 
 Made now, from the code and the recorded evidence:
 
+- **Two general protocols in separate steps.** Chat Completions lands
+  in step 2; general Responses lands in step 3. Each uses named
+  instances and the neutral provider contract. Vendor differences stay
+  inside adapters, with fixtures from independent implementations.
+- **Local conversation state for Responses.** The harness keeps the
+  history and opaque reasoning items. Server storage is not required.
+  Codex authentication and subscription defaults remain separate.
 - **Named instances over per-model flags.** The `kind` key plus
   per-instance request keys carry every per-model difference the
   harness has met. Capability stays on the adapter.
@@ -1453,7 +1584,7 @@ Made now, from the code and the recorded evidence:
   tools, cleanup at exit. No job control.
 - **The smoke runner lands early, from public fixtures.** Sanitized
   synthetic tasks replace the private-subset wording in `plan.md`, so
-  CI carries no private data and the gate guards steps 8 to 17.
+  CI carries no private data and the gate guards steps 9 to 18.
 - **One new crate.** `demerzel-memory` isolates SQLite, an exception to
   the second-consumer rule recorded above. The MCP client is a module
   of the tools crate until a second consumer arrives.
@@ -1482,8 +1613,8 @@ Made now, from the code and the recorded evidence:
 - **Build order by value and by gate.** The smoke runner comes first
   among the non-feature steps; background tasks and memory land before
   hooks, MCP, and subagents.
-- **Credit rows before the code.** Step 9 adds the prior-art rows for
-  the borrowed formats; step 11 adds the Source-rules exception for the
+- **Credit rows before the code.** Step 10 adds the prior-art rows for
+  the borrowed formats; step 12 adds the Source-rules exception for the
   discovery module.
 
 ## Reconciled decisions
@@ -1498,21 +1629,21 @@ Older decisions checked against the current roadmap:
 2. The M2 close-out kept five unread capability flags for M3. This plan
    names no consumer for `streaming`, `parallel_tool_calls`,
    `usage_in_stream`, `cache_control`, or `sealed_reasoning`. The
-   sealed-payload filter keys on the payload, not on a flag. Step 18
+   sealed-payload filter keys on the payload, not on a flag. Step 19
    removes each flag that still has no consumer; the expected result is
    `tool_calls` alone. The struct stays.
 3. The model-catalog exception from M2.5 step 8e covers the two shipped
    adapters. The compat adapter has no catalog; `context_window` is its
    only window source.
-4. The background-task question named M2 or M3. Step 8 decides it.
+4. The background-task question named M2 or M3. Step 9 decides it.
 5. The subagent-transport question asked footprint benches to decide.
    The design decides from the gate and the shared-state argument, and
-   step 16 measures to confirm.
+   step 17 measures to confirm.
 6. The personality-format and prompt-format questions close with the
    designs above.
 7. `plan.md` described the smoke subset as a subset of the private
    bank. This plan redefines it as public sanitized fixtures and edits
-   that line; step 7 builds it.
+   that line; step 8 builds it.
 8. Compaction split, the crates.io name check, and the local-model
    track keep their milestones.
 
@@ -1524,10 +1655,10 @@ step:
 - The Codex `prompt_cache_key` proposal from the
   [M2 decision record](m2-plan.md#decisions-to-make-during-m2). It
   changes the provider contract and lands in its own pull request.
-  Steps 4 and 5 must not absorb it.
+  Steps 5 and 6 must not absorb it.
 - The size-policy reconciliation: plans allow receipt-backed budget
   exceptions, CI enforces 25,000,000 bytes. The M2.5 handoff left the
-  gate unchanged. Step 12's receipt is the next data point, not the
+  gate unchanged. Step 13's receipt is the next data point, not the
   decision.
 - [Required-check protection](ci.md#before-public-release) before a
   public release.
@@ -1543,13 +1674,14 @@ commits; each step's block names its other checks.
 | Step | Measurement |
 |---|---|
 | 2 | `turn_text_compat` in the turn bench |
-| 6 | one cache-hit replay for the stable prefix |
-| 9 | the YAML parser size receipt |
-| 12 | the `rusqlite` size receipt; session-open cost with 10,000 facts |
-| 14 | a turn-bench workload with a no-op `tool_before` hook |
-| 15 | session-open cost with one server; the SDK size receipt |
-| 16 | the in-process PSS delta of a subagent turn; the render bench with an agent card |
-| 18 | warm boot, idle memory, and metrics on both reference machines; render and turn only when a step above moved them |
+| 3 | `turn_text_responses` in the turn bench |
+| 7 | one cache-hit replay for the stable prefix |
+| 10 | the YAML parser size receipt |
+| 13 | the `rusqlite` size receipt; session-open cost with 10,000 facts |
+| 15 | a turn-bench workload with a no-op `tool_before` hook |
+| 16 | session-open cost with one server; the SDK size receipt |
+| 17 | the in-process PSS delta of a subagent turn; the render bench with an agent card |
+| 19 | warm boot, idle memory, and metrics on both reference machines; render and turn only when a step above moved them |
 
 The gates hold as [`plan.md`](plan.md#targets) states them. The plain
 interface keeps its M2 behavior and gains the new commands through the
@@ -1557,15 +1689,18 @@ shared registry, with parity tests over the commands, not the look.
 
 ## Risks
 
-- **Compat endpoints differ.** Servers reject fields they do not know
-  and omit fields the adapter expects. Mitigation: the minimal request
-  body, the explicit-effort rule, the parser that ignores unknown
-  fields, and a dogfood against a local server before the step lands.
+- **Compatible endpoints differ and change.** Servers reject fields they
+  do not know and omit fields the adapter expects. Mitigation: the minimal request
+  body, the explicit-effort rule, fixtures from independent implementations,
+  and local and hosted tool-session receipts. Parsers ignore unknown
+  optional fields and events but validate required data and terminal status.
   A field a server refuses becomes a per-instance key only with a
-  dogfood receipt.
+  dogfood receipt. An upstream regression adds a fixture and an adapter
+  fix; protocol selection stays explicit. The close-out checks current
+  protocol support and deprecations against the primary documentation.
 - **Prefix churn.** Discovery, recall, and deferred tools can each move
   the prompt. Mitigation: fixed positions, recall last, definitions
-  appended in discovery order, and the cache-hit replay at step 6.
+  appended in discovery order, and the cache-hit replay at step 7.
 - **Binary growth.** SQLite is the largest addition since the TUI.
   Mitigation: the receipt rule and the working budget. SQLite and the
   YAML parser are the planned runtime dependency additions.
@@ -1579,7 +1714,7 @@ shared registry, with parity tests over the commands, not the look.
 - **Subagent cost.** A nested engine can spend a session's budget.
   Mitigation: the call limit, the timeout, depth 1, and the usage
   events on the status.
-- **Scope creep.** Eighteen steps is the fence. A feature outside the
+- **Scope creep.** Nineteen steps define the scope. A feature outside the
   build order waits for the M4 plan.
 
 ## Close-out
