@@ -21,8 +21,8 @@ License: MIT. Plan adopted 2026-07-31.
 
 **Implementation status (2026-09-06):** M0 through M2 are complete.
 M2.5 meets its exit criteria, and the milestone close-out is complete.
-See the [next-session handoff](m2.5-plan.md#next-session-handoff) for prerequisites and the next action.
-The next work is the M3 implementation plan, with `openai-compat` and named provider instances first.
+The M3 implementation plan is [`m3-plan.md`](m3-plan.md).
+See its [next-session handoff](m3-plan.md#next-session-handoff) for the next step.
 M3 and later milestones describe planned work. See the
 [`README`](../README.md) for current features and source-build instructions.
 
@@ -326,8 +326,10 @@ micro-benchmarks; iai-callgrind instruction counts as the CI regression gate
   environment driven through Demerzel, through a minimal scaffold, and
   through one reproducible production harness. The pairing isolates the
   harness contribution.
-- Cheap smoke: a 3–5 task hermetic subset of the private task bank (see
-  the evaluation contract) for per-PR iteration.
+- Cheap smoke: 3–5 hermetic tasks, sanitized synthetic reproductions
+  kept as public fixtures and replayed against the mock server, for
+  per-PR iteration (redefined by the M3 plan on 2026-09-06; the
+  private bank stays separate, see the evaluation contract).
 - **Artificial Analysis Coding Agent Index** stays an external
   reference, not release evidence.
 
@@ -471,6 +473,7 @@ evaluation runner foundation: the Harbor agent adapter, versioned candidate
 and scenario manifests, the evidence-bundle serializer, artifact and
 state-oracle interfaces, and a 10–20 task private bank built from reproduced
 dogfood failures, with a 3–5 task hermetic smoke subset cheap enough for CI.
+Plan: [`m3-plan.md`](m3-plan.md).
 **Verify:** a session against a
 compatible endpoint the mock server stands in for; a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
@@ -555,18 +558,24 @@ claim.
 
 ## Open questions
 
-- Background tasks: the bash process group ends with each call, so a
-  session cannot keep a server running. Decide the mechanism in M2 or
-  M3.
-- Prompt/context format details: how skills and AGENTS.md compose into the
-  system prompt while keeping the prefix stable.
+- Background tasks: decided in the M3 plan (2026-09-06). A `background`
+  input on `bash` starts a detached process group with a log file; two
+  tools read and stop it; every exit path the harness controls stops
+  the run's tasks. See
+  [`m3-plan.md`](m3-plan.md#background-tasks).
+- Prompt/context format: decided in the M3 plan. Five segments at fixed
+  positions, recall last, caps per segment. See
+  [`m3-plan.md`](m3-plan.md#prompt-composition).
 - Compaction split: how much of a compacted session becomes memory facts and
-  how much becomes summary text; measure both on replayed sessions.
-- Personality profile format: one file or layered (user + per-project
-  overrides); decide in M3 with real dogfood feedback.
-- Subagent transport: in-process vs subprocess-per-agent; footprint benches
-  decide.
+  how much becomes summary text; measure both on replayed sessions (M4).
+- Personality profile format: decided in the M3 plan. One user file; the
+  agent proposes and never writes. See
+  [`m3-plan.md`](m3-plan.md#the-personality-profile).
+- Subagent transport: decided in the M3 plan. In process, depth 1,
+  sequential; step 16 measures the in-process footprint to confirm. See
+  [`m3-plan.md`](m3-plan.md#subagents).
 - Whether the Harbor agent adapter accepts a third-party agent cleanly or
-  needs a shim (build at the M3 exit; Terminal-Bench runs through Harbor).
+  needs a shim: answered at M3 step 17, where one task runs through the
+  adapter. See [`m3-plan.md`](m3-plan.md#the-evaluation-foundation).
 - Name collision hygiene: crates.io names (`demerzel` availability) checked
   before M5.

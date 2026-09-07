@@ -16,7 +16,7 @@ Step 4 verifies macOS system-cache eviction and adds an explicit `--cold-system`
 The [decision receipt](#macos-cold-boot-decision) records the evidence and limits.
 The [M2.5 results](m2.5-measurements.md) complete the measurement pass on both reference machines.
 Mac system-cold timing remains deferred; its latency gate is uncalibrated.
-See the [next-session handoff](m2.5-plan.md#next-session-handoff) for the work order.
+See the [M3 next-session handoff](m3-plan.md#next-session-handoff) for the work order.
 
 ## Goals
 
