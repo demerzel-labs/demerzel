@@ -69,8 +69,8 @@ M3 is done when all of these hold:
    recall budget, in a test and in a dogfood session.
 6. A subagent returns a schema-valid result in a dogfood session. A
    test covers the validation retry loop and every limit.
-7. A personality proposal lands only through `/profile accept`. A test
-   shows the profile file unchanged on every other path.
+7. The profile workflow applies a proposal only through `/profile accept`.
+   Tests cover rejection, acceptance, and the 8 KiB profile limit.
 8. A background command started in one tool call answers a later call
    and dies at session exit, in a test.
 9. The smoke subset runs hermetically in CI. The Harbor adapter runs one
@@ -231,9 +231,16 @@ Rules:
   under version 3, so the first-run screen does not block the boot
   probe.
 - The `thinking` key, `anthropic` kind only: `adaptive`, the default, or
-  `off`. This resolves the M2 finding that a model without adaptive
-  thinking refuses every turn. A named instance carries the request
-  shape for its model, so no per-model capability flag is needed.
+  `off`. `adaptive` sends adaptive thinking and the resolved effort.
+  `off` sends `thinking: {"type": "disabled"}` and omits
+  `output_config.effort`, including after `/effort`.
+  The command keeps the session's effort for other targets and explains
+  that this instance omits it. `doctor` shows the effective request shape.
+  This covers models without adaptive thinking or effort support;
+  models that require thinking can still refuse `off`.
+  The [thinking](https://platform.claude.com/docs/en/build-with-claude/thinking)
+  and [effort](https://platform.claude.com/docs/en/build-with-claude/effort#compatibility)
+  contracts define these fields. No per-model capability flag is needed.
 - `doctor` lists each instance with its kind, endpoint, model, and
   credential state. Its secret scanner allows `api_key_env`, because the
   value is a variable name.
@@ -243,9 +250,10 @@ sends `model`, `messages`, `stream: true`, `stream_options` with
 `include_usage`, and `tools` when the request has any. It sends
 `max_tokens` only when the request sets `max_output_tokens`. It sends
 `reasoning_effort` only when config, a flag, the environment, or
-`/effort` sets the level. The default level goes to the two shipped
-vendors and not to a compatible endpoint, because many compatible
-servers refuse fields they do not know. The config resolver already
+`/effort` sets the level. The default level goes to the shipped
+adapters, except an `anthropic` instance with thinking off.
+A compatible endpoint gets no implicit effort, because many servers
+refuse fields they do not know. The config resolver already
 tracks the origin of each setting, so this rule needs no new key.
 
 Stream mapping:
@@ -253,7 +261,9 @@ Stream mapping:
 - `choices[].delta.content` maps to `TextDelta`.
 - `delta.reasoning_content` and `delta.reasoning` map to
   `ReasoningDelta`. The segment closes with a `ReasoningDone` that
-  carries the summary and no sealed payload.
+  carries readable text and a `SealedPayload`. Its data preserves each
+  original field name and its complete text. The payload records the
+  adapter, instance, and model; `sealed` means opaque state, not encryption.
 - `delta.tool_calls[]` accumulates by `index`. The first fragment with
   an `id` and a `function.name` emits `ToolCallStart`. Each argument
   fragment emits `ToolCallDelta`. The terminal chunk emits one
@@ -266,8 +276,16 @@ Stream mapping:
   `data: [DONE]` ends the stream. A stream that ends without `[DONE]`
   is a protocol error, as with the two shipped adapters.
 - Tool results go out as `role: tool` messages, one per result, with
-  `tool_call_id`. Reasoning blocks never go back on the wire: the
-  adapter has no sealed payload.
+  `tool_call_id`. Matching reasoning payloads restore the original fields
+  on their assistant messages, including after resume. They never come
+  from a shortened display summary. The
+  [DeepSeek contract](https://api-docs.deepseek.com/guides/thinking_mode/)
+  requires this replay on subsequent requests with tools.
+
+Step 2 adds optional `model` and `instance` fields to `SealedPayload`.
+The compat adapter records both. Replay requires a matching adapter and
+matching values for every identity field present in the payload.
+Step 4 applies this rule to the shipped adapters and model switching.
 
 Capabilities: `tool_calls` true and the other fields at their defaults.
 The close-out decision below removes the fields without a consumer.
@@ -332,11 +350,9 @@ Rules:
   not from a snapshot at construction. `set_model`, `set_effort`, and
   `set_approval` write their `meta` record from the route's head
   target: instance name, kind, and model.
-- Sealed reasoning is bound to the model that produced it. The
-  `SealedPayload` gains `model`, optional. An adapter puts a payload on
-  the wire only when its adapter id matches and the model matches or is
-  absent. Two instances of one kind share a payload domain by design;
-  a server that refuses a payload reports its own error, as today.
+- Sealed reasoning is bound to its adapter, instance, and model.
+  Step 4 records the step-2 identity fields on the shipped adapters.
+  Replay checks every recorded identity field, as the compat design states.
   `set_model` stops dropping payloads from the history: the wire filter
   makes the drop unnecessary, and a switch back restores continuity. A
   file from before the field replays as before, so the M2 gap closes
@@ -402,9 +418,14 @@ use bytes divided by four.
 
 ### Instructions, skills, commands, and discovery
 
-Every extension file is plain text. Frontmatter is a flat block of
-`key: value` lines and `[a, b]` lists between `---` fences. A small
-parser in the binary crate reads it; no YAML dependency is added.
+Every extension file is plain text. Frontmatter is YAML between `---`
+fences, as the [Agent Skills format](https://agentskills.io/specification)
+requires. Parsing covers quoted scalars, folded and literal text, inline
+and block lists, and nested metadata. Step 9 selects a maintained parser
+with compatibility fixtures and a size receipt. It rejects malformed
+frontmatter and duplicate keys with a `doctor` notice; it never guesses
+activation flags from an unreadable value. The parser bounds input size
+and nesting and disables custom tags and alias expansion.
 
 Native paths, project then user:
 
@@ -437,12 +458,21 @@ and pull the user's own files into the prompt.
 
 Compatibility limits:
 
-- A Cursor rule joins the instructions when it sets `alwaysApply: true`
-  or names no `globs`. A glob-scoped rule stays out with a `doctor`
-  note: M3 has no file-context trigger.
-- A skill needs `name` and `description`. A skill without a description
-  gets its first line, capped at 200 bytes. Other frontmatter keys are
-  kept for the `skill` tool and never interpreted.
+- A Cursor rule joins the instructions only with `alwaysApply: true`.
+  Manual, relevance-selected, and glob-scoped rules stay out with a
+  `doctor` notice: M3 has no matching activation mechanism.
+  An absent glob does not make a rule unconditional. The plain
+  `.cursorrules` file remains an unconditional legacy instruction file.
+  See the [rule types](https://cursor.com/docs/rules#rule-anatomy).
+- A skill without `name` uses its directory name. A missing description
+  uses the first body paragraph, capped at 200 bytes.
+  `disable-model-invocation: true` removes the skill from the model index
+  and blocks the `skill` tool; explicit `/skill` invocation still works.
+  `user-invocable: false` disables explicit invocation and completion.
+  These restrictions combine when both are set. The
+  [invocation controls](https://code.claude.com/docs/en/skills#control-who-invokes-a-skill)
+  keep their meaning. Other fields grant no permission; unsupported
+  execution settings produce a `doctor` notice.
 - A command body is a prompt template. `$ARGUMENTS` expands to the text
   after the command name. A `description` line feeds `/help` and the
   completion popup.
@@ -495,6 +525,13 @@ Two classes of project content:
    allows them once for that project. The grant is keyed by the
    canonical project path and a SHA-256 of the definition set. An edit
    to any definition asks again.
+
+A grant trusts the commands and the code they load, including later
+edits to referenced project scripts. The definition hash does not pin
+that code. Both the trust question and `dmz trust` state this scope.
+Revoke the grant before running an untrusted revision of that code.
+Trusted hooks run independently of tool approval; this grant is not a
+sandbox or an integrity check on script contents.
 
 The grant lives in `$XDG_DATA_HOME/demerzel/trust.json`. `dmz trust`
 prints the project's definitions and their state. `dmz trust --allow`
@@ -552,8 +589,9 @@ detached group with a log file, not a job control layer.
 `$XDG_DATA_HOME/demerzel/projects/<project-id>/memory.sqlite`, next to
 the sessions. One table holds facts: id, text, tags, session id,
 created time, and source (`tool`, `user`, or `compaction` in M4). The
-store opens in WAL mode with a busy timeout, so two sessions in one
-project do not block each other. `forget` deletes the row.
+store opens in WAL mode with a busy timeout. Concurrent sessions share
+the store; writes serialize and report an error if the timeout expires.
+`forget` deletes the row.
 
 Three tools: `memory_save`, input `{ "text": string, "tags": [string]? }`,
 write access; `memory_search`, input `{ "query": string, "limit":
@@ -566,8 +604,13 @@ fact with source `user`. `/memory` lists the newest facts;
 Retrieval is lexical. `demerzel_core::lexical` holds a BM25 index over
 tokens: lowercase, split on non-alphanumerics and on case changes, with
 `k1 = 1.2` and `b = 0.75`. The session builds the index from the table
-at open, in memory. Tool discovery uses the same index type. Embeddings
-stay out until the Layer-4 recall measurement says lexical recall fails.
+at open, in memory. A committed save or forget updates the local index.
+Before an explicit search, the store checks for commits from other
+connections and refreshes a stale index. The search observes commits
+completed before it starts; SQLite change tracking can drive the refresh.
+Auto-recall stays fixed for the run. Tool discovery uses the same index
+type. Embeddings stay out until the Layer-4 recall measurement says
+lexical recall fails.
 
 Auto-recall runs once per session run, at the first prompt. The query is
 the first prompt. The facts that fit `memory.recall_tokens`, default
@@ -584,16 +627,23 @@ whether the profile is one file or layered; the answer is one file.
 Project-specific workflow belongs in the project's instructions, which
 already layer.
 
-The agent proposes and never writes the profile. The `profile_propose`
-tool, input `{ "text": string }`, write access, appends the proposal to
-`$XDG_DATA_HOME/demerzel/profile-proposals.jsonl` with the session id
-and the date, and the interface shows a notice. In `ask` mode the
+The profile workflow separates proposals from accepted changes.
+The `profile_propose` tool takes `{ "text": string }` and declares write
+access. It appends the proposal, session id, and date to
+`$XDG_DATA_HOME/demerzel/profile-proposals.jsonl`. The interface shows a notice.
+In `ask` mode the
 approval question shows the text before the proposal lands. The tool
 takes no session grant: an `always` answer covers that call alone, so
 every proposal shows its text. `/profile`
 shows the file path and the pending proposals. `/profile accept <n>`
-appends the proposal under a dated heading. `/profile reject <n>` drops
-it. No other path writes the profile file.
+appends the proposal under a dated heading. Acceptance serializes with
+other accepts and checks the latest file plus the addition against 8 KiB.
+The addition includes its dated heading.
+An overflow leaves both the file and proposal unchanged and asks the
+user to edit the profile. Accepted text takes effect on the next run,
+because the current prompt stays fixed. `/profile reject <n>` drops
+the proposal. No other profile command or memory tool writes the file;
+the existing unsandboxed `bash` tool remains outside this workflow guarantee.
 
 ### Hooks
 
@@ -687,12 +737,19 @@ Servers start at session open, concurrently, with a 10-second startup
 timeout each. A server that fails is reported once and retried at the
 next turn start. Nothing starts at boot.
 
-Tool bridge: each server tool becomes a `Tool` named
-`<server>__<tool>`, cut to 64 bytes with a short hash suffix on a
-collision, with the server's `inputSchema`. Server tools declare
-`Execute` access: they run code in another process with arbitrary
-arguments, so the M2 rule holds: an `always` answer covers the exact
-input, and in `ask` mode a server tool asks once per distinct input. A
+Tool bridge: each server tool becomes a `Tool` with the server's
+`inputSchema`. Its name derives from `<server>__<tool>`, encoded into
+`[A-Za-z0-9_-]` and limited to 64 bytes, including any hash suffix.
+The mapping is deterministic and unique across core and server tools.
+It retains the original server and tool names for dispatch; registration
+refuses any unresolved collision. The
+[MCP alphabet](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#tool-names)
+permits dots, which the
+[provider alphabet](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools#specifying-client-tools)
+does not. Server tools declare `Execute` access because they run code
+in another process with arbitrary arguments. The M2 rule holds: an
+`always` answer covers the exact input. In `ask` mode, a server tool
+asks once per distinct input. A
 per-server grant that covers a tool by name is a dogfood decision,
 listed under Scope. The `always` config list only names the tools the
 prompt advertises from the start; it grants nothing. Server annotations
@@ -773,8 +830,13 @@ Workspace: the same project root and the same tools; sequential
 execution rules out concurrent writes.
 
 The subagent writes its own session file. Its `meta` record gains
-`parent`: the parent session id and the call id. The parent's file
-holds the call, the result, and the `tool` record. The engine emits
+`parent`: the parent session id and the call id. Before the child runs,
+the parent appends an `agent_child` record with `call_id` and `session_id`.
+The parent's file also holds the call, the result, and the `tool` record.
+`SessionStore::latest` excludes child sessions, including for the exit hint.
+An explicit `--session` naming a child stops with a message that names
+its parent; M3 does not resume children as standalone conversations.
+The engine emits
 `AgentStart { id, name }` and `AgentEnd { id }` around the nested run;
 the nested engine's events pass through between them. The interface
 folds them into one agent card, collapsed by default, with a live line
@@ -805,6 +867,12 @@ trace: schema 1 with the M3 fields. Pieces:
   durations, turn outcomes, wall time, the final-state diff, the oracle
   result, and an infrastructure-failure class. Memory and I/O come from
   the runner's process probe, not from the trace.
+  It follows `agent_child` records and checks each child's `meta.parent`,
+  including failed or cancelled children. Call ids are qualified by
+  session; each usage
+  record contributes once. Parent tool duration includes child time,
+  so nested durations do not add to total wall time. A missing child
+  trace marks the bundle incomplete rather than silently reducing totals.
 - `oracle.py`: the state-oracle interface. An oracle is a command run in
   the final state; exit 0 passes. Artifacts are the final-state `git
   diff` and named files the scenario lists.
@@ -815,6 +883,16 @@ trace: schema 1 with the M3 fields. Pieces:
   checks the format's current name and fields against the Harbor docs
   before it lands. One Terminal-Bench task runs through it locally;
   this answers the open question about a shim.
+
+Step 17 records `meta.prompt_hash` and the initial `meta.tools_hash`
+on each open or resume. A `tool_set` record stores the canonical
+advertised definitions and their hash before the first model call and
+whenever they change. Each record applies until the next one in that
+session, including calls without usage. The bundle preserves these records
+for parent and child sessions. Equal definitions create no duplicate
+record. This captures deferred discovery and approval-mode changes without
+storing every schema on every call. Harbor conversion uses the same
+joined trace as the bundle.
 
 Private material stays out of the public tree. The bank is a directory
 outside this repository; `DEMERZEL_EVAL_BANK` names its path. Whether
@@ -840,8 +918,8 @@ contract.
 | Engine events | `ModelStart { provider, model }` (step 5); `AgentStart { id, name }` and `AgentEnd { id }` (step 16). |
 | Tool names and schemas | `bash` gains `background` (step 8); new tools `task_output`, `task_stop` (8), `skill` (9), `memory_save`, `memory_search`, `memory_forget` (12), `profile_propose` (13), `search_tools` and `<server>__<tool>` (15), `agent` and `submit_result` (16). |
 | Config keys | `providers.<name>.kind`, `.api_key_env` (2); `.thinking` (3); `[roles.<name>] chain` (5); `[prompt] base_file` (6); `discovery` (11); `[memory] enabled`, `recall_tokens` (12); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (14); `[mcp.<name>] command`, `args`, `env`, `always` (15); `[subagents] max_model_calls`, `timeout_seconds` (16). The environment gains `DEMERZEL_EVAL_BANK` (7), a variable and not a key, like `DEMERZEL_LOG`. |
-| Session file | `meta.provider` redefined as the instance name and `meta.kind` added (2); `usage.provider`, `usage.model`, `SealedPayload.model` (4 and 5); the `recall` record (12); the `hook` record and the `answer` value `hook` (14); `meta.parent` (16); `meta.prompt_hash`, `meta.tools_hash` (17). All optional or new record types; the schema version stays 1. |
-| CLI | `login <instance>` for compat instances (3); `/model <provider> <model>` (5); `/skill` (9); custom commands (10); `/tasks` (8); `/remember`, `/memory` (12); `/profile` (13); `trust` subcommand (14); `/mcp` (15). |
+| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (4); `usage.provider`, `usage.model` (5); the `recall` record (12); the `hook` record and the `answer` value `hook` (14); `meta.parent` and the `agent_child` record (16); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (17). The schema version stays 1. |
+| CLI | `login <instance>` for compat instances (3); `/model <provider> <model>` (5); `/skill` (9); custom commands (10); `/tasks` (8); `/remember`, `/memory` (12); `/profile` (13); `trust` subcommand (14); `/mcp` (15); `-c` excludes children and `--session` refuses a child id (16). |
 
 Crate API changes that are not in the six families: `SessionOpen`
 replaces the parameters of `SessionMeta::now` and `SessionStore::create`
@@ -862,12 +940,12 @@ Dev-only crates are exempt.
 | Crate | Purpose | Note |
 |---|---|---|
 | rusqlite (`bundled`) | the memory store | MIT; SQLite is public domain. Expected to cross the 10% line: the receipt is required. |
+| YAML parser, selected in step 9 | extension frontmatter | Maintained, bounded parsing; the compatibility fixtures and size receipt decide the library. |
 
 Not added, with the reason:
 
-- A YAML crate for frontmatter. The frontmatter is flat; a small parser
-  covers it. `serde_yaml` is unmaintained, which the dependency check
-  rejects.
+- The unmaintained `serde_yaml` crate. Step 9 selects a maintained
+  alternative under the repository's dependency policy.
 - A JSON Schema crate. The subagent result validator covers the
   keywords above in a few hundred lines. MCP servers validate their own
   inputs.
@@ -898,7 +976,8 @@ This document. *Verify: review.*
 - **Scope:** the adapter; `kind`; instance resolution in config and
   `doctor`, with the secret-scanner allowance; `api_key_env`; the
   provider host with one lazy slot per instance; `SessionOpen`;
-  `meta.provider` as the instance name and `meta.kind`; the mock route
+  `meta.provider` as the instance name and `meta.kind`; payload identity
+  and lossless compat reasoning replay; the mock route
   and fixtures; the `--base-url` rule; the trust lines and the
   [`config.md`](config.md) update.
 - **Depends on:** nothing.
@@ -906,7 +985,8 @@ This document. *Verify: review.*
   `demerzel-core`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `providers.<name>.kind`, `.api_key_env`; session
-  `meta.provider` redefined, `meta.kind` added; CLI none.
+  `meta.provider` redefined, `meta.kind`, `SealedPayload.model`, and
+  `SealedPayload.instance` added; CLI none.
 - **Compatibility:** a table without `kind` keeps its meaning. The two
   shipped adapters stay implicit instances, and their `meta.provider`
   spelling is unchanged. Old session files read.
@@ -914,6 +994,9 @@ This document. *Verify: review.*
   tool call streamed in fragments, two calls in one reply, a reply with
   `reasoning_content`, a usage chunk, a stream without `[DONE]`,
   `length`, `content_filter`, 401, 429 with `retry-after`, and 5xx. A
+  strict fixture refuses a tool continuation without the original reasoning
+  fields. The same continuation passes after resume; a different instance
+  or model receives no foreign reasoning payload. A
   test shows `reasoning_effort` absent at the default level and present
   after `/effort`. Config tests resolve a named instance, refuse a
   compat instance without `base_url` or `model`, and reject `kind` and
@@ -929,7 +1012,7 @@ This document. *Verify: review.*
 
 - **Outcome:** a user stores a key for a compat instance without an
   environment variable, and an `anthropic` instance can turn adaptive
-  thinking off.
+  thinking and effort fields off.
 - **Scope:** `dmz login <instance>`; the `keys` auth section, file
   version 3; the benchmark auth fixture under version 3; `thinking`;
   the [`config.md`](config.md) update.
@@ -942,28 +1025,31 @@ This document. *Verify: review.*
   without the section behaves as today.
 - **Verify:** a login test stores a key after a mock `/models` check,
   refuses it on 401, and stores it with a warning on 404. A config test
-  resolves `thinking` and sends the request shape. The boot probe runs
+  resolves `thinking` and sends the request shape. A strict fixture accepts
+  disabled thinking and refuses adaptive thinking or `output_config.effort`.
+  An `off` instance completes its tool turn, including after `/effort`.
+  The command notice and `doctor` expose the omission. The boot probe runs
   against the updated fixture.
 - **Done when:** the tests pass and the boot probe runs.
 - **Measure:** none.
 
 ### 4. One runtime call and model identity
 
-- **Outcome:** a resumed session keeps its own model, a switched model
-  never replays another model's sealed reasoning, and the runtime opens
-  a session through one call.
+- **Outcome:** a resumed session keeps its own model, new payloads retain
+  their identity across model switches, and the runtime opens through one call.
 - **Scope:** `Route` and `ProviderHost` in core; `EngineParts`;
   `Runtime::open`; `SessionSettings.route`; the route origin on
-  `RunConfig`; `SealedPayload.model` and the wire filter in each
+  `RunConfig`; the step-2 payload identity fields and the wire filter in each
   adapter; the resume rule; `set_model` without the payload drop; the
   `config.md` line on what resumes from the file.
 - **Depends on:** step 2.
 - **Crates:** `demerzel-core`, `demerzel-providers`, `demerzel`,
   `demerzel-tui` (the open path).
 - **Contracts:** provider trait none; engine events none; tools none;
-  config none; session `SealedPayload.model`; CLI none.
-- **Compatibility:** old files without the field replay as before. The
-  fold changes crate API, not a user contract.
+  config none; session the shipped adapters populate payload identity;
+  CLI none.
+- **Compatibility:** old payloads without identity fields replay as before.
+  Their original instance and model cannot be recovered reliably.
 - **Verify:** tests: a resume adopts the file's head target and a flag
   overrides it; a recorded instance missing from config falls back
   with a notice; a payload from another model stays off the wire; a
@@ -1068,19 +1154,23 @@ This document. *Verify: review.*
   in the prompt and one tool call away.
 - **Scope:** the frontmatter parser; native skill paths; the skill
   index segment with its caps and drop order; the `skill` tool;
-  `/skill`; the [`prior-art.md`](prior-art.md) rows for the borrowed
+  `/skill`; invocation restrictions; the parser dependency and size receipt;
+  the [`prior-art.md`](prior-art.md) rows for the borrowed
   formats.
 - **Depends on:** step 6.
 - **Crates:** `demerzel`, `demerzel-tools` (the `skill` tool).
 - **Contracts:** provider trait none; engine events none; tools `skill`;
   config none; session none; CLI `/skill`.
 - **Compatibility:** a project without skills sends no index segment.
-- **Verify:** tests: the parser on each frontmatter shape; the index
+- **Verify:** tests: folded and literal descriptions, quoted scalars,
+  block and inline lists, nested metadata, malformed input, duplicate keys,
+  and parser limits; missing-name defaults; the invocation restrictions
+  alone and together; the index
   caps and the drop order with the `doctor` note; the `skill` tool on a
   known and an unknown name; `/skill` with arguments. Dogfood: one
   skill from the user's shared skills directory runs in a session.
 - **Done when:** the tests pass and the dogfood skill runs.
-- **Measure:** none.
+- **Measure:** the YAML parser's size receipt.
 
 ### 10. Custom commands
 
@@ -1116,8 +1206,10 @@ This document. *Verify: review.*
   change.
 - **Verify:** tests: precedence and shadowing across the five levels; a
   fixture repository with `.claude/`, `.cursor/`, and `.agents/` content
-  yields its items with zero edits; a glob-scoped rule stays out with
-  the `doctor` note; `discovery = []` finds nothing; a project file
+  yields its supported items with zero edits; Cursor's unconditional,
+  glob-scoped, relevance-selected, and manual rules keep their activation
+  limits; an imported user-only skill rejects model invocation;
+  `doctor` names skipped content; `discovery = []` finds nothing; a project file
   cannot add a source. Dogfood: a real repository with another agent's
   config.
 - **Done when:** exit criterion 4 holds.
@@ -1144,6 +1236,8 @@ This document. *Verify: review.*
 - **Verify:** tests: save in one session and search in another; recall
   inside the budget and last in the prompt; BM25 ranking on a fixed
   corpus; the fact cap and the size cap; two stores open at once;
+  local and cross-session save/forget become visible to explicit searches
+  without restart, while the composed recall stays unchanged;
   `enabled = false` advertises no memory tool; a project file cannot
   raise `recall_tokens`. Dogfood: save a fact about this repository,
   and a fresh session recalls it.
@@ -1166,7 +1260,9 @@ This document. *Verify: review.*
 - **Compatibility:** no profile file means an empty segment.
 - **Verify:** tests: a proposal lands pending; `accept` appends under a
   dated heading; `reject` drops it; the file's bytes are equal on every
-  other path; `read-only` advertises no proposal tool; a second proposal
+  other profile path; acceptance at and beyond 8 KiB, including headings;
+  overflow leaves the proposal pending; accepted text joins the next run;
+  `read-only` advertises no proposal tool; a second proposal
   asks again after an `always` answer. Dogfood: one
   accepted proposal in a real session.
 - **Done when:** exit criterion 7 holds.
@@ -1194,6 +1290,8 @@ This document. *Verify: review.*
   constructed environment; `context` reaches the user message at
   `turn_start` only; a project hook stays off without a grant; an
   edited definition asks again; a one-shot run skips with one notice.
+  The trust question states that referenced code can change; a script-only
+  edit keeps the grant, while revocation blocks the next run.
   Dogfood: a `tool_before` hook in this repository that refuses
   `git push`.
 - **Done when:** the hook part of exit criterion 3 holds.
@@ -1221,11 +1319,14 @@ This document. *Verify: review.*
 - **Verify:** tests against the echo server in both eras: the probe and
   its timeout, listing with a cursor, a call round trip, `isError`, a
   non-text content item, cancellation on drop, the shutdown order, one
-  restart, the startup timeout. A search test ranks a fixed catalog. A
+  restart, the startup timeout. Name tests cover dots, truncation,
+  encoding collisions, core-name collisions, and original-name dispatch.
+  A search test ranks a fixed catalog. A
   loop test shows a found tool advertised from the next call, the
   prefix equal before it, and the set cleared by `/new`. A policy test
   drops server tools in `read-only` and asks per input in `ask`; an
-  `always` list advertises and grants nothing. A discovery test reads a
+  `always` list advertises only policy-allowed tools and grants nothing.
+  A discovery test reads a
   `.mcp.json` and stays off without a grant. The
   size receipt for the SDK decision. Dogfood: a real server in this
   repository.
@@ -1242,15 +1343,17 @@ This document. *Verify: review.*
   paths, and agent definition parsing and defaults; the subagent's
   prompt; `[subagents]` with its trust lines;
   `AgentStart` and `AgentEnd`; the child session file and
-  `meta.parent`; the agent card; the `config.md` update.
+  `meta.parent` and `agent_child`; latest-session filtering and child-resume refusal;
+  the agent card; the `config.md` update.
 - **Depends on:** steps 5 and 11.
 - **Crates:** `demerzel` (the subagent runner), `demerzel-core`
-  (`ToolContext`, events, `meta.parent`), `demerzel-tui` (the card),
+  (`ToolContext`, events, session records), `demerzel-tui` (the card),
   `demerzel-tools` (the validator next to input parsing).
 - **Contracts:** provider trait none; engine events `AgentStart`,
   `AgentEnd`; tools `agent`, `submit_result`; config
   `subagents.max_model_calls`, `subagents.timeout_seconds`; session
-  `meta.parent`; CLI none.
+  `meta.parent`, `agent_child`; CLI `-c` excludes children and `--session`
+  refuses them.
 - **Compatibility:** the interfaces treat an unknown event as they do
   today; both learn the two events in this step.
 - **Verify:** tests: a valid result returns; an invalid one loops once
@@ -1259,8 +1362,11 @@ This document. *Verify: review.*
   engine and kills its running tool; an `ask` question reaches the
   parent's approver; a grant made inside the subagent holds in the
   parent afterwards; `read-only` hands the subagent read tools only;
-  the child file names its parent; a project file cannot raise the
-  limits. Dogfood: a review delegated with a findings schema.
+  parent and child files record their link before execution;
+  a project file cannot raise the
+  limits; after a child and a completed parent, `-c` resumes the parent;
+  the exit hint names the parent; an explicit child id reports its parent.
+  Dogfood: a review delegated with a findings schema.
 - **Done when:** exit criterion 6 holds.
 - **Measure:** the in-process PSS delta during a subagent turn on the
   Linux reference machine, as a sanity check on the in-process choice;
@@ -1271,16 +1377,23 @@ This document. *Verify: review.*
 - **Outcome:** a task runs through Harbor with Demerzel as the agent,
   and every run leaves a validated evidence bundle.
 - **Scope:** `manifest.py`, `bundle.py`, `oracle.py`, `harbor_agent.py`;
-  `meta.prompt_hash` and `meta.tools_hash`; the process probe for
+  `meta.prompt_hash`, `meta.tools_hash`, and `tool_set` records;
+  joined parent and child evidence; the process probe for
   memory and I/O; one local Harbor run; the bank at 10 to 20 tasks.
-- **Depends on:** step 7; every dogfood before it for the bank.
-- **Crates:** `demerzel-core` (the two hashes). The rest is Python.
+- **Depends on:** steps 7, 15, and 16; every dogfood before it for the bank.
+- **Crates:** `demerzel-core` (hashes and tool-set records). The rest is Python.
 - **Contracts:** provider trait none; engine events none; tools none;
-  config none; session `meta.prompt_hash`, `meta.tools_hash`; CLI none.
+  config none; session `meta.prompt_hash`, `meta.tools_hash`, `tool_set`;
+  CLI none.
 - **Compatibility:** old files without the hashes bundle with the fields
   absent.
 - **Verify:** tests: a bundle from a real session file; manifests
-  validate and a bad one fails; an oracle passes and fails. Dogfood:
+  validate and a bad one fails; an oracle passes and fails; child traces
+  and usage appear exactly once, including cancellation and duplicate local
+  call ids; a missing child marks incomplete evidence; discovery changes
+  the recorded tool set before the next call; unchanged definitions add
+  no record; resume, approval changes, and child calls retain their sets.
+  Dogfood:
   one Terminal-Bench task through the Harbor adapter with a live model,
   its bundle committed with a private-data review.
 - **Done when:** exit criterion 9 holds.
@@ -1316,21 +1429,22 @@ Made now, from the code and the recorded evidence:
 - **Fallback before the first event only.** A repeated delta is worse
   than a visible error.
 - **Resume keeps the session's head target.** Flags and variables
-  override; config files do not. The `SealedPayload.model` field makes
-  every path safe for files written from step 4 on.
+  override; config files do not. New payloads record instance and model;
+  legacy payloads without identity retain their old replay behavior.
 - **One `Runtime::open` and one `EngineParts`.** The first prompt is an
   argument, so recall and composition need no engine seam. Later seams
   add fields, not parameters.
 - **Prompt order fixed, recall last.** Everything above the recall
   segment stays byte-stable across sessions.
-- **Flat frontmatter, no YAML crate.** The formats in the discovery
-  table are flat.
+- **Compatible YAML frontmatter.** A maintained parser must pass the
+  import fixtures and the size check. Activation restrictions survive import.
 - **The discovery table is the decision.** A wrong path is corrected in
   place, never dropped in silence.
 - **Discovered hooks never run.** Prompt content crosses tools;
   commands do not.
 - **Trust by definition hash.** A grant covers one definition set in one
-  project; an edit asks again.
+  project and the code it loads, including future script edits.
+  A definition edit asks again; the trust question states this distinction.
 - **Every new key has a trust shape.** The table above is the checklist
   for each step's `config.md` change.
 - **Harness stores under `$XDG_DATA_HOME` sit outside the project-root
@@ -1345,9 +1459,10 @@ Made now, from the code and the recorded evidence:
   of the tools crate until a second consumer arrives.
 - **BM25 in core, SQLite for durability.** One index type serves memory
   and tool discovery; the store gives provenance, WAL concurrency, and
-  delete by id.
-- **Personality is one file, and the agent never writes it.** The
-  proposal tool declares `Write` because it appends to a store.
+  delete by id. Explicit searches refresh after commits; auto-recall stays fixed.
+- **Personality changes require acceptance in the profile workflow.**
+  Acceptance respects the 8 KiB prompt limit and affects the next run.
+  The proposal tool declares `Write` because it appends to a store.
 - **Hooks fail open, except a deny.** A broken hook logs and continues.
 - **Dual-era MCP client, stdio only.** Checked against the 2026-07-28
   specification. The probe is the specification's own recommendation,
@@ -1358,9 +1473,11 @@ Made now, from the code and the recorded evidence:
   change flag on tool output.
 - **Subagents in process, depth 1, sequential, through `ToolContext`.**
   The parent lends its sink, approver, and policy for the call.
+  Child sessions stay out of normal resume and join the evaluation evidence.
 - **`submit_result` is the only exit.** Typed results need a typed
   door.
-- **The evaluation runner is Python, the trace is the session file.**
+- **The evaluation runner is Python.** Parent and child session files
+  carry the trace, including changes to advertised tool definitions.
   No new binary surface for evaluation.
 - **Build order by value and by gate.** The smoke runner comes first
   among the non-feature steps; background tasks and memory land before
@@ -1427,6 +1544,7 @@ commits; each step's block names its other checks.
 |---|---|
 | 2 | `turn_text_compat` in the turn bench |
 | 6 | one cache-hit replay for the stable prefix |
+| 9 | the YAML parser size receipt |
 | 12 | the `rusqlite` size receipt; session-open cost with 10,000 facts |
 | 14 | a turn-bench workload with a no-op `tool_before` hook |
 | 15 | session-open cost with one server; the SDK size receipt |
@@ -1449,8 +1567,8 @@ shared registry, with parity tests over the commands, not the look.
   the prompt. Mitigation: fixed positions, recall last, definitions
   appended in discovery order, and the cache-hit replay at step 6.
 - **Binary growth.** SQLite is the largest addition since the TUI.
-  Mitigation: the receipt rule; the working budget; no other new
-  runtime dependency in the milestone.
+  Mitigation: the receipt rule and the working budget. SQLite and the
+  YAML parser are the planned runtime dependency additions.
 - **MCP protocol drift.** The specification changed its lifecycle in
   2026-07-28. Mitigation: the dual-era client, the echo server in both
   eras, the build-time re-check, and a parser that ignores unknown
