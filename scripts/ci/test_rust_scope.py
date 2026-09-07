@@ -71,6 +71,7 @@ class RustScopeCliTests(unittest.TestCase):
             "docs/m1-plan.md",
             "docs/m2-plan.md",
             "docs/m2.5-plan.md",
+            "docs/m3-plan.md",
             "docs/plan.md",
             "docs/prior-art.md",
         )
