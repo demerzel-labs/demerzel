@@ -24,7 +24,7 @@ demerzel-tui = { path = "crates/demerzel-tui" }
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "env"] }
-criterion = { version = "0.7", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
 futures-core = "0.3"
 getrandom = "0.4"
 globset = "0.4"
