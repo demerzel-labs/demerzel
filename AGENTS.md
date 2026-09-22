@@ -84,10 +84,41 @@ current.
   customizability away for these goals.
 - Stop after you open the pull request. Daniel reviews and merges.
 
+## Direct commits to `main`
+
+The GitHub Actions budget ran out on 2026-09-22. Plan steps go to
+`main` without pull requests until Daniel restores them. These rules
+replace the pull-request rules above for that period:
+
+- Commit each plan step to `main`. Use one commit, or a short series
+  when the step splits cleanly. Push after the step's checks pass.
+- The commit subject rules stay.
+- Run the three Rust checks above before each commit. Run the affected
+  commands from [Local verification](docs/ci.md#local-verification)
+  before you push. Local results replace CI evidence. Record each
+  command and the tested revision.
+- The publication check and the adversarial review gate stay. They run
+  over the full diff of the step before its last commit.
+- The body of the step's last commit keeps the pull request layout: a
+  summary, then `Decisions`, `Verify`, `Review`, and `Contract growth`.
+- Stop after you push the step. Daniel reviews on `main`.
+- A CI run on a push fails while the budget is out. That failure is not
+  evidence about the change.
+
 ## Milestone close-out
 
-Run these two steps at the end of every milestone, before the next
+Run these steps at the end of every milestone, before the next
 milestone plan lands:
+
+- The full check list on both reference machines. Run the three Rust
+  checks, every command in
+  [Local verification](docs/ci.md#local-verification), `cargo doc`,
+  and the release build. The stripped release binary must stay below
+  25,000,000 bytes. This list stands in for the CI jobs.
+- The contract inventory. Collect each `Contract growth` entry since
+  the previous milestone, from pull request bodies or step commit
+  bodies. Check each entry against the code, and record the inventory
+  in the close-out document.
 
 - An alignment review over the whole repository, not a diff. Two
   lenses: architecture — the crates and contracts still match
