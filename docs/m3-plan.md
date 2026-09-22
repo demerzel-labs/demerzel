@@ -20,6 +20,10 @@ Start the next work in this order:
 3. Build the general Responses adapter as step 3, in a separate pull request.
 4. Follow the remaining steps in order. Each step names its dependencies.
 
+Steps 8a to 8c add [judgments](#judgments), the milestone's
+differentiator. Read that design before step 5, because `EngineParts`
+and `ProviderHost` carry the judge.
+
 Read [`config.md`](config.md) before you change config behavior. Read
 the [trust rules](#trust-rules-for-extension-content) before you add a
 key or a file that a project can supply.
@@ -31,6 +35,7 @@ step. Do not fold them into a step without a decision in this document.
 
 Step 1 merged in [PR #18](https://github.com/demerzel-labs/demerzel/pull/18).
 Step 3 adds general Responses support after the Chat Completions adapter.
+The 2026-09-22 revision adds steps 8a to 8c for judgments.
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
 reference machines and the decisions that carry into M3:
@@ -46,14 +51,16 @@ After M3, Demerzel supports Chat Completions and Responses through
 configured provider instances. New model ids need config changes only.
 Adapters contain protocol changes and vendor differences. A model role
 names a chain of provider instances, and a session records
-which one answered. Project files extend the agent: instructions, skills,
+which one answered. A fast judge answers typed questions about the loop.
+Code turns its probabilities into records, warnings, notes, approvals, and
+denials. Project files extend the agent: instructions, skills,
 custom commands, hooks, MCP servers, and subagent definitions. Demerzel
 finds the config that other agents left in a repository and uses it with
 zero edits. The agent remembers facts per project and proposes changes
 to a personality profile that only the user edits. A background command
 can outlive its tool call. At the exit, the evaluation runner has its
 foundation: a Harbor adapter, versioned manifests, evidence bundles, and
-a hermetic smoke subset that guards every step from step 9 on.
+a hermetic smoke subset that guards every step from step 8a on.
 
 ## Exit criteria
 
@@ -88,12 +95,17 @@ M3 is done when all of these hold:
     review is folded into the plan docs. The metrics receipts from both
     reference machines are committed. Warm boot and idle memory stay
     within 10% of each machine's M2.5 receipts, measured with no hooks,
-    no MCP servers, an empty memory store, and the default discovery
-    sources. A crossing needs one confirmation run and a documented
+    no MCP servers, no judge instance, an empty memory store, and the
+    default discovery sources. A crossing needs one confirmation run and
+    a documented
     cause, as M2.5 did. The stripped binary stays inside the 15 MB
     working budget, with a `cargo-bloat` receipt for each dependency
     that grows it more than 10%. `cargo fmt`, `cargo clippy`,
     `cargo test`, and `cargo doc` are clean.
+11. A judge instance records every built-in check in dogfood sessions.
+    Approval judgments pass the step 8b gate. A rule denies a call in a
+    test and in a dogfood session. The calibration report for the
+    compatible backend is in this plan.
 
 ## Scope
 
@@ -103,6 +115,9 @@ In:
   named provider instances;
 - model roles with fallback chains, session model identity, and one
   runtime call that opens a session with its route;
+- judgments: the judge contract, the `typesafe` backend, a backend over
+  a compatible instance, the built-in checks, approval judgments, and
+  rules in plain language;
 - prompt composition with fixed segment positions;
 - project and user instruction files, skills, custom slash commands,
   and discovery of Claude Code, Cursor, and Codex CLI config;
@@ -145,7 +160,15 @@ Out, with the milestone that owns each item:
 - local embeddings for memory (only if the Layer-4 recall measurement
   shows lexical recall failing);
 - vendor-hosted tools and server-managed conversation state (by demand,
-  when a concrete use case justifies a separate contract change).
+  when a concrete use case justifies a separate contract change);
+- routing each turn to a role by judgment (M4, after a paired result
+  shows no loss);
+- judgment ranking for skills, tools, and memory recall, and judgment
+  grading in the evaluation runner (by evidence, after the M3 checks
+  prove the contract);
+- judges over `anthropic`, `openai-codex`, and `openai-responses`
+  instances. Their protocols return no log probabilities;
+- user edits to the built-in check questions (by demand).
 
 ## Workspace after M3
 
@@ -154,14 +177,16 @@ One new crate and one new Python directory:
 ```text
 crates/
   demerzel/            # bin: CLI, wiring, prompt composition, discovery,
-                       #      hooks, subagents, background tasks
-  demerzel-core/       # + lexical (BM25), Route, ProviderHost, HookHost,
-                       #   ToolContext, EngineParts
-  demerzel-providers/  # + openai_compat, openai_responses, instance config
+                       #      hooks, judgment checks and rules,
+                       #      subagents, background tasks
+  demerzel-core/       # + lexical (BM25), Route, ProviderHost, Judge,
+                       #   LoopHost, ToolContext, EngineParts
+  demerzel-providers/  # + openai_compat, openai_responses, instance config,
+                       #   the typesafe and logprob judges
   demerzel-tools/      # + task tools, the skill tool, the mcp module
   demerzel-tui/        # + agent cards, the /profile and /tasks notes
   demerzel-memory/     # SQLite fact store, memory tools, recall (new)
-  demerzel-mock/       # + Chat Completions and Responses routes,
+  demerzel-mock/       # + Chat Completions, Responses, and judge routes,
                        #   MCP echo server, standalone smoke-runner binary
 bench/
   eval/                # manifests, bundles, oracle, Harbor adapter,
@@ -179,8 +204,9 @@ dependency, so the same development dependency costs the provider
 tests nothing new. It becomes a crate when Streamable HTTP or a second
 consumer arrives. The lexical index lives in `demerzel-core` because two crates
 consume it: the tools crate for discovery and the memory crate for
-facts. The binary crate keeps subagents, hooks, and discovery because
-each one wires providers, tools, config, and sessions together.
+facts. The binary crate keeps subagents, hooks, judgment checks, and
+discovery because each one wires providers, tools, config, and sessions
+together.
 
 ## Design
 
@@ -465,6 +491,245 @@ seams add fields, not parameters. `ProviderHost` maps an instance name
 to a provider through one lazy slot per instance, so a reference lives
 as long as the host and a failed build still retries.
 
+### Judgments
+
+Decided 2026-09-22, as the milestone's differentiator. The product
+reasoning is in [`plan.md`](plan.md#judgments-a-fast-model-beside-the-main-model).
+A judge is a fast model that answers typed questions about the loop's
+state with probabilities. It writes no text and calls no tools. Code
+applies the thresholds and picks the action.
+
+#### The judge contract
+
+`demerzel-core` gains a `Judge` trait beside `Provider`: `id` and
+`ask`. A request holds one state value and a map of questions by id. A
+reply holds one answer for each id, the model id that answered, and
+usage. The question types:
+
+| Type | Question input | Answer |
+|---|---|---|
+| `YesNo` | instructions, optional criteria for yes and no | the probability of yes |
+| `Choice` | instructions, 2 to 255 named options | the chosen option and a probability for each option |
+| `Score` | instructions, 2 to 10 ordered levels | a probability for each level and their weighted position |
+
+`Judge` is a second model contract, not a `Provider` variant. A judge
+does not stream, does not call tools, and returns no text. Each loop
+event sends at most one request: every question at that event goes into
+it. Question ids stay in code. The question text carries the full
+meaning.
+
+`ProviderHost` builds judges in its lazy instance slots. A `typesafe`
+instance serves only as a judge. An `openai-compat` instance can serve
+as a provider and as a judge. A role that names a `typesafe` instance
+stops the run at boot. A judge setting that names an instance of another
+kind also stops the run at boot.
+
+#### Backends
+
+- **`kind = "typesafe"`, step 8a.** The reference backend. The wire
+  contract is the published [System One API](https://docs.typesafe.ai/api):
+  `POST {base_url}/v1/systemone` with a bearer key, `model`, `state`,
+  and `questions`. `YesNo` maps to the wire type `noul`. The default
+  `base_url` is `https://api.typesafe.ai`. The default model is the
+  alias `jev-latest`. An alias can move to a new version, so a tuned
+  config pins a version id. The reply's `model` field names the version
+  that answered. `doctor` notes an alias when a check acts above `log`.
+  Retries back off on 429, 529, 5xx, and network errors, and honor
+  `retry-after`. 401 and 422 fail fast. Every retry stays inside the
+  request timeout. `dmz login <instance>` checks a key with
+  `GET {base_url}/v1/models`, as step 4 does for the compatible
+  adapters. The step checks these fields against the API reference at
+  build time and records any drift in this plan.
+- **Log probabilities over an `openai-compat` instance, step 8c.** Each
+  question becomes one Chat Completions request with `max_tokens: 1`,
+  `logprobs: true`, and `top_logprobs: 20`. Options and levels carry
+  letter labels. The answer is the probability mass on each label,
+  normalized over the labels. A reply with less than half of its mass
+  on the labels fails that question. Requests for one event run with at
+  most 8 in flight. A server that returns no log probabilities gets a
+  `doctor` notice. The framing text is not contract. This backend makes
+  no calibration claim. Step 8c measures it against the reference
+  backend and reports the result.
+- **The mock.** `demerzel-mock` gains the System One route with answers
+  scripted by question id.
+
+The `anthropic`, `openai-codex`, and `openai-responses` kinds cannot
+serve as judges: their protocols return no log probabilities.
+
+#### Configuration
+
+```toml
+[providers.judge]
+kind = "typesafe"
+model = "jev-1.13.0"
+api_key_env = "TYPESAFE_API_KEY"
+
+[judgments]
+instance = "judge"
+checks = { outcome = "warn", progress = "warn", claim = "log", approval = "act" }
+max_calls = 500
+
+[[judgments.rules]]
+event = "tool_before"
+tool = "bash"
+ask = "Does this command change files under src/auth/?"
+threshold = 0.8
+action = "deny"
+reason = "src/auth/ is off limits in this repository."
+```
+
+- `judgments.instance` names the judge. Without it, the harness sends
+  no judgment request and writes no record.
+- `judgments.checks` sets one action for each built-in check. Each check
+  defaults to `log` when an instance exists.
+- `judgments.max_calls` caps requests for one session run. The default
+  is 500. At the cap, checks stop with one notice, and approval falls
+  back to the policy.
+- `judgments.rules` holds rules in plain language. A rule asks one
+  `YesNo` question at one event. `tool` limits a rule to one tool name.
+  The rule fires when the probability of yes reaches `threshold`, 0.8 by
+  default. `reason` defaults to the question.
+- The request timeout is 2 seconds, and the thresholds of the built-in
+  checks are constants. Each becomes a key only when records show that
+  users need another value.
+
+#### Actions
+
+| Action | Effect | Valid for |
+|---|---|---|
+| `off` | The check does not run. | built-in checks |
+| `log` | The `judgment` record keeps the answers. Nothing else changes. | all |
+| `warn` | As `log`. A `Judgment` event shows the finding on the tool card or the turn. | all |
+| `note` | As `warn`. The finding joins the tool result that the model reads next. | `tool_after` checks and rules |
+| `act` | The approval check changes the approval question, as described below. | `approval` |
+| `deny` | The call does not run. The reason becomes its error result. | `tool_before` rules |
+
+A note joins the stored tool result, so a resume sends the same bytes.
+A deny writes an `approval` record with `decision` `deny` and `answer`
+`judge`, in the shape that hooks use.
+
+#### The built-in checks
+
+Code filters each event before it builds a request:
+
+| Check | Event | Question | Runs when |
+|---|---|---|---|
+| `outcome` | `tool_after` | Did the call fail, or return something other than its purpose, although it reports success? | an `Execute` call returns without its error flag |
+| `progress` | `tool_after` | Does the call repeat an earlier failed action without a material change? | the turn holds an earlier failed call of the same tool |
+| `claim` | `turn_end` | Does the final message claim a result that the turn's tool evidence does not show? | a turn with at least one tool call completes |
+| `approval` | `tool_before` | Two `YesNo` questions: is the call destructive or hard to undo; is it inside the user's request? | a `Write` or `Execute` call reaches the approval policy |
+
+The fire threshold for `outcome`, `progress`, and `claim` starts at 0.8.
+The question wording is not contract. Tests check actions and
+thresholds, not wording.
+
+#### Approval judgments
+
+The approval check can move a call one step. It never replaces the
+policy:
+
+1. In `read-only` mode, nothing changes. The policy refuses writes before
+   any judgment.
+2. In `ask` mode, the check runs only for a call the policy would ask
+   about. At `act`, the judge can remove the question. It removes it
+   when the probability of destructive is at most 0.05 and the
+   probability of in scope is at least 0.9. The `approval` record then has `decision`
+   `allow` and `answer` `judge`. Other calls show the question as today,
+   with the judge's concern on the card.
+3. In `auto` mode, at `act`, a call with a probability of destructive
+   of at least 0.5 becomes a question. A run without an approval prompt
+   refuses the call and gives the reason.
+4. A judge approval covers one call. It creates no session grant.
+5. A timeout, an error, or the call cap leaves the policy's decision
+   unchanged.
+
+At `log`, the check runs in shadow. The policy and the user decide. The
+records pair each judge answer with the user's answer, and step 8b uses
+these pairs as its labeled set. The starting thresholds above change
+only with that evidence.
+
+#### The loop seam
+
+`demerzel-core` gains one `LoopHost` seam on `EngineParts`. The engine
+calls it at `turn_start`, `tool_before`, `tool_after`, and `turn_end`.
+Judgments implement it in step 8a. Hooks implement it in step 15, in
+place of a separate hook seam. At `tool_before`, the order is:
+
+1. hooks;
+2. rules;
+3. the approval policy with the approval check.
+
+A deny at any stage ends the call. At `tool_before`, the host gets the
+policy's decision and can return a changed one. The engine allows these
+changes only: ask to allow, allow to ask, and any decision to deny. A
+host cannot turn a refusal into a run.
+
+Checks and rules also run on subagent calls. Their records go to the
+child session file.
+
+#### The state
+
+Each check builds its state in code from the session:
+
+- the user prompt of the current turn, capped at 4 KiB;
+- the tool name and its input, capped at 4 KiB;
+- the tail of the tool output, capped at 8 KiB;
+- the names and outcomes of the turn's last 10 calls;
+- for `claim`, the final message, capped at 4 KiB.
+
+A request holds at most 16 KiB of state. The builder cuts the output
+tail first. The state never holds the system prompt, the tool
+definitions, or earlier turns. Judgments never enter the prompt: the
+cached prefix stays byte-stable.
+
+#### Latency and cost
+
+- Checks at `log` and `warn` at `tool_after` run at the same time as the
+  next model call. They add no turn latency.
+- A `note` check holds the next model call until its answer or the
+  timeout.
+- Rules and the approval check hold the dispatch until the answer or the
+  timeout.
+- Code filters skip a request when no check applies. A turn without tool
+  calls sends at most one request, for `claim`.
+- The judge builds at the first check. Boot and idle memory stay
+  unchanged.
+
+#### Records
+
+The session file gains a `judgment` record for each request. It holds:
+
+- the event and the call id, when a tool call exists;
+- the checks and the rules, with each rule's source file;
+- the instance and the model id from the reply;
+- the answers by question id, and the action taken;
+- the state's byte count and SHA-256;
+- the start time, the duration, and the usage.
+
+A replay can apply new thresholds to the recorded answers without a new
+call. The state hash shows when the state builder changed.
+
+#### Trust and egress
+
+A judge receives tool input and output, as the main model does. The
+egress rule in [`plan.md`](plan.md#non-goals) names the judge instance.
+Only the user file, flags, and the environment can turn judgments on.
+`doctor` names the judge instance, each check's action, and each rule
+with its source. A project rule sends state to the user's judge and
+counts against the user's cap. A project rule cannot approve a call. A
+rule runs no code, so the hook trust gate does not apply.
+
+Every check starts at `log`. A default action rises only when a plan
+records the check's precision at its threshold on labeled records.
+Approval at `act` needs the step 8b gate.
+
+#### Naming
+
+The `typesafe` kind names the service it calls, as the `anthropic` kind
+does. The judgment code uses Demerzel's own terms: judge, check, rule,
+`YesNo`, `Choice`, and `Score`. Step 8a adds the reference backend to
+[`prior-art.md`](prior-art.md).
+
 ### Prompt composition
 
 The system prompt is fixed for the life of a session run. The runtime
@@ -638,8 +903,11 @@ that adds it:
 | `roles.<name>.chain` | name user-defined instances only |
 | `discovery` | remove sources, not add |
 | `memory.enabled` | turn off, not on |
-| `memory.recall_tokens`, `subagents.max_model_calls`, `subagents.timeout_seconds` | lower, not raise |
+| `memory.recall_tokens`, `subagents.max_model_calls`, `subagents.timeout_seconds`, `judgments.max_calls` | lower, not raise |
 | `hooks`, `mcp.<name>` | define, behind the grant |
+| `judgments.instance` | not set it |
+| `judgments.checks` | turn a check off, not on or up |
+| `judgments.rules` | define, without a grant; a rule cannot approve |
 
 Harness-owned stores under `$XDG_DATA_HOME` are outside the project-root
 write confinement: the memory store, the proposals file, and the task
@@ -765,11 +1033,14 @@ crate exports its environment builder for this. The default timeout is
 10 seconds. A `tool_before` hook's `context` output is ignored: only
 the user message may grow, and only at `turn_start`.
 
-`demerzel-core` gains a `HookHost` seam next to `ToolHost`, as a field
-of `EngineParts`. The engine fires the four turn and tool events; the
+Hooks implement the `LoopHost` seam that step 8a adds to
+`EngineParts` (see [the loop seam](#the-loop-seam)). The engine fires
+the four turn and tool events; the
 runtime fires `session_start` at `Runtime::open` and `session_end` on
 the run's exit path, because the engine sees neither boundary. The
-binary crate implements the seam with subprocess spawns. The engine records each run as a
+binary crate implements hooks with subprocess spawns. At `tool_before`,
+hooks run before judgment rules and the approval policy. The engine
+records each run as a
 `hook` session record: event, hook index, exit code, decision, reason,
 and duration. A denied call keeps the existing `approval` record shape:
 `decision` is `deny` and `answer` takes the new value `hook`. The model
@@ -943,14 +1214,16 @@ trace: schema 1 with the M3 fields. Pieces:
   task; a harness change that alters the final state does.
 - `manifest.py`: the candidate envelope and the scenario, each a JSON
   document with `schema: 1`. The candidate names the commit, the
-  binary's SHA-256, the provider instance and model, `prompt_hash`,
+  binary's SHA-256, the provider instance and model, the judge instance
+  and model with each check's action, `prompt_hash`,
   `tools_hash`, the environment image, the retry and context policy,
   and the budget. The scenario names the base image, the seed, the
   allowed tools, the oracle command, the policy assertions, the slice
   labels, and an optional fault profile.
 - `bundle.py`: reads a session file and writes the evidence bundle:
-  the typed trace, usage totals with cache parts, tool steps with
-  durations, turn outcomes, wall time, the final-state diff, the oracle
+  the typed trace, usage totals with cache parts, judge usage apart from
+  model usage, the judgment records, tool steps with durations, turn
+  outcomes, wall time, the final-state diff, the oracle
   result, and an infrastructure-failure class. Memory and I/O come from
   the runner's process probe, not from the trace.
   It follows `agent_child` records and checks each child's `meta.parent`,
@@ -1000,21 +1273,22 @@ contract.
 
 | Family | Proposed growth |
 |---|---|
-| Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 19 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. |
-| Engine events | `ModelStart { provider, model }` (step 6); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
+| Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 19 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. Step 8a adds the `Judge` trait beside it, with `id` and `ask`. The judge is a second model contract; step 8a adds it to the `AGENTS.md` contract list. |
+| Engine events | `ModelStart { provider, model }` (step 6); `Judgment { call_id, source, action, text }` (8b); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
 | Tool names and schemas | `bash` gains `background` (step 9); new tools `task_output`, `task_stop` (9), `skill` (10), `memory_save`, `memory_search`, `memory_forget` (13), `profile_propose` (14), `search_tools` and `<server>__<tool>` (16), `agent` and `submit_result` (17). |
-| Config keys | `providers.<name>.kind`, `.api_key_env` (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
-| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
-| CLI | `login <instance>` for both compatible adapters (4); `/model <provider> <model>` (6); `/skill` (10); custom commands (11); `/tasks` (9); `/remember`, `/memory` (13); `/profile` (14); `trust` subcommand (15); `/mcp` (16); `-c` excludes children and `--session` refuses a child id (17). |
+| Config keys | `providers.<name>.kind`, `.api_key_env` (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `kind = "typesafe"` as a new value, `[judgments] instance`, `checks` with `off` and `log`, `max_calls` (8a); the `warn`, `note`, and `act` actions and `[[judgments.rules]] event`, `tool`, `ask`, `threshold`, `action`, `reason` (8b); `openai-compat` instances as `judgments.instance` (8c); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
+| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `judgment` record (8a); the `answer` value `judge` (8b); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
+| CLI | `login <instance>` for both compatible adapters (4); `/model <provider> <model>` (6); `login <instance>` for a `typesafe` instance (8a); `/judgments` (8b); `/skill` (10); custom commands (11); `/tasks` (9); `/remember`, `/memory` (13); `/profile` (14); `trust` subcommand (15); `/mcp` (16); `-c` excludes children and `--session` refuses a child id (17). |
 
 Crate API changes that are not in the six families: `SessionOpen`
 replaces the parameters of `SessionMeta::now` and `SessionStore::create`
 (step 2); `Runtime::open` replaces `open_session` and `engine`,
 `Engine::new` takes `EngineParts`, and core gains `Route` and
 `ProviderHost` (5); `RunConfig` carries the route origin (5); core gains
-`lexical` (13), `HookHost` (15), and `ToolContext` on
-`ToolHost::run_approved` (17); the tools crate exports its environment
-builder (15). Each step names its share.
+`Judge`, its request and reply types, and `LoopHost` on `EngineParts`
+(8a), `lexical` (13), and `ToolContext` on
+`ToolHost::run_approved` (17); hooks implement `LoopHost` (15); the tools
+crate exports its environment builder (15). Each step names its share.
 
 ## Dependencies
 
@@ -1040,6 +1314,8 @@ Not added, with the reason:
   precedent. Step 16 measures the official Rust SDK's size before it
   decides, and records the receipt.
 - A search-engine crate. BM25 over short documents is a small module.
+- A client crate for the judge API. No Rust client exists, and the
+  request is one JSON `POST` over the existing HTTP client.
 
 ## Build order
 
@@ -1052,8 +1328,10 @@ assembles the bank rather than invents it.
 
 ### 1. M3 plan
 
-This document, merged in PR #18. This revision adds step 3 and
-renumbers the later steps. *Verify: review.*
+This document, merged in PR #18. PR #19 added step 3 and
+renumbered the later steps. The 2026-09-22 revision adds steps 8a to 8c
+for judgments. Letters keep the later step numbers stable.
+*Verify: review.*
 
 ### 2. `openai-compat` and named provider instances
 
@@ -1252,6 +1530,125 @@ renumbers the later steps. *Verify: review.*
 - **Done when:** the smoke part of exit criterion 9 holds.
 - **Measure:** the smoke subset's CI duration is logged, not gated.
 
+### 8a. The judge contract and logged checks
+
+- **Outcome:** a configured judge answers the built-in checks in every
+  session, and the session file records each answer. The loop's
+  behavior does not change yet.
+- **Scope:** `Judge` and its request and reply types in core; `LoopHost`
+  on `EngineParts`; the `typesafe` kind with its retries; judge slots in
+  `ProviderHost`; `[judgments] instance`, `checks` at `off` and `log`,
+  and `max_calls`; the state builder and its caps; the four built-in
+  checks at `log`, with approval in shadow; the `judgment` record;
+  `doctor`; `dmz login` for a `typesafe` instance; the mock route and
+  API fixtures; the [`prior-art.md`](prior-art.md) row; the `AGENTS.md`
+  contract list; the trust lines and the [`config.md`](config.md) update.
+- **Depends on:** steps 4 (instance login), 5 (`EngineParts` and
+  `ProviderHost`), and 8 (the smoke runner).
+- **Crates:** `demerzel-core`, `demerzel-providers`, `demerzel`,
+  `demerzel-mock`.
+- **Contracts:** provider trait none, and the new `Judge` trait beside
+  it; engine events none; tools none; config `kind = "typesafe"`,
+  `judgments.instance`, `.checks`, `.max_calls`; session the `judgment`
+  record; CLI `login <instance>` accepts a `typesafe` instance.
+- **Compatibility:** without `[judgments]`, the harness sends no judgment
+  request and writes no record. Old binaries skip the `judgment` record.
+- **Verify:** hermetic tests against the mock:
+  - one request carries every question of one event;
+  - each answer type maps to the reply;
+  - 401, 422, 429 with `retry-after`, 529, and a timeout;
+  - a `log` check changes no event, no tool result, and no request byte
+    to the main model;
+  - the approval shadow leaves the policy's decision unchanged;
+  - the state caps and the cut order;
+  - the call cap stops checks with one notice;
+  - a project file cannot set `instance` or raise a check;
+  - a role that names a `typesafe` instance stops at boot;
+  - `doctor` lists the judge and notes an alias model id.
+
+  Fixtures from the API reference cover each answer type, an unknown
+  optional field, and a pinned and an alias model id. A smoke task runs
+  with a scripted judge. Dogfood: real sessions in this repository with
+  every check at `log`.
+- **Done when:** the tests pass, and the dogfood records hold at least
+  200 asks with both the judge's answer and the user's answer.
+- **Measure:** judge latency, p50 and p90, from the records on both
+  reference machines. The turn bench gains `turn_text_judged`, with a
+  mock judge at `log`; it stays within noise of `turn_text_compat`.
+  Boot and idle stay unchanged.
+
+### 8b. Judgment actions and rules
+
+- **Outcome:** the judge changes the loop. It warns, adds notes, skips
+  questions for safe calls, adds questions for risky calls in `auto`
+  mode, and enforces rules in plain language.
+- **Scope:** the `warn`, `note`, `act`, and `deny` actions; the approval
+  rules for `ask` and `auto`; `[[judgments.rules]]`; the `Judgment`
+  engine event; the finding on the tool card and on the approval
+  question; `/judgments`; the `approval` answer value `judge`; the risky
+  fixture set under `bench/eval/`; the gate report; the `config.md`
+  update.
+- **Depends on:** step 8a and its dogfood records.
+- **Crates:** `demerzel-core`, `demerzel`, `demerzel-tui`.
+- **Contracts:** provider trait none; engine events `Judgment`; tools
+  none; config the `warn`, `note`, and `act` actions and
+  `judgments.rules`; session `answer` gains `judge`; CLI `/judgments`.
+- **Compatibility:** checks at `log` behave as in step 8a. Every default
+  stays at `log`.
+- **Verify:** tests with a scripted judge:
+  - `warn` emits the event;
+  - `note` appends to the next tool result and to nothing else;
+  - an `act` approval runs a call without the question and grants
+    nothing for the session;
+  - a judge approval never applies in `read-only` mode;
+  - `auto` mode asks about a call rated destructive, and a run without
+    an approval prompt refuses it;
+  - a timeout leaves the policy's decision unchanged;
+  - a rule denies a call with its reason, and both records name it;
+  - a project rule cannot approve;
+  - the engine refuses a host change from deny to allow;
+  - subagent calls pass the same checks.
+
+  A live gate runs on the reference backend. The gate needs no approval
+  across a risky set of at least 100 calls. It also needs no shadow
+  approval of a call that the user denied in the step 8a records. The report gives each check's
+  precision at its threshold. Dogfood: a session in `ask` mode with
+  `approval = "act"`, and a rule that refuses edits under a protected
+  path.
+- **Done when:** the tests pass, the live gate passes, and the report is
+  in this plan.
+- **Measure:** approval questions per session with and without `act`;
+  the dispatch latency that rules and approval add, p50 and p90.
+
+### 8c. A judge over a compatible instance
+
+- **Outcome:** a user without the reference service runs judgments on a
+  local or hosted Chat Completions server that returns log
+  probabilities.
+- **Scope:** the log-probability judge in `demerzel-providers`;
+  `openai-compat` instances as `judgments.instance`; the question
+  framing for each type; at most 8 requests in flight; the `doctor`
+  notice for a server without log probabilities; the mock fixtures; the
+  calibration report.
+- **Depends on:** steps 2 and 8b (the labeled set and the risky set).
+- **Crates:** `demerzel-providers`, `demerzel`, `demerzel-mock`.
+- **Contracts:** provider trait none; engine events none; tools none;
+  config `judgments.instance` accepts an `openai-compat` instance;
+  session none; CLI none.
+- **Compatibility:** the reference backend keeps its behavior.
+- **Verify:** tests: `YesNo`, `Choice`, and `Score` answers from fixture
+  log probabilities, normalized over the labels; a reply with too little
+  mass on the labels fails the question and leaves the policy's decision
+  unchanged; a server without log probabilities gets the `doctor`
+  notice; `doctor` warns when `approval = "act"` names this backend.
+  Live: a local server on the Linux reference machine answers the
+  labeled set and the risky set.
+- **Done when:** the tests pass and the calibration report is in this
+  plan. The report compares reliability and the approval gate with the
+  reference backend.
+- **Measure:** latency per event on the local server; the calibration
+  report.
+
 ### 9. Background tasks
 
 - **Outcome:** a session can start a server, use it, and stop it.
@@ -1397,12 +1794,13 @@ renumbers the later steps. *Verify: review.*
 - **Outcome:** a user runs a script at loop events, blocks a tool call
   from it, and adds context to a turn; project hooks run only after an
   explicit grant.
-- **Scope:** `HookHost` in core and on `EngineParts`; the subprocess
-  runner with the exported environment builder; the six events and
+- **Scope:** hooks as a `LoopHost` implementation, before the judgment
+  rules; the subprocess runner with the exported environment builder;
+  the six events and
   their JSON; `[[hooks]]`; the `hook` record and the `answer` value;
   `trust.json`; `dmz trust`; the first-prompt question; the one-shot
   skip; the `config.md` update.
-- **Depends on:** step 7.
+- **Depends on:** steps 7 and 8a (`LoopHost`).
 - **Crates:** `demerzel-core`, `demerzel-tools`, `demerzel`,
   `demerzel-tui` (the trust question through the approval channel).
 - **Contracts:** provider trait none; engine events none; tools none;
@@ -1415,7 +1813,8 @@ renumbers the later steps. *Verify: review.*
   `turn_start` only; a project hook stays off without a grant; an
   edited definition asks again; a one-shot run skips with one notice.
   The trust question states that referenced code can change; a script-only
-  edit keeps the grant, while revocation blocks the next run.
+  edit keeps the grant, while revocation blocks the next run. A hook
+  deny ends the call before any judgment rule runs.
   Dogfood: a `tool_before` hook in this repository that refuses
   `git push`.
 - **Done when:** the hook part of exit criterion 3 holds.
@@ -1504,7 +1903,7 @@ renumbers the later steps. *Verify: review.*
   `meta.prompt_hash`, `meta.tools_hash`, and `tool_set` records;
   joined parent and child evidence; the process probe for
   memory and I/O; one local Harbor run; the bank at 10 to 20 tasks.
-- **Depends on:** steps 8, 16, and 17; every dogfood before it for the bank.
+- **Depends on:** steps 8, 8b, 16, and 17; every dogfood before it for the bank.
 - **Crates:** `demerzel-core` (hashes and tool-set records). The rest is Python.
 - **Contracts:** provider trait none; engine events none; tools none;
   config none; session `meta.prompt_hash`, `meta.tools_hash`, `tool_set`;
@@ -1584,7 +1983,7 @@ Made now, from the code and the recorded evidence:
   tools, cleanup at exit. No job control.
 - **The smoke runner lands early, from public fixtures.** Sanitized
   synthetic tasks replace the private-subset wording in `plan.md`, so
-  CI carries no private data and the gate guards steps 9 to 18.
+  CI carries no private data and the gate guards steps 8a to 18.
 - **One new crate.** `demerzel-memory` isolates SQLite, an exception to
   the second-consumer rule recorded above. The MCP client is a module
   of the tools crate until a second consumer arrives.
@@ -1616,6 +2015,28 @@ Made now, from the code and the recorded evidence:
 - **Credit rows before the code.** Step 10 adds the prior-art rows for
   the borrowed formats; step 12 adds the Source-rules exception for the
   discovery module.
+- **Judgments are the differentiator.** Decided 2026-09-22. A fast
+  judge answers typed questions. Code owns the thresholds, the actions,
+  and the policy.
+- **A judge is a second model contract.** It returns probabilities, not
+  text or tool calls, so it does not fit `Provider`.
+- **The reference backend first, a compatible backend second.** Any
+  backend that returns probabilities can serve. Step 8c keeps the
+  feature usable without the reference service.
+- **Log first, act on evidence.** Every check starts at `log`. A default
+  rises only with a recorded precision result.
+- **The judge moves a call one step.** It can remove a question or add
+  one. It never overrides `read-only` mode, a hook, or a rule, and it
+  grants nothing for the session.
+- **Judgments stay out of the prompt.** A note joins one tool result;
+  the prefix stays byte-stable.
+- **One loop seam for hooks and judgments.** `LoopHost` serves both.
+  Hooks run first, then rules, then the policy.
+- **Thresholds and the timeout are constants in M3.** A key waits for
+  records that show a user need.
+- **Lettered steps for the revision.** Steps 8a to 8c follow the smoke
+  runner, so the smoke subset guards them. The later numbers stay
+  stable.
 
 ## Reconciled decisions
 
@@ -1676,6 +2097,9 @@ commits; each step's block names its other checks.
 | 2 | `turn_text_compat` in the turn bench |
 | 3 | `turn_text_responses` in the turn bench |
 | 7 | one cache-hit replay for the stable prefix |
+| 8a | judge latency, p50 and p90, on both reference machines; `turn_text_judged` in the turn bench |
+| 8b | the approval gate report; approval questions per session with and without `act`; the dispatch latency of rules and approval |
+| 8c | the calibration report against the reference backend; latency per event on a local server |
 | 10 | the YAML parser size receipt |
 | 13 | the `rusqlite` size receipt; session-open cost with 10,000 facts |
 | 15 | a turn-bench workload with a no-op `tool_before` hook |
@@ -1714,8 +2138,26 @@ shared registry, with parity tests over the commands, not the look.
 - **Subagent cost.** A nested engine can spend a session's budget.
   Mitigation: the call limit, the timeout, depth 1, and the usage
   events on the status.
-- **Scope creep.** Nineteen steps define the scope. A feature outside the
-  build order waits for the M4 plan.
+- **A hosted judge.** The reference backend is a paid, closed service.
+  Its price, limits, or model can change, and an alias can move.
+  Mitigation: the judge contract, the compatible backend in step 8c,
+  pinned model ids in tuned configs, the answering model id in every
+  record, and the fallback to the policy on any failure.
+- **False approvals.** A wrong `act` approval runs a harmful command.
+  Mitigation: `act` is opt-in; the step 8b gate; `read-only` mode,
+  hooks, and rules stay above it; one approval covers one call.
+- **Judgment latency.** A check on the critical path slows the loop.
+  Mitigation: `log` and `warn` checks run beside the model call; one
+  request for each event; code filters; the 2-second timeout.
+- **Data egress.** A judge receives tool input and output. Mitigation:
+  only the user file turns judgments on; the state caps; `doctor` names
+  the judge.
+- **Calibration drift.** A new judge version moves answers. Mitigation:
+  records name the answering version; the gate report runs again when a
+  pinned id changes.
+- **Scope creep.** Nineteen numbered steps and three lettered steps
+  define the scope. A feature outside the build order waits for the M4
+  plan.
 
 ## Close-out
 

@@ -17,6 +17,11 @@ Three pillars, in order:
 3. **Lightweight and fast** — jcode-class boot time and memory footprint, backed by
    a published, reproducible benchmark suite instead of a README claim.
 
+The differentiator is **judgments**, decided 2026-09-22. A fast judge model
+works beside the main model. It answers narrow questions about the loop with
+probabilities. Code applies the thresholds and picks the action. See
+[Judgments](#judgments-a-fast-model-beside-the-main-model).
+
 License: MIT. Plan adopted 2026-07-31.
 
 **Implementation status (2026-09-06):** M0 through M2 are complete.
@@ -212,6 +217,66 @@ Decisions from the alignment review of 2026-08-23 (the M2 close-out):
   Lines 7,876 to 15,618; direct dependencies 18 to 23, all named in
   milestone plans.
 
+### Judgments: a fast model beside the main model
+
+Decided 2026-09-22. Judgments are the harness's differentiator.
+
+The main model writes text and tool calls. A judge is a second, fast
+model. It answers narrow questions about the loop's state. It returns
+probabilities, not text. Three question types cover the need:
+
+| Type | Answer |
+|---|---|
+| yes/no | the probability of yes |
+| choice | one option from a set, with a probability for each option |
+| score | a position on 2 to 10 ordered levels, with a probability for each level |
+
+Code applies the thresholds and picks the action. The judge decides what
+a thing is. Code decides what follows.
+
+Where judgments act:
+
+- After a tool call: did the call fail although it reports success? Does
+  it repeat a failed action?
+- Before a tool call: is the call safe and inside the user's request?
+  `ask` mode can then skip a question, and `auto` mode can add one.
+  Rules that a user writes in plain language also apply here, for
+  example "do not change files under `src/auth/`".
+- At the end of a turn: does the final message claim a result that the
+  tool evidence does not show?
+
+Rules:
+
+- **Neutral by construction.** A judge contract sits beside the provider
+  contract. The reference backend is the TypeSafe System One API, which
+  serves the Jev model. The second backend is a Chat Completions server
+  that returns log probabilities. No backend is privileged.
+- **Off the prompt.** Judgments never enter the system prompt or the tool
+  definitions. A finding reaches the model only inside a tool result,
+  as a note or a deny reason, so the cached prefix stays byte-stable.
+- **Code owns the policy.** Thresholds and actions live in code and
+  config. A judgment cannot override `read-only` mode, a hook, or a
+  rule. A failed or late judgment falls back to the approval policy.
+- **Evidence before action.** Each check starts in log-only mode. The
+  session file records every answer, so thresholds can change without
+  new calls. A default action changes only with a measured precision
+  result.
+- **Explicit egress.** A judge receives tool input and output, as the
+  main model does. Only the user file names the judge instance. A project
+  file cannot turn judgments on.
+- **Cheap enough for every tool call.** The reference API documents about
+  100 ms per request and bills input tokens only. Checks that only record
+  or warn run at the same time as the next model call.
+
+The [M3 plan](m3-plan.md#judgments) holds the contract, the checks, and
+the build steps. Later uses wait for evidence:
+
+- routing each turn to a role;
+- ranking skills and tools before the harness advertises them;
+- ranking memory recall;
+- choosing facts at compaction;
+- grading in the evaluation runner.
+
 ### Sessions
 
 Append-only JSONL, one file per session, project-scoped under XDG data. The
@@ -369,6 +434,8 @@ score:
   sessions — proves prefix discipline.
 - Memory recall precision on replayed sessions with known relevant facts —
   gates the optional move from BM25 to embeddings.
+- Judgment precision and recall at each check's threshold, on labeled
+  session records. The result gates each check's default action.
 
 ### Evaluation contract
 
@@ -492,6 +559,9 @@ The `openai-compat` adapter with named provider instances lands first.
 The general `openai-responses` adapter follows in a separate step.
 Later steps add:
 
+- judgments: the judge contract, the reference backend, the built-in
+  checks, approval judgments, and rules in plain language, then a second
+  backend over a compatible server;
 - skills and hooks;
 - an MCP client with deferred discovery;
 - subagents with typed results;
@@ -505,7 +575,9 @@ Artifact and state-oracle interfaces support a private bank of 10 to 20
 tasks from reproduced dogfood failures. CI runs 3 to 5 hermetic smoke tasks.
 Plan: [`m3-plan.md`](m3-plan.md).
 **Verify:** local Chat Completions and hosted Responses tool sessions,
-with resume and fixtures from independent implementations; a skill, a hook,
+with resume and fixtures from independent implementations; a judge records
+every check in real sessions, and approval judgments never approve a call
+from the labeled risky set; a skill, a hook,
 and an MCP server exercised in a real session; discovery picks up a repo's
 existing `.claude`/`.cursor` config with zero edits; a fact saved in one
 session comes back in a fresh session inside the token budget; the smoke
@@ -518,8 +590,11 @@ Terminal-Bench 3.0 as the headline track, Terminal-Bench 2.1 as the
 longitudinal track, SWE-bench Verified as the repository-repair track, and
 fixed-model A/B pairs against a minimal scaffold and one reproducible
 production harness — same model snapshot, effort, budgets, task versions,
-and environment. Then profile against Layer 1/2 gates; land prefix
-stability, compaction with distillation into memory, connection reuse.
+and environment. The pairs include Demerzel with judgments on and off.
+The differentiator claim needs that paired result. Routing each turn to a
+role by judgment waits for the same evidence. Then profile against
+Layer 1/2 gates; land prefix stability, compaction with distillation
+into memory, connection reuse.
 The M2.5 close-out adds two targeted follow-ups after the public baseline:
 
 1. Bound layout retention for transcript blocks outside the viewport.
@@ -579,7 +654,8 @@ claim.
 - Governance, organization policy, audit surfaces, budget refusal — gone with
   the archive, not deferred.
 - Hosted anything: no gateway, no relay, no telemetry endpoint. Network egress
-  is model providers and MCP servers the user configured, nothing else.
+  is model providers, the judge instance, and MCP servers the user
+  configured, nothing else.
 - IDE plugins, browser IDE, editor embedding (ACP support may ride the session
   API later; not a launch goal).
 - Fleet management: Demerzel stays the terminal agent.
