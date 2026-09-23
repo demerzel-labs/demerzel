@@ -1,0 +1,16 @@
+: fixture: the baseline text reply with a usage chunk
+: source: https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events
+: read: 2026-09-22; the page carries no revision
+: shape: the documented chunks with `obfuscation`; ids are synthetic. Usage follows in a
+: chunk with empty choices, and every other chunk carries usage null.
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"new-model-2026","system_fingerprint":"fp_synthetic","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"a1b2c3"}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"new-model-2026","system_fingerprint":"fp_synthetic","choices":[{"index":0,"delta":{"content":"Hello"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"d4e5"}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"new-model-2026","system_fingerprint":"fp_synthetic","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null,"obfuscation":""}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"new-model-2026","system_fingerprint":"fp_synthetic","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0}},"obfuscation":"f6"}
+
+data: [DONE]
+

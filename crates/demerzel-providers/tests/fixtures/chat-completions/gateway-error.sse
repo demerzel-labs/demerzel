@@ -1,0 +1,8 @@
+: fixture: a gateway reply that fails in band after status 200
+: source: https://openrouter.ai/docs/api_reference/streaming.md
+: read: 2026-09-22; the page carries no revision
+: shape: the documented in-band error chunk; ids are synthetic. The chunk holds an error
+: and a choice with finish_reason error, and the stream ends after it.
+
+data: {"id":"cmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"vendor/new-model-2026","provider":"synthetic","error":{"code":"server_error","message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+

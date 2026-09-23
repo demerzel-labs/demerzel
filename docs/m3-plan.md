@@ -12,13 +12,16 @@ ordered, verifiable steps. It follows the shape of
 **Checked 2026-09-06:** M0 through M2.5 are complete, with both close-outs.
 This plan is step 1 of M3. No M3 code exists yet.
 
-Start the next work in this order:
+Step 2 landed on `main` on 2026-09-22. Its dogfood receipt is pending;
+see the step's build notes. Start the next work in this order:
 
-1. Branch `agent/m3-openai-compat` from `main`.
-2. Build step 2 from the [build order](#build-order): the
-   `openai-compat` adapter, the `kind` key, and named provider instances.
-3. Build the general Responses adapter as step 3, in a separate pull request.
-4. Follow the remaining steps in order. Each step names its dependencies.
+1. Record the step 2 dogfood on a machine with a local compatible
+   server.
+2. Build the general Responses adapter as step 3. Add its row to
+   `adapter_rules`.
+3. Follow the remaining steps in order. Each step names its dependencies.
+   Until Daniel restores pull requests, commit each step to `main` under
+   the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
 
 Steps 8a to 8c add [judgments](#judgments), the milestone's
 differentiator. Read that design before step 5, because `EngineParts`
@@ -244,10 +247,18 @@ Rules:
   instance's key first and on the shipped catalog by `kind` and model
   second.
 - Credentials resolve in this order:
-  1. The variable that `api_key_env` names.
-  2. The auth store section for the instance.
+  1. The variable that `api_key_env` names. A named variable that is
+     unset or empty stops the turn and names the variable; it does not
+     fall through.
+  2. The auth store section for the instance (step 4).
   3. None. An instance without a key sends no `Authorization` header.
      A local server needs none.
+- An adapter with credentials of its own, a login or a key, serves its
+  implicit instance and each named instance at its default endpoint. A
+  named instance with a `base_url` of its own names its key in
+  `api_key_env`, or the run stops at boot. The adapter's key never
+  reaches an endpoint that the user did not name it for. Decided at
+  step 2 (2026-09-22), after the review found the leak.
 - Credentials resolve at the first turn, not at boot, as today. The
   provider host holds one lazy slot per configured instance; a failed
   build is not kept, so a login that lands between two prompts takes
@@ -304,17 +315,26 @@ Stream mapping:
   carries readable text and a `SealedPayload`. Its data preserves each
   original field name and its complete text. The payload records the
   adapter, instance, and model; `sealed` means opaque state, not encryption.
-- `delta.tool_calls[]` accumulates by `index`. The first fragment with
-  an `id` and a `function.name` emits `ToolCallStart`. Each argument
-  fragment emits `ToolCallDelta`. The terminal chunk emits one
-  `ToolCallEnd` per accumulated call, whatever `finish_reason` says.
+- `delta.tool_calls[]` accumulates by `index`. `ToolCallStart` waits
+  for the call's first argument text, because a local server can
+  re-send a grown `id` and `function.name` before its arguments. Each
+  repeat before the start overwrites the last. Each argument fragment
+  emits `ToolCallDelta`. The terminal chunk emits one `ToolCallEnd` per
+  accumulated call, whatever `finish_reason` says.
 - `finish_reason` maps `tool_calls` to `ToolUse`, `length` to
   `MaxTokens`, and `content_filter` to `Refusal`. `stop` maps to
-  `ToolUse` when a call accumulated and to `EndTurn` otherwise.
-- The usage chunk with empty `choices` maps `prompt_tokens`,
-  `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
+  `ToolUse` when the reply sent a call and to `EndTurn` otherwise. A
+  gateway can repeat the finish chunk: the first reason holds, and the
+  call flag lasts for the whole reply. `error`, `insufficient_system_resource`, `abort`, and
+  `aborted` fail the call. `delta.refusal` maps to `TextDelta` and ends
+  the turn with `Refusal`.
+- Usage arrives in a chunk with empty `choices`, or on the last chunk
+  with a choice. The adapter maps `prompt_tokens`,
+  `completion_tokens`, and `prompt_tokens_details.cached_tokens`, with
+  `prompt_cache_hit_tokens` as the cache fallback.
   `data: [DONE]` ends the stream. A stream that ends without `[DONE]`
-  is a protocol error, as with the two shipped adapters.
+  is a protocol error, as with the two shipped adapters. An `error`
+  payload fails the call.
 - Tool results go out as `role: tool` messages, one per result, with
   `tool_call_id`. Matching reasoning payloads restore the original fields
   on their assistant messages, including after resume. They never come
@@ -1276,9 +1296,9 @@ contract.
 | Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 19 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. Step 8a adds the `Judge` trait beside it, with `id` and `ask`. The judge is a second model contract; step 8a adds it to the `AGENTS.md` contract list. |
 | Engine events | `ModelStart { provider, model }` (step 6); `Judgment { call_id, source, action, text }` (8b); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
 | Tool names and schemas | `bash` gains `background` (step 9); new tools `task_output`, `task_stop` (9), `skill` (10), `memory_save`, `memory_search`, `memory_forget` (13), `profile_propose` (14), `search_tools` and `<server>__<tool>` (16), `agent` and `submit_result` (17). |
-| Config keys | `providers.<name>.kind`, `.api_key_env` (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `kind = "typesafe"` as a new value, `[judgments] instance`, `checks` with `off` and `log`, `max_calls` (8a); the `warn`, `note`, and `act` actions and `[[judgments.rules]] event`, `tool`, `ask`, `threshold`, `action`, `reason` (8b); `openai-compat` instances as `judgments.instance` (8c); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
-| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `judgment` record (8a); the `answer` value `judge` (8b); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
-| CLI | `login <instance>` for both compatible adapters (4); `/model <provider> <model>` (6); `login <instance>` for a `typesafe` instance (8a); `/judgments` (8b); `/skill` (10); custom commands (11); `/tasks` (9); `/remember`, `/memory` (13); `/profile` (14); `trust` subcommand (15); `/mcp` (16); `-c` excludes children and `--session` refuses a child id (17). |
+| Config keys | `providers.<name>.kind`, `.api_key_env`, and instance names as `provider` values (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `kind = "typesafe"` as a new value, `[judgments] instance`, `checks` with `off` and `log`, `max_calls` (8a); the `warn`, `note`, and `act` actions and `[[judgments.rules]] event`, `tool`, `ask`, `threshold`, `action`, `reason` (8b); `openai-compat` instances as `judgments.instance` (8c); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
+| Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added; `SealedPayload` becomes non-exhaustive (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `judgment` record (8a); the `answer` value `judge` (8b); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
+| CLI | `--provider` and `DEMERZEL_PROVIDER` take instance names (2); `login <instance>` for both compatible adapters (4); `/model <provider> <model>` (6); `login <instance>` for a `typesafe` instance (8a); `/judgments` (8b); `/skill` (10); custom commands (11); `/tasks` (9); `/remember`, `/memory` (13); `/profile` (14); `trust` subcommand (15); `/mcp` (16); `-c` excludes children and `--session` refuses a child id (17). |
 
 Crate API changes that are not in the six families: `SessionOpen`
 replaces the parameters of `SessionMeta::now` and `SessionStore::create`
@@ -1348,10 +1368,14 @@ for judgments. Letters keep the later step numbers stable.
 - **Depends on:** nothing.
 - **Crates:** `demerzel-providers`, `demerzel`, `demerzel-mock`,
   `demerzel-core`.
-- **Contracts:** provider trait none; engine events none; tools none;
-  config `providers.<name>.kind`, `.api_key_env`; session
+- **Contracts:** provider trait: `SealedPayload`, which travels in
+  `StreamEvent::ReasoningDone`, becomes non-exhaustive with `new`,
+  `with_identity`, and `replays_to`; engine events none; tools none;
+  config `providers.<name>.kind`, `.api_key_env`, and `provider` takes
+  instance names and the `openai-compat` value; session
   `meta.provider` redefined, `meta.kind`, `SealedPayload.model`, and
-  `SealedPayload.instance` added; CLI none.
+  `SealedPayload.instance` added; CLI `--provider` and
+  `DEMERZEL_PROVIDER` take instance names.
 - **Compatibility:** a table without `kind` keeps its meaning. The two
   shipped adapters stay implicit instances, and their `meta.provider`
   spelling is unchanged. Old session files read.
@@ -1374,6 +1398,40 @@ for judgments. Letters keep the later step numbers stable.
   passes.
 - **Measure:** the turn bench gains `turn_text_compat`; boot and idle are
   unchanged because the provider builds at the first turn.
+- **Build notes (2026-09-22):**
+  - The runtime keeps its one lazy provider slot, because a run uses
+    one instance until routing arrives. Step 5's `ProviderHost` adds one
+    slot per instance.
+  - `demerzel_providers::adapter_rules` states each adapter's rules
+    once: a required endpoint, implicit effort, a key variable, and
+    credentials of its own. The boot check, `doctor`, the first-run
+    screen, and the effort rule read it. Step 3 adds one row.
+  - The effort rule and the first-run check read the head instance.
+    Step 5 must apply them per route target, from the target's rules.
+  - A level counts as set for an adapter without implicit effort only
+    from a flag, a variable, the instance's own table, or `/effort`. A
+    top-level `effort` belongs to no instance. An adapter without a
+    default model takes a top-level `model` only from a layer that
+    names the instance.
+  - `config::Instance` and `config::instance_problems` serve `doctor`
+    and the boot check. Step 6 needs every chain target resolved under
+    the same trust rules: add one `resolve_instance` then, and let
+    `Settings` hold the head's result.
+  - `api_key_env` also serves an `anthropic` instance.
+  - A switch record starts from the session's last meta record, so the
+    fields that steps 17 and 18 add stay on each record.
+  - The fixtures reproduce the documented streams of six
+    implementations, with the source and the read date in each file.
+  - The dogfood receipt is pending: the Mac that built the step runs no
+    local model server. It lands as a follow-up commit from a machine
+    with one, and it names the server, the model, and the revision.
+  - Crate API: `EngineConfig` becomes non-exhaustive and gains
+    `instance`; `RunConfig` gains `kind`, `api_key_env`, and
+    `effort_set`; `SessionSettings` gains `effort_set`,
+    `implicit_effort`, and `request_effort`; `Settings.model` becomes
+    optional and `Settings` gains `kind`, `api_key_env`, `effort_set`,
+    and `problems`; `PROVIDER_IDS` lists adapter ids, the `kind`
+    values; `Session::meta` returns the last meta record.
 
 ### 3. General Responses API adapter
 

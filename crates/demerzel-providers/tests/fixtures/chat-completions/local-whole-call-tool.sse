@@ -1,0 +1,16 @@
+: fixture: a local server reply that reasons, then sends one whole tool call
+: source: Ollama openai/openai.go and middleware/openai.go; https://docs.ollama.com/api/openai-compatibility.md
+: read: 2026-09-22 at main 13e0247 (release v0.34.3); the docs have no stream example, so the shape comes from source
+: shape: ids and text are synthetic. Reasoning arrives in `reasoning`, each call arrives
+: whole in one delta, and usage follows in a chunk with empty choices.
+
+data: {"id":"chatcmpl-17","object":"chat.completion.chunk","created":1758500000,"model":"new-local-model:latest","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"Search for the symbol."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-17","object":"chat.completion.chunk","created":1758500000,"model":"new-local-model:latest","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_synthetic_17","index":0,"type":"function","function":{"name":"grep","arguments":"{\"pattern\":\"fn main\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-17","object":"chat.completion.chunk","created":1758500000,"model":"new-local-model:latest","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-17","object":"chat.completion.chunk","created":1758500000,"model":"new-local-model:latest","system_fingerprint":"fp_ollama","choices":[],"usage":{"prompt_tokens":50,"prompt_tokens_details":{"cached_tokens":10},"completion_tokens":15,"total_tokens":65}}
+
+data: [DONE]
+

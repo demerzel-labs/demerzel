@@ -447,7 +447,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             continue;
                         }
                         settings.effort = level;
-                        eprintln!("{}", effort_note(settings.effort));
+                        settings.effort_set = true;
+                        eprintln!("{}", effort_note(Some(settings.effort)));
                         continue;
                     }
                     Some(Effect::SetApproval(mode)) => {

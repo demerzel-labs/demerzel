@@ -13,7 +13,7 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use demerzel_core::{ApprovalMode, ContentBlock, Message, Role, SessionStore};
+use demerzel_core::{ContentBlock, Message, Role, SessionOpen, SessionStore};
 use demerzel_mock::{MockResponse, MockServer};
 use demerzel_providers::auth::NO_CREDENTIALS_HELP;
 use serde_json::{Value, json};
@@ -2218,13 +2218,12 @@ async fn a_resumed_file_over_the_cap_names_the_messages_it_leaves_out() {
     // after the screen opens.
     let store = SessionStore::at(pty.data_dir());
     let mut session = store
-        .create(
+        .create(&SessionOpen::new(
             &pty.project(),
             "openai-codex",
+            "openai-codex",
             "gpt-test",
-            None,
-            ApprovalMode::Ask,
-        )
+        ))
         .unwrap();
     for index in 0..202 {
         let role = if index % 2 == 0 {

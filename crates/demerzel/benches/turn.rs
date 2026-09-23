@@ -1,12 +1,14 @@
 //! Layer-2 benchmark: per-turn latency against a local mock endpoint.
 //!
-//! Three benches decompose the number:
+//! The benches decompose the number:
 //! - `transport_floor`: one bare HTTP POST to the mock, full body
 //!   read. Everything below the harness: localhost round-trip, mock
 //!   parse, SSE serialize.
 //! - `turn_text`: one full engine turn with a text-only reply. The
 //!   harness-added latency is `turn_text - transport_floor`.
 //! - `turn_read_tool`: a turn with one read dispatch, two model calls.
+//! - `turn_text_compat`: `turn_text` through a named `openai-compat`
+//!   instance on the Chat Completions route.
 //!
 //! The bench drives `demerzel::Runtime`, the same wiring the
 //! interfaces use. Session and engine construction, and session-file
@@ -26,6 +28,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use demerzel::{AuthPaths, RunConfig, Runtime};
 use demerzel_core::{ApprovalMode, EngineEvent, NoPrompt, TurnOutcome};
 use demerzel_mock::codex::{text_turn, tool_turn};
+use demerzel_mock::compat;
 use demerzel_mock::{MockResponse, MockServer};
 use serde_json::json;
 
@@ -54,6 +57,12 @@ struct Bed {
 
 impl Bed {
     fn start(script: Vec<MockResponse>) -> Self {
+        Self::start_with(script, |_| {})
+    }
+
+    /// A bed whose run config `adjust` edits before the runtime
+    /// builds.
+    fn start_with(script: Vec<MockResponse>, adjust: impl FnOnce(&mut RunConfig)) -> Self {
         let root = bench_root();
         let server_rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -83,6 +92,7 @@ impl Bed {
             store: auth_path,
             codex_cli: None,
         });
+        adjust(&mut config);
         let runtime = Runtime::new(config).expect("build the harness runtime");
 
         Self {
@@ -188,6 +198,27 @@ fn bench_turns(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     total += bed.timed_turn(4).await;
+                }
+                total
+            }
+        })
+    });
+    drop(bed);
+
+    // `turn_text` through a named compatible instance: the same turn
+    // on the Chat Completions route, with no credential.
+    let bed = Bed::start_with(vec![compat::text_turn("done")], |config| {
+        config.provider = "bench-compat".into();
+        config.kind = Some("openai-compat".into());
+        config.base_url = config.base_url.take().map(|url| format!("{url}/v1"));
+    });
+    c.bench_function("turn_text_compat", |b| {
+        b.to_async(&bench_rt).iter_custom(|iters| {
+            let bed = &bed;
+            async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    total += bed.timed_turn(2).await;
                 }
                 total
             }

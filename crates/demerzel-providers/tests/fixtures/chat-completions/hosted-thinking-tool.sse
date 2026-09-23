@@ -1,0 +1,24 @@
+: fixture: a hosted thinking-mode reply that reasons, then calls one tool
+: source: https://api-docs.deepseek.com/guides/thinking_mode/ and https://api-docs.deepseek.com/api/create-chat-completion
+: read: 2026-09-22; the pages carry no revision, newest change-log entry 2026-09-10
+: shape: documented chunk fields; ids and text are synthetic. Usage rides the last
+: choice chunk, not a chunk of its own, and every other chunk carries usage null.
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"reasoning_content":"The user wants the manifest. ","role":null},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+: keep-alive
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"reasoning_content":"Read Cargo.toml first.","role":null},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_synthetic_1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Cargo.toml\"}"}}]},"finish_reason":null,"logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"synthetic-deepseek-1","choices":[{"index":0,"delta":{"content":"","role":null},"finish_reason":"tool_calls","logprobs":null}],"created":1758500000,"model":"deepseek-flash","system_fingerprint":"fp_synthetic","object":"chat.completion.chunk","usage":{"completion_tokens":30,"prompt_tokens":120,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":64},"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":56,"completion_tokens_details":{"reasoning_tokens":12}}}
+
+data: [DONE]
+

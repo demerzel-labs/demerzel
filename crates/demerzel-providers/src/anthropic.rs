@@ -582,13 +582,15 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                     // missing signature, and a sealed one would sit in
                     // the session file and fail every later turn. The
                     // summary still reaches the user.
-                    let sealed = (!signature.is_empty()).then(|| SealedPayload {
-                        provider: PROVIDER_ID.to_string(),
-                        data: json!({
-                            "type": "thinking",
-                            "thinking": thinking,
-                            "signature": signature,
-                        }),
+                    let sealed = (!signature.is_empty()).then(|| {
+                        SealedPayload::new(
+                            PROVIDER_ID,
+                            json!({
+                                "type": "thinking",
+                                "thinking": thinking,
+                                "signature": signature,
+                            }),
+                        )
                     });
                     vec![Ok(StreamEvent::ReasoningDone {
                         summary: thinking,
@@ -597,10 +599,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                 }
                 Some(Block::Redacted { data }) => vec![Ok(StreamEvent::ReasoningDone {
                     summary: String::new(),
-                    sealed: Some(SealedPayload {
-                        provider: PROVIDER_ID.to_string(),
-                        data,
-                    }),
+                    sealed: Some(SealedPayload::new(PROVIDER_ID, data)),
                 })],
                 Some(Block::Text) | None => Vec::new(),
             }

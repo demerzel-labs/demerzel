@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, StreamEvent};
-use crate::session::{Session, SessionMeta, Timing};
+use crate::session::{Session, SessionMeta, SessionOpen, Timing};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
 /// The fixed base system prompt.
@@ -44,9 +44,16 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Demerzel, a terminal coding age
 You work inside the user's project directory with the tools the harness provides. \
 Read a file before you edit it. Keep changes small and report what you did.";
 
-/// Per-session loop settings.
+/// Per-session loop settings. Non-exhaustive: build one with
+/// [`EngineConfig::new`] and set the fields, so a later field stays
+/// additive.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EngineConfig {
+    /// The provider instance name the session file records. `None`
+    /// names the adapter id, the implicit instance of a shipped
+    /// adapter.
+    pub instance: Option<String>,
     pub model: String,
     pub system_prompt: String,
     /// Model calls allowed for one user turn before the loop stops.
@@ -65,6 +72,7 @@ pub const DEFAULT_MAX_MODEL_CALLS: u32 = 128;
 impl EngineConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
+            instance: None,
             model: model.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             max_model_calls: DEFAULT_MAX_MODEL_CALLS,
@@ -282,13 +290,8 @@ impl<'a> Engine<'a> {
     /// to the model that produced it, and resending it to another
     /// model fails every later turn. The readable summaries stay.
     pub fn set_model(&mut self, model: &str) -> Result<(), EngineError> {
-        self.session.append_meta(&SessionMeta::now(
-            self.session.cwd(),
-            self.provider.id(),
-            model,
-            self.config.effort,
-            self.policy.mode,
-        ))?;
+        let meta = self.meta(model, self.config.effort, self.policy.mode);
+        self.session.append_meta(&meta)?;
         if model != self.config.model {
             for message in &mut self.history {
                 for block in &mut message.content {
@@ -411,7 +414,7 @@ impl<'a> Engine<'a> {
                     log::warn!(
                         "model call {calls} failed: provider={} model={} effort={effort} \
                          duration_ms={} error={}",
-                        self.provider.id(),
+                        self.instance(),
                         self.config.model,
                         timing.duration_ms(),
                         capped(&error.to_string(), MAX_TURN_ERROR_BYTES)
@@ -434,7 +437,7 @@ impl<'a> Engine<'a> {
                 log::info!(
                     "model call {calls}: provider={} model={} effort={effort} stop={} \
                      duration_ms={} {tokens}",
-                    self.provider.id(),
+                    self.instance(),
                     self.config.model,
                     stop.as_str(),
                     timing.duration_ms()
@@ -504,13 +507,8 @@ impl<'a> Engine<'a> {
     pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
         // The record first, the switch second: a failed write leaves
         // the engine where the interface still believes it is.
-        self.session.append_meta(&SessionMeta::now(
-            self.session.cwd(),
-            self.provider.id(),
-            &self.config.model,
-            Some(effort),
-            self.policy.mode,
-        ))?;
+        let meta = self.meta(&self.config.model, Some(effort), self.policy.mode);
+        self.session.append_meta(&meta)?;
         self.config.effort = Some(effort);
         Ok(())
     }
@@ -528,13 +526,8 @@ impl<'a> Engine<'a> {
         mode: ApprovalMode,
         tools: &'a dyn ToolHost,
     ) -> Result<(), EngineError> {
-        self.session.append_meta(&SessionMeta::now(
-            self.session.cwd(),
-            self.provider.id(),
-            &self.config.model,
-            self.config.effort,
-            mode,
-        ))?;
+        let meta = self.meta(&self.config.model, self.config.effort, mode);
+        self.session.append_meta(&meta)?;
         self.policy.mode = mode;
         self.tools = tools;
         // Snapshot on every switch: a host may vary its definitions,
@@ -544,6 +537,42 @@ impl<'a> Engine<'a> {
         // and the provider's cached prefix intact.
         self.tool_definitions = tools.definitions();
         Ok(())
+    }
+
+    /// The provider instance name the session file and the trace
+    /// record.
+    fn instance(&self) -> &str {
+        self.config
+            .instance
+            .as_deref()
+            .unwrap_or_else(|| self.provider.id())
+    }
+
+    /// A meta record for the current instance with these settings.
+    /// It starts from the session's last record and changes only what
+    /// a switch changes, so a field the opening record carries stays
+    /// on every later one.
+    fn meta(&self, model: &str, effort: Option<Effort>, approval: ApprovalMode) -> SessionMeta {
+        let mut open = SessionOpen::new(
+            self.session.cwd(),
+            self.instance(),
+            self.provider.id(),
+            model,
+        );
+        open.effort = effort;
+        open.approval = approval;
+        let fresh = SessionMeta::now(&open);
+        let Some(last) = self.session.meta() else {
+            return fresh;
+        };
+        let mut meta = last.clone();
+        meta.provider = fresh.provider;
+        meta.kind = fresh.kind;
+        meta.model = fresh.model;
+        meta.effort = fresh.effort;
+        meta.approval = fresh.approval;
+        meta.created = fresh.created;
+        meta
     }
 
     /// Append one message to the session file and the history, in that
@@ -1041,13 +1070,12 @@ mod tests {
 
     fn session_in(dir: &tempfile::TempDir) -> Session {
         SessionStore::at(dir.path())
-            .create(
+            .create(&SessionOpen::new(
                 dir.path(),
                 "scripted",
+                "scripted",
                 "test-model",
-                None,
-                ApprovalMode::Ask,
-            )
+            ))
             .unwrap()
     }
 
@@ -1515,10 +1543,7 @@ mod tests {
     #[test]
     fn reasoning_blocks_round_trip_into_the_next_request() {
         let dir = tempfile::tempdir().unwrap();
-        let sealed = SealedPayload {
-            provider: "scripted".into(),
-            data: json!({"blob": 1}),
-        };
+        let sealed = SealedPayload::new("scripted", json!({"blob": 1}));
         let provider = ScriptedProvider::new(vec![
             vec![
                 StreamEvent::ReasoningDelta("thinking".into()),
@@ -1806,6 +1831,31 @@ mod tests {
     }
 
     #[test]
+    fn a_named_instance_names_itself_and_its_adapter_in_every_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![text_done("one")]);
+        let tools = FakeTools;
+        let mut config = EngineConfig::new("test-model");
+        config.instance = Some("local".to_string());
+        let mut engine = Engine::new(
+            &provider,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            config,
+            session_in(&dir),
+        );
+        engine.set_model("other-model").unwrap();
+        engine.set_effort(Effort::Low).unwrap();
+
+        let replayed = replay(engine.session().path()).unwrap();
+        let meta = replayed.meta.unwrap();
+        assert_eq!(meta.provider, "local");
+        assert_eq!(meta.kind.as_deref(), Some("scripted"));
+        assert_eq!(meta.model, "other-model");
+        assert_eq!(meta.effort.as_deref(), Some("low"));
+    }
+
+    #[test]
     fn set_effort_reaches_later_requests_and_records_a_meta() {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
@@ -1932,10 +1982,10 @@ mod tests {
                 content: vec![
                     ContentBlock::Reasoning {
                         summary: "thought".into(),
-                        sealed: Some(SealedPayload {
-                            provider: "scripted".into(),
-                            data: json!({"sig": "model-a-only"}),
-                        }),
+                        sealed: Some(SealedPayload::new(
+                            "scripted",
+                            json!({"sig": "model-a-only"}),
+                        )),
                     },
                     ContentBlock::Text { text: "hey".into() },
                 ],

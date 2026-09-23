@@ -1,0 +1,13 @@
+: fixture: a self-hosted server that fails mid-stream, then sends [DONE]
+: source: vLLM vllm/entrypoints/openai/chat_completion/ and https://docs.vllm.ai/en/latest/features/reasoning_outputs/
+: read: 2026-09-22 at main d110c2f (release v0.30.0); the error shape comes from source
+: shape: text is synthetic. Reasoning arrives in `reasoning`; the error payload has no choices.
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"org/new-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1758500000,"model":"org/new-model","choices":[{"index":0,"delta":{"reasoning":"Start"},"logprobs":null,"finish_reason":null}]}
+
+data: {"error": {"message": "synthetic generation failure", "type": "InternalServerError", "param": null, "code": 500}}
+
+data: [DONE]
+

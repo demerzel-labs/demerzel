@@ -48,18 +48,40 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         &settings.provider.value,
         settings.provider.origin,
     )?;
-    print_setting(out, "model", &settings.model.value, settings.model.origin)?;
+    print_setting(
+        out,
+        "kind",
+        settings.kind.value.as_deref().unwrap_or("unknown"),
+        settings.kind.origin,
+    )?;
+    print_setting(
+        out,
+        "model",
+        settings.model.value.as_deref().unwrap_or("none"),
+        settings.model.origin,
+    )?;
+    if let Some(variable) = &settings.api_key_env.value {
+        print_setting(out, "api_key_env", variable, settings.api_key_env.origin)?;
+    }
     let approval = match settings.approval.value {
         Some(mode) => mode.to_string(),
         None => "ask in an interactive session, read-only for one-shot".to_string(),
     };
     print_setting(out, "approval", &approval, settings.approval.origin)?;
-    print_setting(
-        out,
-        "effort",
-        settings.effort.value.as_str(),
-        settings.effort.origin,
-    )?;
+    // An adapter without implicit effort receives only a set level.
+    let effort_sent = settings.effort_set
+        || settings
+            .kind
+            .value
+            .as_deref()
+            .and_then(demerzel_providers::adapter_rules)
+            .is_none_or(|rules| rules.implicit_effort);
+    let effort = if effort_sent {
+        settings.effort.value.as_str().to_string()
+    } else {
+        "default — not sent to this adapter".to_string()
+    };
+    print_setting(out, "effort", &effort, settings.effort.origin)?;
     print_setting(
         out,
         "max_model_calls",
@@ -107,7 +129,10 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         .unwrap_or("provider default");
     print_setting(out, "base_url", base_url, settings.base_url.origin)?;
     let context_window = settings.context_window.value.or_else(|| {
-        demerzel_providers::context_window(&settings.provider.value, &settings.model.value)
+        demerzel_providers::context_window(
+            settings.kind.value.as_deref()?,
+            settings.model.value.as_deref()?,
+        )
     });
     let context_window = match context_window {
         Some(window) => window.to_string(),
@@ -119,17 +144,13 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         &context_window,
         settings.context_window.origin,
     )?;
-    if !demerzel_providers::PROVIDER_IDS.contains(&settings.provider.value.as_str()) {
+    for problem in settings.problems() {
         problems += 1;
-        writeln!(
-            out,
-            "  problem: provider `{}` is not in this build; the build has: {}",
-            settings.provider.value,
-            demerzel_providers::PROVIDER_IDS.join(", ")
-        )?;
+        writeln!(out, "  problem: {problem}")?;
     }
 
-    report_credentials(&settings.provider.value, &mut problems, out)?;
+    report_instances(&config::instances(user.as_ref()), out)?;
+    report_credentials(&settings, &mut problems, out)?;
     // A read-only session never writes the project root, so a
     // non-writable root is only a note there.
     let read_only = settings.approval.value == Some(ApprovalMode::ReadOnly);
@@ -286,15 +307,95 @@ pub(crate) fn credential_states(store: &AuthStore, env_key: Option<&str>) -> [Cr
     [codex, anthropic]
 }
 
+/// List the instances the user file defines: the adapter, the
+/// endpoint, the model, and where the key comes from. Presence, not
+/// values: a key variable shows its name and whether it is set. An
+/// instance that could not run gets a warning; the active one's
+/// problems count above.
+fn report_instances(instances: &[config::Instance], out: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(out, "provider instances")?;
+    if instances.is_empty() {
+        writeln!(
+            out,
+            "  none in the user file; the adapters {} stand for themselves",
+            demerzel_providers::PROVIDER_IDS.join(", ")
+        )?;
+        return Ok(());
+    }
+    for instance in instances {
+        let Some(rules) = demerzel_providers::adapter_rules(&instance.kind) else {
+            continue;
+        };
+        let endpoint = match (&instance.base_url, rules.needs_endpoint) {
+            (Some(url), _) => url.as_str(),
+            (None, true) => "none — set base_url",
+            (None, false) => "the adapter's default",
+        };
+        let has_default = demerzel_providers::default_model(&instance.kind).is_some();
+        let model = match (&instance.model, has_default) {
+            (Some(model), _) => model.as_str(),
+            (None, false) => "none — set model",
+            (None, true) => "the adapter's default",
+        };
+        writeln!(
+            out,
+            "  {}: {} — endpoint {endpoint}, model {model}, key {}",
+            instance.name,
+            instance.kind,
+            key_state(instance.api_key_env.as_deref(), rules)
+        )?;
+        for problem in config::instance_problems(instance) {
+            writeln!(out, "  warning: {problem}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Where an instance's key comes from, by name and presence.
+fn key_state(api_key_env: Option<&str>, rules: demerzel_providers::AdapterRules) -> String {
+    match api_key_env {
+        Some(variable) if env_set(variable) => format!("from {variable} (set)"),
+        Some(variable) => format!("from {variable} (unset)"),
+        None if !rules.own_credentials => {
+            "none — requests carry no Authorization header".to_string()
+        }
+        None => "from the adapter's credentials below".to_string(),
+    }
+}
+
+fn env_set(variable: &str) -> bool {
+    std::env::var(variable).is_ok_and(|value| !value.is_empty())
+}
+
 /// Report every provider's credentials. Missing credentials count as
 /// a problem only for the active provider: the other provider's state
 /// is information, not a blocker.
 fn report_credentials(
-    active_provider: &str,
+    settings: &config::Settings,
     problems: &mut u32,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
     writeln!(out, "credentials")?;
+    let name = &settings.provider.value;
+    let kind = settings.kind.value.as_deref().unwrap_or("");
+    let rules = demerzel_providers::adapter_rules(kind);
+    // An instance with its own key variable, or an adapter without
+    // credentials of its own, reports its own line; the adapter lines
+    // below stay information.
+    let own_line =
+        settings.api_key_env.value.is_some() || rules.is_some_and(|rules| !rules.own_credentials);
+    if let Some(rules) = rules
+        && own_line
+    {
+        let variable = settings.api_key_env.value.as_deref();
+        let missing = variable.is_some_and(|variable| !env_set(variable));
+        if missing {
+            *problems += 1;
+        }
+        let prefix = if missing { "problem: " } else { "" };
+        writeln!(out, "  {prefix}{name}: key {}", key_state(variable, rules))?;
+    }
+    let active_provider = if own_line { "" } else { kind };
     let store = match AuthStore::open_default() {
         Ok(store) => store,
         Err(error) => {
@@ -455,6 +556,9 @@ fn scan_value(key: &str, path: &str, value: &toml::Value, out: &mut Vec<String>)
                 scan_value(key, path, item, out);
             }
         }
+        // `api_key_env` holds a variable's name, never the key; the
+        // config parser refuses any value that is not a name.
+        toml::Value::String(text) if key == "api_key_env" && !secret_value(text) => {}
         toml::Value::String(text) if secret_name(key) || secret_value(text) => {
             out.push(format!(
                 "`{path}` looks like a secret; move it to the auth store"

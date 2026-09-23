@@ -90,17 +90,14 @@ async fn serializes_the_request_per_the_messages_contract() {
             content: vec![
                 ContentBlock::Reasoning {
                     summary: "check the manifest first".into(),
-                    sealed: Some(SealedPayload {
-                        provider: "anthropic".into(),
-                        data: sealed_block.clone(),
-                    }),
+                    sealed: Some(SealedPayload::new("anthropic", sealed_block.clone())),
                 },
                 ContentBlock::Reasoning {
                     summary: "foreign".into(),
-                    sealed: Some(SealedPayload {
-                        provider: "openai-codex".into(),
-                        data: json!({"encrypted_content": "zzz"}),
-                    }),
+                    sealed: Some(SealedPayload::new(
+                        "openai-codex",
+                        json!({"encrypted_content": "zzz"}),
+                    )),
                 },
                 ContentBlock::Text { text: "ok".into() },
                 ContentBlock::ToolUse {

@@ -91,17 +91,11 @@ async fn serializes_the_request_per_the_codex_contract() {
             content: vec![
                 ContentBlock::Reasoning {
                     summary: "think".into(),
-                    sealed: Some(SealedPayload {
-                        provider: "openai-codex".into(),
-                        data: sealed_item.clone(),
-                    }),
+                    sealed: Some(SealedPayload::new("openai-codex", sealed_item.clone())),
                 },
                 ContentBlock::Reasoning {
                     summary: "foreign".into(),
-                    sealed: Some(SealedPayload {
-                        provider: "anthropic".into(),
-                        data: json!({"signature": "zzz"}),
-                    }),
+                    sealed: Some(SealedPayload::new("anthropic", json!({"signature": "zzz"}))),
                 },
                 ContentBlock::Text { text: "ok".into() },
                 ContentBlock::ToolUse {

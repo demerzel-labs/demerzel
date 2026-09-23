@@ -45,11 +45,54 @@ pub enum ContentBlock {
 
 /// Opaque provider state attached to a reasoning block. The harness
 /// stores it verbatim and returns it to the same provider only.
+/// "Sealed" means opaque to the harness, not encrypted.
+///
+/// The identity fields bind the payload to the instance and the model
+/// that produced it. A field that is absent binds nothing, so a
+/// payload written before the fields existed replays as before.
+/// Non-exhaustive: build one with [`SealedPayload::new`], so a later
+/// identity field stays additive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SealedPayload {
     /// Id of the adapter that produced the payload, e.g. "openai-codex".
     pub provider: String,
+    /// Name of the provider instance that produced the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// Id of the model that produced the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub data: serde_json::Value,
+}
+
+impl SealedPayload {
+    /// A payload from adapter `provider`, with no identity fields.
+    pub fn new(provider: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            provider: provider.into(),
+            instance: None,
+            model: None,
+            data,
+        }
+    }
+
+    /// The payload bound to one instance and one model.
+    pub fn with_identity(mut self, instance: impl Into<String>, model: impl Into<String>) -> Self {
+        self.instance = Some(instance.into());
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Whether the payload may go back on the wire to adapter
+    /// `provider`, as instance `instance`, for model `model`: the
+    /// adapter must match, and so must every identity field the
+    /// payload carries.
+    pub fn replays_to(&self, provider: &str, instance: &str, model: &str) -> bool {
+        self.provider == provider
+            && self.instance.as_deref().is_none_or(|own| own == instance)
+            && self.model.as_deref().is_none_or(|own| own == model)
+    }
 }
 
 /// Token counts for one model response. Fields default on read, so a
@@ -119,10 +162,10 @@ mod tests {
                 },
                 ContentBlock::Reasoning {
                     summary: "check the manifest first".into(),
-                    sealed: Some(SealedPayload {
-                        provider: "openai-codex".into(),
-                        data: json!({"encrypted_content": "abc123"}),
-                    }),
+                    sealed: Some(SealedPayload::new(
+                        "openai-codex",
+                        json!({"encrypted_content": "abc123"}),
+                    )),
                 },
                 ContentBlock::ToolUse {
                     id: "call_1".into(),
@@ -173,6 +216,41 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(block, back);
+    }
+
+    #[test]
+    fn a_payload_replays_only_where_its_identity_matches() {
+        let bare = SealedPayload::new("openai-compat", json!({}));
+        assert!(bare.replays_to("openai-compat", "any", "any-model"));
+        assert!(!bare.replays_to("anthropic", "any", "any-model"));
+
+        let bound = bare.with_identity("local", "qwen3");
+        assert!(bound.replays_to("openai-compat", "local", "qwen3"));
+        assert!(!bound.replays_to("openai-compat", "hosted", "qwen3"));
+        assert!(!bound.replays_to("openai-compat", "local", "qwen3-coder"));
+        assert!(!bound.replays_to("anthropic", "local", "qwen3"));
+    }
+
+    #[test]
+    fn identity_fields_round_trip_and_stay_absent_when_unset() {
+        let bare = SealedPayload::new("anthropic", json!({"type": "thinking"}));
+        let value = serde_json::to_value(&bare).unwrap();
+        assert!(value.get("instance").is_none());
+        assert!(value.get("model").is_none());
+        // A payload from before the fields reads with neither.
+        let old: SealedPayload =
+            serde_json::from_value(json!({"provider": "anthropic", "data": {"type": "thinking"}}))
+                .unwrap();
+        assert_eq!(old, bare);
+
+        let bound = bare.with_identity("work", "claude-sonnet-5");
+        let value = serde_json::to_value(&bound).unwrap();
+        assert_eq!(value["instance"], "work");
+        assert_eq!(value["model"], "claude-sonnet-5");
+        assert_eq!(
+            serde_json::from_value::<SealedPayload>(value).unwrap(),
+            bound
+        );
     }
 
     #[test]

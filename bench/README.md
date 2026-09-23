@@ -125,8 +125,10 @@ Method notes:
   The idle fixture now measures startup without an HTTP client.
 - The turn suite reports `transport_floor` next to the turn benches.
   Harness-added latency per turn is `turn_text` minus
-  `transport_floor`. Session files land under the cargo target
-  directory, so appends hit a real filesystem.
+  `transport_floor`. `turn_text_compat` runs the same turn through a
+  named `openai-compat` instance on the Chat Completions route. Session
+  files land under the cargo target directory, so appends hit a real
+  filesystem.
 - The render suite draws into a headless frame buffer. The layout and
   the buffer diff are the live interface's work; the terminal write is
   not. The [fixture guide](../docs/render-bench.md) explains the M2.5 workloads and comparison limits.

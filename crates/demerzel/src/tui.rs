@@ -42,7 +42,12 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     ));
     options.model = config.model.clone();
     options.mode = mode;
-    options.effort = config.effort.to_string();
+    // A compatible endpoint receives no effort until one is set; the
+    // status says so rather than naming a level it does not send.
+    options.effort = match SessionSettings::from_config(config).request_effort() {
+        Some(effort) => effort.to_string(),
+        None => "default".to_string(),
+    };
     options.context_window = runtime.context_window(&config.model);
     // The config takes any path; the name and the branch need a
     // real one, so `.` and `..` name their directory and the walk
@@ -191,10 +196,11 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.settings.effort = effort;
+                self.settings.effort_set = true;
                 let mut patch = StatusPatch::default();
                 patch.effort = Some(effort.to_string());
                 events.status(patch);
-                return Submission::Note(effort_note(effort));
+                return Submission::Note(effort_note(Some(effort)));
             }
             Some(Effect::SetApproval(mode)) => {
                 if let Some(engine) = self.engine.as_mut()

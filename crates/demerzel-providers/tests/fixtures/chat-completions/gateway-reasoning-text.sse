@@ -1,0 +1,18 @@
+: fixture: a gateway reply with reasoning text, a repeated finish chunk, and usage
+: source: https://openrouter.ai/docs/api_reference/streaming.md and https://openrouter.ai/docs/guides/best-practices/reasoning-tokens.md
+: read: 2026-09-22; the pages carry no revision
+: shape: documented chunk fields; ids and text are synthetic. The delta carries
+: `reasoning` and `reasoning_details`; the finish chunk repeats with usage on the second.
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-synthetic-1","provider":"synthetic","model":"vendor/new-model-2026","object":"chat.completion.chunk","created":1758500000,"choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"Check the question.","reasoning_details":[{"type":"reasoning.text","text":"Check the question.","signature":null,"id":"reasoning-text-1","format":"synthetic-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-synthetic-1","provider":"synthetic","model":"vendor/new-model-2026","object":"chat.completion.chunk","created":1758500000,"choices":[{"index":0,"delta":{"role":"assistant","content":"Four."},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-synthetic-1","provider":"synthetic","model":"vendor/new-model-2026","object":"chat.completion.chunk","created":1758500000,"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"stop"}]}
+
+data: {"id":"gen-synthetic-1","provider":"synthetic","model":"vendor/new-model-2026","object":"chat.completion.chunk","created":1758500000,"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"stop"}],"usage":{"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":5},"cost":0.00002,"cost_details":{"upstream_inference_cost":0.00002},"prompt_tokens":40,"prompt_tokens_details":{"cached_tokens":8,"cache_write_tokens":0,"audio_tokens":0},"total_tokens":49}}
+
+data: [DONE]
+

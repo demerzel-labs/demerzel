@@ -432,10 +432,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                         .unwrap_or_default();
                     vec![Ok(StreamEvent::ReasoningDone {
                         summary,
-                        sealed: Some(SealedPayload {
-                            provider: PROVIDER_ID.to_string(),
-                            data: item.clone(),
-                        }),
+                        sealed: Some(SealedPayload::new(PROVIDER_ID, item.clone())),
                     })]
                 }
                 _ => Vec::new(),

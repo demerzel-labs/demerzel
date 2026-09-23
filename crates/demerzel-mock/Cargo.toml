@@ -1,6 +1,6 @@
 [package]
 name = "demerzel-mock"
-description = "Mock Codex endpoint for hermetic tests and benchmarks"
+description = "Mock model endpoints for hermetic tests and benchmarks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

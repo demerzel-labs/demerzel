@@ -21,7 +21,7 @@ layer that set it.
 All keys are optional.
 
 ```toml
-provider = "openai-codex"        # or "anthropic"
+provider = "openai-codex"        # an adapter id or an instance name
 model = "gpt-5.6-sol"
 approval = "ask"                 # read-only | ask | auto
 effort = "high"                  # none … ultra, see Reasoning effort
@@ -37,6 +37,12 @@ effort = "medium"                # per-provider override
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 context_window = 200000          # in tokens; wins over the model catalog
+
+[providers.local]                # a named instance, see Provider instances
+kind = "openai-compat"           # the adapter behind the instance
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3-coder"
+api_key_env = "LOCAL_API_KEY"    # the variable that holds the key
 
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
@@ -58,6 +64,8 @@ error = "bright-red"
 | `effort` | `--effort` | `DEMERZEL_EFFORT` | `high` |
 | `max_model_calls` | — | — | `128` |
 | `context_window` | — | — | the provider catalog |
+| `providers.<name>.kind` | — | — | the table name, when it is an adapter id |
+| `providers.<name>.api_key_env` | — | — | unset: the adapter's own credentials |
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
@@ -73,6 +81,56 @@ top-level key, so it wins. A top-level `model` in a layer that names
 another provider does not apply: a model id belongs to one provider.
 A top-level `effort` applies to any provider.
 
+## Provider instances
+
+A `[providers.<name>]` table with `kind` defines a provider instance.
+`kind` names the adapter: `openai-codex`, `anthropic`, or
+`openai-compat`. `provider` then selects the instance by its name. One
+adapter can serve many instances.
+
+A table without `kind` keeps its earlier meaning: the name is the
+adapter id, and the table tunes that adapter. Each adapter id also
+names its own instance without a table. A table named after an adapter
+cannot set another `kind`.
+
+The `openai-compat` adapter speaks the Chat Completions protocol. It
+serves hosted vendors, gateways, and local servers. Its instance needs
+two keys:
+
+- `base_url`: the API root, such as `http://127.0.0.1:11434/v1`. The
+  adapter sends requests to `{base_url}/chat/completions`.
+- `model`: the model id that the server takes. The adapter has no
+  default model and no model catalog.
+
+A run stops at boot when either key is missing. `--base-url`,
+`--model`, and their variables supply them for one run.
+`context_window` is the only window source for a compatible instance.
+
+`api_key_env` names the environment variable that holds the key. The
+file holds the variable's name, never the key. When the variable is
+unset or empty, the first turn stops and names it. Without
+`api_key_env`, a compatible instance sends no `Authorization` header;
+a local server needs none.
+
+The `anthropic` and `openai-codex` adapters have credentials of their
+own: `ANTHROPIC_API_KEY` or the auth store, and the ChatGPT login.
+These credentials serve each instance of the adapter at its default
+endpoint. A named instance with a `base_url` of its own must name its
+key in `api_key_env`, or the run stops at boot. The adapter's key never
+goes to an endpoint that you did not name it for. A named
+`openai-codex` instance takes no `api_key_env`, so it cannot set its
+own `base_url`.
+
+An adapter without a default model, such as `openai-compat`, takes a
+top-level `model` only from a file that also names the instance in
+`provider`. A top-level `model` without `provider` names a model of a
+shipped adapter.
+
+`--base-url` and `DEMERZEL_BASE_URL` apply to the active instance.
+The session file names the instance in `meta.provider` and its adapter
+in `meta.kind`. `doctor` lists each instance with its adapter, its
+endpoint, its model, and the state of its key variable.
+
 ## Reasoning effort
 
 `effort` sets how hard the model reasons on each request. The levels,
@@ -85,6 +143,14 @@ API takes `low` through `max`, so the adapter clamps `none` and
 request, so a model that does not accept the field refuses the call;
 the current models accept it. Unknown keys warn on stderr and do not
 stop the run.
+
+The `openai-compat` adapter sends `reasoning_effort` only when a flag,
+a variable, the instance's own `[providers.<name>]` table, or `/effort`
+sets the level. A top-level `effort` belongs to no instance, so it
+does not count. Many compatible servers refuse a field they do not
+know, so the default level stays off the wire. The full-screen
+interface and `/effort` then show `default` as the effort. The adapter
+sends the level by name and does not clamp it.
 
 `/effort [level]` shows or sets the level for the session. The
 full-screen interface names the level on its status.
@@ -395,6 +461,10 @@ privilege, move credentials, or raise cost:
 - It cannot raise `approval` above the user file's mode, or above
   `ask`.
 - It cannot set `base_url`.
+- It cannot define a provider instance: it cannot set
+  `providers.<name>.kind`. It can select an instance that the user
+  file defines and set its `model`, `effort`, and `context_window`.
+- It cannot set `providers.<name>.api_key_env`.
 - It cannot turn `history_file` on against a user file that turned
   it off.
 - It cannot turn `tui.mouse` on against a user file that turned it
@@ -428,3 +498,6 @@ the same day. The context segment and `context_window` landed with
 M2.5 step 8e. The two-press quit, the exit line, and `--session`
 landed with M2.5 step 8f. `DEMERZEL_LOG` landed on 2026-09-01,
 after a dogfood hit a server overload that nothing recorded.
+M3 step 2 ([`m3-plan.md`](m3-plan.md)) added provider instances,
+`providers.<name>.kind`, `providers.<name>.api_key_env`, and the
+`openai-compat` adapter on 2026-09-22.

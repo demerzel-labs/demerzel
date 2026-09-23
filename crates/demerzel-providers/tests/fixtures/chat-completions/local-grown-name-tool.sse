@@ -1,0 +1,23 @@
+: fixture: a local server reply that reasons, then calls one tool whose name grows
+: source: llama.cpp tools/server (server-task.cpp, server-chat.cpp, common/chat.cpp)
+: read: 2026-09-22 at master e6ab7c1; the README has no stream example, so the shape comes from source
+: shape: ids and text are synthetic. Reasoning and content arrive in separate chunks, a
+: grown name re-sends id, type, and name, `timings` rides the last choice chunk, and usage
+: follows in a chunk with empty choices.
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"List the files."}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"id":"synthetic00000000000000000000001","type":"function","function":{"name":"gl","arguments":""}}]}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"id":"synthetic00000000000000000000001","type":"function","function":{"name":"glob"}}]}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"pattern\":\"*.rs\"}"}}]}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk","timings":{"cache_n":0,"prompt_n":80,"prompt_ms":120.5,"prompt_per_token_ms":1.5,"prompt_per_second":663.9,"predicted_n":20,"predicted_ms":400.1,"predicted_per_token_ms":20.0,"predicted_per_second":50.0}}
+
+data: {"choices":[],"created":1758500000,"id":"chatcmpl-synthetic00000000000000000001","model":"local-model.gguf","system_fingerprint":"b0000-synthetic","object":"chat.completion.chunk","usage":{"completion_tokens":20,"prompt_tokens":80,"total_tokens":100,"prompt_tokens_details":{"cached_tokens":0}}}
+
+data: [DONE]
+

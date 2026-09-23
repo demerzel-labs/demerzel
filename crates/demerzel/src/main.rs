@@ -32,7 +32,8 @@ struct Cli {
     #[arg(long)]
     plain: bool,
 
-    /// Provider id. DEMERZEL_PROVIDER sets it too.
+    /// Provider instance: an adapter id or a `[providers.<name>]`
+    /// table name. DEMERZEL_PROVIDER sets it too.
     #[arg(long, global = true)]
     provider: Option<String>,
 
@@ -319,13 +320,28 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
         eprintln!("demerzel: {warning}");
     }
 
+    // An unknown instance, or a compatible one without its endpoint
+    // or model, stops the run before the interface opens.
+    let problems = settings.problems();
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+
     let interactive = cli.prompt.is_none();
     let mut config = RunConfig::new(cwd);
     config.approval = settings.approval_mode(interactive);
     config.provider = settings.provider.value;
-    config.model = settings.model.value;
+    // `problems` came back empty, so the instance and its model
+    // resolved.
+    config.kind = settings.kind.value;
+    config.model = settings
+        .model
+        .value
+        .expect("problems reports a missing model");
+    config.api_key_env = settings.api_key_env.value;
     config.base_url = settings.base_url.value;
     config.effort = settings.effort.value;
+    config.effort_set = settings.effort_set;
     config.max_model_calls = settings.max_model_calls.value;
     config.context_window = settings.context_window.value;
     config.resume = match &cli.session {

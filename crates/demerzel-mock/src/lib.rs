@@ -1,14 +1,15 @@
 //! Mock model endpoint for hermetic tests and Layer-2 benchmarks.
 //!
-//! The server implements `POST /responses`, `POST /v1/messages`, and
-//! `GET /v1/models` for key checks. All three replay one scripted list
-//! of responses in request order. It also implements
+//! The server implements `POST /responses`, `POST /v1/messages`,
+//! `POST /v1/chat/completions`, and `GET /v1/models` for key checks.
+//! All four replay one scripted list of responses in request order. It also implements
 //! `POST /oauth/token` for the credential-refresh and login-exchange
 //! paths. It records every request so tests can assert on
 //! serialization and headers. Never part of the shipped binary.
 
 pub mod anthropic;
 pub mod codex;
+pub mod compat;
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -30,38 +31,89 @@ use axum::routing::{get, post};
 use serde_json::Value;
 use serde_json::json;
 
-/// One server-sent event in a scripted response.
+/// One server-sent event in a scripted response: the text after
+/// `data: `.
 #[derive(Debug, Clone)]
 pub struct SseEvent {
-    pub data: Value,
+    pub data: String,
 }
 
 impl SseEvent {
+    /// An event whose payload is one JSON value.
     pub fn new(data: Value) -> Self {
-        Self { data }
+        Self {
+            data: data.to_string(),
+        }
+    }
+
+    /// An event whose payload is not JSON, such as the `[DONE]`
+    /// marker of the Chat Completions stream.
+    pub fn raw(data: impl Into<String>) -> Self {
+        Self { data: data.into() }
     }
 }
+
+/// A check on a request body. `Err` makes the mock refuse the request
+/// with status 400 and the message, the way a strict server refuses a
+/// request that lacks a field it requires.
+pub type BodyCheck = fn(&Value) -> Result<(), String>;
 
 /// One scripted reply for the model routes.
 #[derive(Debug, Clone)]
 pub struct MockResponse {
     pub status: u16,
     pub events: Vec<SseEvent>,
+    /// The whole SSE body, sent verbatim in place of `events`. A
+    /// fixture file captured from a real server uses it.
+    pub body: Option<String>,
     /// Send the events, then hold the connection open forever.
     pub stall: bool,
     /// A `retry-after` header value, in seconds.
     pub retry_after: Option<u64>,
+    /// A check the request body must pass before this reply goes out.
+    pub check: Option<BodyCheck>,
+    /// The `content-type` of a 200 reply.
+    pub content_type: &'static str,
 }
 
 impl MockResponse {
     /// A streaming reply with the given events.
     pub fn stream(events: Vec<Value>) -> Self {
+        Self::events(events.into_iter().map(SseEvent::new).collect())
+    }
+
+    /// A streaming reply with the given events, JSON or raw.
+    pub fn events(events: Vec<SseEvent>) -> Self {
         Self {
             status: 200,
-            events: events.into_iter().map(SseEvent::new).collect(),
+            events,
+            body: None,
             stall: false,
             retry_after: None,
+            check: None,
+            content_type: "text/event-stream",
         }
+    }
+
+    /// A streaming reply whose body is `text`, verbatim.
+    pub fn sse_body(text: impl Into<String>) -> Self {
+        Self {
+            body: Some(text.into()),
+            ..Self::events(Vec::new())
+        }
+    }
+
+    /// This reply with another `content-type`, the way a wrong
+    /// endpoint answers a stream request with a page.
+    pub fn with_content_type(mut self, content_type: &'static str) -> Self {
+        self.content_type = content_type;
+        self
+    }
+
+    /// This reply, behind a check on the request body.
+    pub fn with_check(mut self, check: BodyCheck) -> Self {
+        self.check = Some(check);
+        self
     }
 
     /// A streaming reply that sends its events and never completes.
@@ -77,9 +129,7 @@ impl MockResponse {
     pub fn error(status: u16) -> Self {
         Self {
             status,
-            events: Vec::new(),
-            stall: false,
-            retry_after: None,
+            ..Self::events(Vec::new())
         }
     }
 
@@ -167,6 +217,7 @@ impl MockServer {
         let app = Router::new()
             .route("/responses", post(handle_responses))
             .route("/v1/messages", post(handle_messages))
+            .route("/v1/chat/completions", post(handle_chat))
             .route("/v1/models", get(handle_models))
             .route("/oauth/token", post(handle_token))
             .with_state(state.clone());
@@ -231,16 +282,20 @@ async fn handle_messages(
     scripted_reply(&state, "/v1/messages", &headers, body)
 }
 
+async fn handle_chat(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    scripted_reply(&state, "/v1/chat/completions", &headers, body)
+}
+
 async fn handle_models(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
     scripted_reply(&state, "/v1/models", &headers, String::new())
 }
 
 /// Replay the next scripted reply, whichever model route asked.
 fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: String) -> Response {
-    if !state.cycle {
-        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        record(state, path, headers, body);
-    }
     let next = {
         let mut responses = state.responses.lock().unwrap();
         let reply = responses.pop_front();
@@ -251,9 +306,30 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
         }
         reply
     };
+    // Parse the body only when something reads it: the record or a
+    // check. A cycling benchmark does neither, so its floor holds.
+    let check = next.as_ref().and_then(|reply| reply.check);
+    let parsed = (!state.cycle || check.is_some())
+        .then(|| serde_json::from_str::<Value>(&body).unwrap_or(Value::Null));
+    let refusal = match (check, &parsed) {
+        (Some(check), Some(body)) => check(body).err(),
+        _ => None,
+    };
+    if !state.cycle
+        && let Some(body) = parsed
+    {
+        record(state, path, headers, body);
+    }
     let Some(reply) = next else {
         return (StatusCode::GONE, "mock script exhausted").into_response();
     };
+    if let Some(message) = refusal {
+        return (
+            StatusCode::BAD_REQUEST,
+            json!({"error": {"message": message}}).to_string(),
+        )
+            .into_response();
+    }
     let request_id = format!("mock-{}", state.replies.fetch_add(1, Ordering::Relaxed) + 1);
     if reply.status != 200 {
         let status =
@@ -282,12 +358,18 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
         );
         return response;
     }
-    let mut sse = String::new();
-    for event in &reply.events {
-        sse.push_str("data: ");
-        sse.push_str(&event.data.to_string());
-        sse.push_str("\n\n");
-    }
+    let sse = match reply.body {
+        Some(body) => body,
+        None => {
+            let mut sse = String::new();
+            for event in &reply.events {
+                sse.push_str("data: ");
+                sse.push_str(&event.data);
+                sse.push_str("\n\n");
+            }
+            sse
+        }
+    };
     let body = if reply.stall {
         Body::from_stream(StallBody(Some(Bytes::from(sse))))
     } else {
@@ -295,7 +377,7 @@ fn scripted_reply(state: &ServerState, path: &str, headers: &HeaderMap, body: St
     };
     Response::builder()
         .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
+        .header("content-type", reply.content_type)
         .header("x-request-id", request_id)
         .body(body)
         .expect("build sse response")

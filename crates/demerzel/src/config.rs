@@ -84,8 +84,19 @@ impl<T> Setting<T> {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Settings {
+    /// The provider instance name: a `[providers.<name>]` table, or an
+    /// adapter id that stands for its own implicit instance.
     pub provider: Setting<String>,
-    pub model: Setting<String>,
+    /// The adapter id behind the instance: the user file's `kind`, or
+    /// the name itself when it is an adapter id. `None` when neither
+    /// resolves: [`Settings::problems`] names the unknown instance.
+    pub kind: Setting<Option<String>>,
+    /// `None` when nothing names a model and the adapter has no
+    /// default: an `openai-compat` instance must name its model.
+    pub model: Setting<Option<String>>,
+    /// The environment variable that holds the instance's key. Only
+    /// the user file sets it.
+    pub api_key_env: Setting<Option<String>>,
     /// `None` keeps the provider's default endpoint.
     pub base_url: Setting<Option<String>>,
     /// `None` keeps the default: interactive runs ask, one-shot is
@@ -93,6 +104,10 @@ pub struct Settings {
     pub approval: Setting<Option<ApprovalMode>>,
     /// The reasoning effort every request carries.
     pub effort: Setting<Effort>,
+    /// Whether the effort counts as set for an adapter without
+    /// implicit effort: a flag, a variable, or the instance's own
+    /// table set it.
+    pub effort_set: bool,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: Setting<u32>,
     /// The context window, in tokens. Set, it wins over the provider
@@ -119,6 +134,20 @@ pub struct TuiSettings {
 }
 
 impl Settings {
+    /// The problems that stop a run at boot: an instance no table
+    /// defines, a compatible instance without its endpoint or model,
+    /// and a key variable on an adapter that takes none. `doctor`
+    /// reports each one; a session stops at the first.
+    pub fn problems(&self) -> Vec<String> {
+        instance_problems(&Instance {
+            name: self.provider.value.clone(),
+            kind: self.kind.value.clone().unwrap_or_default(),
+            base_url: self.base_url.value.clone(),
+            model: self.model.value.clone(),
+            api_key_env: self.api_key_env.value.clone(),
+        })
+    }
+
     /// The approval mode for one run: the configured mode when one is
     /// set, else the default. A one-shot run has nobody to ask, so
     /// `ask` clamps to read-only there.
@@ -141,9 +170,13 @@ pub struct Flags {
     pub effort: Option<Effort>,
 }
 
-/// Per-provider keys from a `[providers.<id>]` table.
+/// Per-instance keys from a `[providers.<name>]` table.
 #[derive(Debug, Default, PartialEq)]
 struct ProviderKeys {
+    /// The adapter id. Without it, the table name is the adapter id.
+    kind: Option<String>,
+    /// The variable that holds the key.
+    api_key_env: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
     effort: Option<Effort>,
@@ -262,6 +295,8 @@ fn parse_providers(
         for (key, value) in table {
             let path = format!("providers.{id}.{key}");
             match key.as_str() {
+                "kind" => keys.kind = Some(expect_kind(&id, &path, value)?),
+                "api_key_env" => keys.api_key_env = Some(expect_variable(&path, value)?),
                 "base_url" => keys.base_url = Some(expect_string(&path, value)?),
                 "model" => keys.model = Some(expect_string(&path, value)?),
                 "effort" => keys.effort = Some(expect_effort(&path, value)?),
@@ -323,6 +358,45 @@ fn parse_themes(
         into.insert(name, keys);
     }
     Ok(())
+}
+
+/// An adapter id for `kind`. A table named after an adapter is that
+/// adapter's own instance, so its `kind`, when set, must be the name.
+fn expect_kind(name: &str, key: &str, value: toml::Value) -> Result<String, String> {
+    let kind = expect_string(key, value)?;
+    let ids = demerzel_providers::PROVIDER_IDS;
+    if !ids.contains(&kind.as_str()) {
+        return Err(format!(
+            "`{key}` must be one of {}, not `{kind}`",
+            ids.join(", ")
+        ));
+    }
+    if ids.contains(&name) && kind != name {
+        return Err(format!(
+            "`{key}` must be `{name}`: a table named after an adapter is that adapter's \
+             own instance; give the instance another name"
+        ));
+    }
+    Ok(kind)
+}
+
+/// The name of an environment variable: a letter or `_`, then
+/// letters, digits, or `_`. A key pasted in place of the name fails
+/// here instead of sitting in the file.
+fn expect_variable(key: &str, value: toml::Value) -> Result<String, String> {
+    let name = expect_string(key, value)?;
+    let mut chars = name.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        return Err(format!(
+            "`{key}` must name an environment variable, such as `LOCAL_API_KEY`; \
+             it holds the variable's name, never the key"
+        ));
+    }
+    Ok(name)
 }
 
 /// A model-call count: a positive integer that fits `u32`. Zero
@@ -462,12 +536,58 @@ pub fn resolve(
         .or_else(|| layer_key(user, Origin::User, |l| l.provider.clone()))
         .unwrap_or_else(|| Setting::new(DEFAULT_PROVIDER.to_string(), Origin::Default));
 
+    // Trust rule: only the user file defines an instance and picks its
+    // credential. A project file can name an instance the user file
+    // defines, and set its model, effort, and context window.
+    for (name, keys) in project.into_iter().flat_map(|l| &l.providers) {
+        if let Some(kind) = &keys.kind {
+            warnings.push(format!(
+                "ignored: the project file sets providers.{name}.kind = {kind}; a project \
+                 file cannot define a provider instance; define it in the user file"
+            ));
+        }
+        if let Some(variable) = &keys.api_key_env {
+            warnings.push(format!(
+                "ignored: the project file sets providers.{name}.api_key_env = {variable}; \
+                 a project file cannot pick a credential; set it in the user file"
+            ));
+        }
+    }
+    // The adapter behind the instance: the user file's `kind`, else
+    // the name itself when it is an adapter id.
+    let kind = layer_key(user, Origin::User, |l| {
+        l.providers
+            .get(&provider.value)
+            .and_then(|keys| keys.kind.clone())
+    })
+    .map(some_setting)
+    .unwrap_or_else(|| {
+        let own = demerzel_providers::PROVIDER_IDS
+            .contains(&provider.value.as_str())
+            .then(|| provider.value.clone());
+        Setting::new(own, Origin::Default)
+    });
+    let api_key_env = layer_key(user, Origin::User, |l| {
+        l.providers
+            .get(&provider.value)
+            .and_then(|keys| keys.api_key_env.clone())
+    })
+    .map(some_setting)
+    .unwrap_or_else(|| Setting::new(None, Origin::Default));
+
     // Within one layer the `[providers.<id>]` table is more specific
     // than the top-level `model`, so it wins. A top-level `model`
     // names one provider's model id: when its layer also names a
     // provider, and that provider is not the active one, the resolver
     // skips the key — a provider switch must not pair the other
-    // provider's model with the active adapter.
+    // provider's model with the active adapter. An adapter without a
+    // default model takes a top-level `model` only from a layer that
+    // names this instance: an older file's unscoped model id belongs
+    // to a shipped adapter.
+    let lends_unscoped_model = kind
+        .value
+        .as_deref()
+        .is_none_or(|kind| demerzel_providers::default_model(kind).is_some());
     let layer_model = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
             l.providers
@@ -475,6 +595,7 @@ pub fn resolve(
                 .and_then(|p| p.model.clone())
                 .or_else(|| match &l.provider {
                     Some(named) if *named != provider.value => None,
+                    None if !lends_unscoped_model => None,
                     _ => l.model.clone(),
                 })
         })
@@ -484,13 +605,17 @@ pub fn resolve(
         .or_else(|| env(ENV_MODEL).map(|v| Setting::new(v, Origin::Env)))
         .or_else(|| layer_model(project, Origin::Project))
         .or_else(|| layer_model(user, Origin::User))
-        // Each provider carries its own default model. An unknown
-        // provider gets the shipped default; the run fails on the
-        // provider id before the model matters.
+        .map(some_setting)
+        // Each adapter carries its own default model, except the
+        // compatible one: its instance names the model, and
+        // `problems` reports an instance that does not.
         .unwrap_or_else(|| {
-            let default = demerzel_providers::default_model(&provider.value)
-                .unwrap_or(demerzel_providers::openai_codex::DEFAULT_MODEL);
-            Setting::new(default.to_string(), Origin::Default)
+            let default = kind
+                .value
+                .as_deref()
+                .and_then(demerzel_providers::default_model)
+                .map(str::to_string);
+            Setting::new(default, Origin::Default)
         });
 
     // Trust rule: the project file cannot pick the endpoint requests
@@ -574,12 +699,24 @@ pub fn resolve(
     // default — a high effort costs more, and a project file travels
     // with the repository. A flag or the environment decides
     // outright, so no warning then.
+    // An adapter without implicit effort takes a level only from its
+    // instance's own table: a top-level `effort` belongs to no
+    // instance, and an older file's level for another adapter must not
+    // reach a compatible server. The trust baseline follows the same
+    // keys.
+    let implicit_effort = kind
+        .value
+        .as_deref()
+        .and_then(demerzel_providers::adapter_rules)
+        .is_none_or(|rules| rules.implicit_effort);
     let layer_effort = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
-            l.providers
-                .get(&provider.value)
-                .and_then(|p| p.effort)
-                .or(l.effort)
+            let scoped = l.providers.get(&provider.value).and_then(|p| p.effort);
+            if implicit_effort {
+                scoped.or(l.effort)
+            } else {
+                scoped
+            }
         })
     };
     let flag_or_env_effort = flags
@@ -615,6 +752,10 @@ pub fn resolve(
         .or(project_effort)
         .or(user_effort)
         .unwrap_or_else(|| Setting::new(DEFAULT_EFFORT, Origin::Default));
+    // Set means a flag, a variable, or a file named the level; for an
+    // adapter without implicit effort, the files count only through
+    // the instance's own table, as above.
+    let effort_set = effort.origin != Origin::Default;
 
     // Trust rule: the project file can lower the call limit, never
     // raise it above the user file's value or the default: the limit
@@ -690,10 +831,13 @@ pub fn resolve(
     (
         Settings {
             provider,
+            kind,
             model,
+            api_key_env,
             base_url,
             approval,
             effort,
+            effort_set,
             max_model_calls,
             context_window,
             history_file,
@@ -706,6 +850,112 @@ pub fn resolve(
         },
         warnings,
     )
+}
+
+/// One provider instance: the user file's table as `doctor` lists it,
+/// or the resolved active instance as the boot check sees it. An empty
+/// `kind` names no adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Instance {
+    pub name: String,
+    pub kind: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+impl Instance {
+    /// An instance of adapter `kind` named `name`, with no keys set.
+    pub fn new(name: impl Into<String>, kind: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            base_url: None,
+            model: None,
+            api_key_env: None,
+        }
+    }
+
+    /// Whether the name is the adapter id: the implicit instance of a
+    /// shipped adapter, which the adapter's own credentials serve.
+    pub fn is_implicit(&self) -> bool {
+        self.name == self.kind
+    }
+}
+
+/// The problems that stop a run on `instance` at boot, from the
+/// adapter's rules: an unknown adapter, a missing endpoint or model, a
+/// key variable the adapter does not take, and a named instance that
+/// would carry the adapter's own credentials to an endpoint of its
+/// own. `Settings::problems` and the runtime's boot check share it.
+pub fn instance_problems(instance: &Instance) -> Vec<String> {
+    let name = &instance.name;
+    let kind = instance.kind.as_str();
+    let Some(rules) = demerzel_providers::adapter_rules(kind) else {
+        return vec![format!(
+            "unknown provider `{name}`: define `[providers.{name}]` with a `kind` in the \
+             user file, or use one of: {}",
+            demerzel_providers::PROVIDER_IDS.join(", ")
+        )];
+    };
+    let mut problems = Vec::new();
+    if rules.needs_endpoint && instance.base_url.is_none() {
+        problems.push(format!(
+            "provider `{name}` ({kind}) needs `base_url`: set it in `[providers.{name}]` of \
+             the user file, with --base-url, or with {ENV_BASE_URL}"
+        ));
+    }
+    if demerzel_providers::default_model(kind).is_none() && instance.model.is_none() {
+        problems.push(format!(
+            "provider `{name}` ({kind}) needs `model`: set it in `[providers.{name}]`, with \
+             --model, or with {ENV_MODEL}"
+        ));
+    }
+    match &instance.api_key_env {
+        Some(variable) if !rules.key_variable => problems.push(format!(
+            "provider `{name}` ({kind}) signs in through its adapter's login and takes no \
+             `api_key_env`; remove `api_key_env = \"{variable}\"`"
+        )),
+        // The adapter's own credentials serve its default endpoint.
+        // A named instance with an endpoint of its own names its key,
+        // so the adapter's key never reaches that endpoint.
+        None if rules.own_credentials && !instance.is_implicit() && instance.base_url.is_some() => {
+            problems.push(if rules.key_variable {
+                format!(
+                    "provider `{name}` ({kind}) sends requests to its own `base_url`: name its \
+                     key variable in `api_key_env`, so the adapter's own key stays off that \
+                     endpoint"
+                )
+            } else {
+                format!(
+                    "provider `{name}` ({kind}) signs in through its adapter's login, which \
+                     serves only the adapter's default endpoint; remove its `base_url`"
+                )
+            });
+        }
+        _ => {}
+    }
+    problems
+}
+
+/// The instances the user file defines: each `[providers.<name>]`
+/// table with a `kind`, in name order. A table without `kind` tunes
+/// the adapter of its name and is not listed. A project file defines
+/// no instance.
+pub fn instances(user: Option<&Layer>) -> Vec<Instance> {
+    user.into_iter()
+        .flat_map(|layer| &layer.providers)
+        .filter_map(|(name, keys)| {
+            Some(Instance {
+                name: name.clone(),
+                kind: keys.kind.clone()?,
+                base_url: keys.base_url.clone(),
+                model: keys.model.clone(),
+                api_key_env: keys.api_key_env.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The colors of the theme called `name`. A built-in name starts
@@ -818,12 +1068,304 @@ mod tests {
         settings
     }
 
+    const LOCAL: &str = "provider = \"local\"\n\
+         [providers.local]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:11434/v1\"\n\
+         model = \"qwen3\"\n\
+         api_key_env = \"LOCAL_KEY\"\n\
+         context_window = 32000";
+
+    #[test]
+    fn a_named_instance_resolves_its_adapter_endpoint_model_and_key_variable() {
+        let user = layer(LOCAL);
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.provider.value, "local");
+        assert_eq!(settings.kind.value.as_deref(), Some("openai-compat"));
+        assert_eq!(settings.kind.origin, Origin::User);
+        assert_eq!(
+            settings.base_url.value.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert_eq!(settings.model.value.as_deref(), Some("qwen3"));
+        assert_eq!(settings.api_key_env.value.as_deref(), Some("LOCAL_KEY"));
+        assert_eq!(settings.context_window.value, Some(32000));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+    }
+
+    #[test]
+    fn an_adapter_name_without_a_table_is_its_own_instance() {
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.kind.value.as_deref(), Some(DEFAULT_PROVIDER));
+        assert_eq!(settings.kind.origin, Origin::Default);
+
+        // The compatible adapter stands for itself too, and takes its
+        // endpoint and model from flags.
+        let flags = Flags {
+            provider: Some("openai-compat".into()),
+            base_url: Some("http://127.0.0.1:8080/v1".into()),
+            model: Some("local-model".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, None);
+        assert_eq!(settings.kind.value.as_deref(), Some("openai-compat"));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+    }
+
+    #[test]
+    fn a_compat_instance_without_its_endpoint_or_model_is_refused() {
+        let user = layer("provider = \"local\"\n[providers.local]\nkind = \"openai-compat\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        // No default model for the compatible adapter.
+        assert_eq!(settings.model.value, None);
+        let problems = settings.problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("`base_url`"), "{problems:?}");
+        assert!(problems[1].contains("`model`"), "{problems:?}");
+
+        // The flags supply both for the run.
+        let flags = Flags {
+            base_url: Some("http://127.0.0.1:1/v1".into()),
+            model: Some("m".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+    }
+
+    #[test]
+    fn an_undefined_instance_is_a_problem() {
+        let flags = Flags {
+            provider: Some("nope".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, None);
+        assert_eq!(settings.kind.value, None);
+        let problems = settings.problems();
+        assert!(
+            problems[0].contains("unknown provider `nope`"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_codex_adapter_takes_no_key_variable() {
+        let user = layer("[providers.work]\nkind = \"openai-codex\"\napi_key_env = \"WORK_KEY\"");
+        let flags = Flags {
+            provider: Some("work".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems()[0].contains("api_key_env"));
+    }
+
+    #[test]
+    fn a_project_file_cannot_define_an_instance_or_pick_its_key() {
+        let project = layer(
+            "provider = \"evil\"\n\
+             [providers.evil]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"http://attacker.example/v1\"\n\
+             model = \"m\"\n\
+             [providers.local]\n\
+             api_key_env = \"OTHER_KEY\"",
+        );
+        let user = layer(LOCAL);
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.provider.value, "evil");
+        assert_eq!(settings.kind.value, None, "a project table defines nothing");
+        assert!(settings.problems()[0].contains("unknown provider `evil`"));
+        assert!(
+            warnings.iter().any(|w| w.contains("providers.evil.kind")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("providers.local.api_key_env")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("base_url")),
+            "{warnings:?}"
+        );
+
+        // Naming the user's instance works, and the project file can
+        // set its model; the key variable stays the user's.
+        let project = layer(
+            "provider = \"local\"\n\
+             [providers.local]\n\
+             model = \"qwen3-coder\"\n\
+             api_key_env = \"OTHER_KEY\"",
+        );
+        let (settings, _) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.kind.value.as_deref(), Some("openai-compat"));
+        assert_eq!(settings.model.value.as_deref(), Some("qwen3-coder"));
+        assert_eq!(settings.model.origin, Origin::Project);
+        assert_eq!(settings.api_key_env.value.as_deref(), Some("LOCAL_KEY"));
+    }
+
+    #[test]
+    fn only_an_instance_scoped_effort_counts_as_set() {
+        // A top-level level from an older file belongs to no instance.
+        let user = layer(&format!("effort = \"max\"\n{LOCAL}"));
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.effort.value, DEFAULT_EFFORT);
+        assert_eq!(settings.effort.origin, Origin::Default);
+        assert!(!settings.effort_set);
+
+        // A project's top-level level does not displace the user's
+        // instance level, and the user's top-level level does not cap
+        // a project's instance level.
+        let user = layer(&format!("{LOCAL}\neffort = \"high\""));
+        let project = layer("effort = \"low\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.effort.value, Effort::High);
+        assert!(settings.effort_set);
+        let user = layer(&format!("effort = \"low\"\n{LOCAL}"));
+        let project = layer("[providers.local]\neffort = \"medium\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.effort.value, Effort::Medium);
+        assert_eq!(settings.effort.origin, Origin::Project);
+        assert!(settings.effort_set);
+
+        let user = layer(&format!("{LOCAL}\neffort = \"low\""));
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.effort.value, Effort::Low);
+        assert!(settings.effort_set, "the instance table names it");
+
+        let flags = Flags {
+            effort: Some(Effort::Medium),
+            ..Flags::default()
+        };
+        let user = layer(LOCAL);
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.effort_set, "a flag decides outright");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert!(!settings.effort_set, "the default is not set");
+    }
+
+    #[test]
+    fn an_unscoped_top_level_model_does_not_fill_a_compat_instance() {
+        // An older file's model id with no top-level provider.
+        let user = layer(
+            "model = \"gpt-5.6-sol\"\n\
+             [providers.local]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"http://127.0.0.1:1/v1\"",
+        );
+        let flags = Flags {
+            provider: Some("local".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.model.value, None);
+        assert!(settings.problems()[0].contains("needs `model`"));
+
+        // A layer that names the instance pairs its top-level model.
+        let user = layer(
+            "provider = \"local\"\n\
+             model = \"qwen3\"\n\
+             [providers.local]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"http://127.0.0.1:1/v1\"",
+        );
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.model.value.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn a_named_instance_keeps_the_adapter_key_off_its_own_endpoint() {
+        let flags = Flags {
+            provider: Some("gw".into()),
+            ..Flags::default()
+        };
+        // At the adapter's default endpoint, a named instance is a
+        // variant of the adapter and uses its credentials.
+        let user = layer("[providers.gw]\nkind = \"anthropic\"\nmodel = \"claude-test\"");
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+
+        // At an endpoint of its own, it must name its key variable.
+        let user = layer(
+            "[providers.gw]\nkind = \"anthropic\"\nbase_url = \"https://gateway.example.test\"",
+        );
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems()[0].contains("api_key_env"));
+        let user = layer(
+            "[providers.gw]\nkind = \"anthropic\"\n\
+             base_url = \"https://gateway.example.test\"\napi_key_env = \"GW_KEY\"",
+        );
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+
+        // A login-based adapter cannot follow a named instance to
+        // another endpoint at all.
+        let user = layer(
+            "[providers.gw]\nkind = \"openai-codex\"\nbase_url = \"https://gateway.example.test\"",
+        );
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems()[0].contains("base_url"));
+
+        // The implicit instance keeps its earlier behavior.
+        let user = layer("[providers.anthropic]\nbase_url = \"https://gateway.example.test\"");
+        let flags = Flags {
+            provider: Some("anthropic".into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+    }
+
+    #[test]
+    fn instance_keys_refuse_bad_values() {
+        for (text, needle) in [
+            ("[providers.x]\nkind = \"not-an-adapter\"", "must be one of"),
+            (
+                "[providers.anthropic]\nkind = \"openai-compat\"",
+                "must be `anthropic`",
+            ),
+            (
+                "[providers.x]\napi_key_env = \"sk-live-abc\"",
+                "must name an environment variable",
+            ),
+            ("[providers.x]\napi_key_env = \"1KEY\"", "must name"),
+        ] {
+            let error = Layer::parse(text).unwrap_err();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+        // A table named after an adapter may repeat its own kind.
+        layer("[providers.anthropic]\nkind = \"anthropic\"");
+    }
+
+    #[test]
+    fn instances_lists_the_user_tables_with_a_kind() {
+        let user = layer(&format!(
+            "{LOCAL}\n[providers.anthropic]\nmodel = \"claude-test\""
+        ));
+        let listed = instances(Some(&user));
+        assert_eq!(
+            listed,
+            vec![Instance {
+                name: "local".into(),
+                kind: "openai-compat".into(),
+                base_url: Some("http://127.0.0.1:11434/v1".into()),
+                model: Some("qwen3".into()),
+                api_key_env: Some("LOCAL_KEY".into()),
+            }]
+        );
+        assert!(instances(None).is_empty());
+    }
+
     #[test]
     fn defaults_apply_when_nothing_is_set() {
         let settings = resolve_clean(&Flags::default(), &no_env, None, None);
         assert_eq!(settings.provider.value, DEFAULT_PROVIDER);
         assert_eq!(settings.provider.origin, Origin::Default);
-        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(
+            settings.model.value.as_deref(),
+            Some(openai_codex::DEFAULT_MODEL)
+        );
         assert_eq!(settings.base_url.value, None);
         assert_eq!(settings.approval.value, None);
         assert!(settings.history_file.value);
@@ -1153,7 +1695,7 @@ mod tests {
         };
         let env = |name: &str| (name == ENV_MODEL).then(|| "from-env".to_string());
         let settings = resolve_clean(&flags, &env, None, None);
-        assert_eq!(settings.model.value, "from-flag");
+        assert_eq!(settings.model.value.as_deref(), Some("from-flag"));
         assert_eq!(settings.model.origin, Origin::Flag);
     }
 
@@ -1162,7 +1704,7 @@ mod tests {
         let project = layer("model = \"from-project\"");
         let env = |name: &str| (name == ENV_MODEL).then(|| "from-env".to_string());
         let settings = resolve_clean(&Flags::default(), &env, Some(&project), None);
-        assert_eq!(settings.model.value, "from-env");
+        assert_eq!(settings.model.value.as_deref(), Some("from-env"));
         assert_eq!(settings.model.origin, Origin::Env);
     }
 
@@ -1171,7 +1713,7 @@ mod tests {
         let project = layer("model = \"from-project\"");
         let user = layer("model = \"from-user\"");
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), Some(&user));
-        assert_eq!(settings.model.value, "from-project");
+        assert_eq!(settings.model.value.as_deref(), Some("from-project"));
         assert_eq!(settings.model.origin, Origin::Project);
     }
 
@@ -1179,7 +1721,7 @@ mod tests {
     fn the_user_file_beats_the_defaults() {
         let user = layer("model = \"from-user\"\napproval = \"auto\"\nhistory_file = false");
         let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
-        assert_eq!(settings.model.value, "from-user");
+        assert_eq!(settings.model.value.as_deref(), Some("from-user"));
         assert_eq!(settings.model.origin, Origin::User);
         assert_eq!(settings.approval.value, Some(ApprovalMode::Auto));
         assert!(!settings.history_file.value);
@@ -1193,7 +1735,10 @@ mod tests {
         };
         let env = |name: &str| (name == ENV_MODEL).then(String::new);
         let settings = resolve_clean(&flags, &env, None, None);
-        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(
+            settings.model.value.as_deref(),
+            Some(openai_codex::DEFAULT_MODEL)
+        );
         assert_eq!(settings.model.origin, Origin::Default);
     }
 
@@ -1204,8 +1749,10 @@ mod tests {
             ..Flags::default()
         };
         let settings = resolve_clean(&flags, &no_env, None, None);
-        assert_eq!(settings.model.value, anthropic::DEFAULT_MODEL);
-        assert_ne!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(
+            settings.model.value.as_deref(),
+            Some(anthropic::DEFAULT_MODEL)
+        );
         assert_eq!(settings.model.origin, Origin::Default);
     }
 
@@ -1222,7 +1769,10 @@ mod tests {
             ..Flags::default()
         };
         let settings = resolve_clean(&flags, &no_env, None, Some(&user));
-        assert_eq!(settings.model.value, openai_codex::DEFAULT_MODEL);
+        assert_eq!(
+            settings.model.value.as_deref(),
+            Some(openai_codex::DEFAULT_MODEL)
+        );
         assert_eq!(settings.model.origin, Origin::Default);
 
         // A layer that names no provider keeps its top-level model:
@@ -1233,7 +1783,7 @@ mod tests {
             ..Flags::default()
         };
         let settings = resolve_clean(&flags, &no_env, None, Some(&user));
-        assert_eq!(settings.model.value, "unscoped-model");
+        assert_eq!(settings.model.value.as_deref(), Some("unscoped-model"));
 
         // When the layer's provider matches the active one, its
         // top-level model applies.
@@ -1243,7 +1793,7 @@ mod tests {
         );
         let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
         assert_eq!(settings.provider.value, "anthropic");
-        assert_eq!(settings.model.value, "claude-x");
+        assert_eq!(settings.model.value.as_deref(), Some("claude-x"));
     }
 
     #[test]
@@ -1254,7 +1804,7 @@ mod tests {
              model = \"from-table\"",
         );
         let settings = resolve_clean(&Flags::default(), &no_env, Some(&project), None);
-        assert_eq!(settings.model.value, "from-table");
+        assert_eq!(settings.model.value.as_deref(), Some("from-table"));
         assert_eq!(settings.model.origin, Origin::Project);
     }
 
@@ -1270,7 +1820,7 @@ mod tests {
         );
         let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
         assert_eq!(settings.provider.value, "anthropic");
-        assert_eq!(settings.model.value, "anthropic-model");
+        assert_eq!(settings.model.value.as_deref(), Some("anthropic-model"));
     }
 
     #[test]

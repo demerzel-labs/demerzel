@@ -82,8 +82,15 @@ pub struct SessionMeta {
     pub schema: u32,
     /// Project directory the session ran in.
     pub cwd: String,
-    /// Adapter id, e.g. "openai-codex".
+    /// The provider instance name, e.g. "local" for a
+    /// `[providers.local]` table. A shipped adapter's implicit
+    /// instance carries the adapter id, e.g. "openai-codex".
     pub provider: String,
+    /// The adapter id behind the instance, e.g. "openai-compat";
+    /// absent in a file from before the field, and readers keep such
+    /// a file. There, `provider` is the adapter id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub model: String,
     /// The reasoning effort the run's requests carry, by its level
     /// name; absent when the provider's default applies. A name, not
@@ -102,22 +109,56 @@ pub struct SessionMeta {
 impl SessionMeta {
     /// Metadata for a run starting now. The stored `cwd` is canonical,
     /// so one project has one spelling across resumes.
-    pub fn now(
-        cwd: &Path,
-        provider: &str,
-        model: &str,
-        effort: Option<Effort>,
-        approval: ApprovalMode,
-    ) -> Self {
-        let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    pub fn now(open: &SessionOpen<'_>) -> Self {
+        let canonical = open
+            .project
+            .canonicalize()
+            .unwrap_or_else(|_| open.project.to_path_buf());
         Self {
             schema: SCHEMA_VERSION,
             cwd: canonical.display().to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            effort: effort.map(|effort| effort.as_str().to_string()),
-            approval: Some(approval.as_str().to_string()),
+            provider: open.provider.to_string(),
+            kind: Some(open.kind.to_string()),
+            model: open.model.to_string(),
+            effort: open.effort.map(|effort| effort.as_str().to_string()),
+            approval: Some(open.approval.as_str().to_string()),
             created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
+        }
+    }
+}
+
+/// What a meta record names: the project, the provider instance and
+/// its adapter, the model, the effort, and the approval mode. One
+/// struct for [`SessionMeta::now`] and [`SessionStore::create`], so a
+/// later field changes no signature. Non-exhaustive: build one with
+/// [`SessionOpen::new`] and set the optional fields.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct SessionOpen<'a> {
+    /// The project directory the session is scoped to.
+    pub project: &'a Path,
+    /// The provider instance name.
+    pub provider: &'a str,
+    /// The adapter id behind the instance.
+    pub kind: &'a str,
+    pub model: &'a str,
+    /// The reasoning effort the requests carry; `None` when the
+    /// provider's default applies.
+    pub effort: Option<Effort>,
+    pub approval: ApprovalMode,
+}
+
+impl<'a> SessionOpen<'a> {
+    /// A record for instance `provider` of adapter `kind`, with no
+    /// effort and the `ask` mode.
+    pub fn new(project: &'a Path, provider: &'a str, kind: &'a str, model: &'a str) -> Self {
+        Self {
+            project,
+            provider,
+            kind,
+            model,
+            effort: None,
+            approval: ApprovalMode::Ask,
         }
     }
 }
@@ -318,16 +359,10 @@ impl SessionStore {
             .join("sessions")
     }
 
-    /// Create a new session file for the project and write its meta
+    /// Create a new session file for `open.project` and write its meta
     /// record.
-    pub fn create(
-        &self,
-        project: &Path,
-        provider: &str,
-        model: &str,
-        effort: Option<Effort>,
-        approval: ApprovalMode,
-    ) -> io::Result<Session> {
+    pub fn create(&self, open: &SessionOpen<'_>) -> io::Result<Session> {
+        let project = open.project;
         let dir = self.sessions_dir(project);
         std::fs::create_dir_all(&dir)?;
         let mut attempt = 0;
@@ -348,11 +383,10 @@ impl SessionStore {
             path,
             file,
             cwd: project.to_path_buf(),
+            meta: None,
             buf: Vec::new(),
         };
-        session.append_meta(&SessionMeta::now(
-            project, provider, model, effort, approval,
-        ))?;
+        session.append_meta(&SessionMeta::now(open))?;
         log::info!(
             "session created id={} path={}",
             session.id,
@@ -419,12 +453,21 @@ pub struct Session {
     /// mid-run meta record — a model switch — names the same project
     /// as the one that opened the file.
     cwd: PathBuf,
+    /// The last meta record this handle wrote or resumed from. A
+    /// switch record starts from it, so a field that one record
+    /// carries stays on the next.
+    meta: Option<SessionMeta>,
     /// Reused serialization buffer, so appends allocate nothing steady
     /// state.
     buf: Vec<u8>,
 }
 
 impl Session {
+    /// The last meta record this handle wrote or resumed from.
+    pub fn meta(&self) -> Option<&SessionMeta> {
+        self.meta.as_ref()
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -510,6 +553,7 @@ impl Session {
         // meta append — a model switch — names the same project even
         // when the file the session resumed had no meta record.
         self.cwd = PathBuf::from(&meta.cwd);
+        self.meta = Some(meta.clone());
         Ok(())
     }
 
@@ -624,6 +668,7 @@ impl Session {
                 path: path.to_path_buf(),
                 file,
                 cwd,
+                meta: replay.meta.clone(),
                 buf: Vec::new(),
             },
             replay,
@@ -860,13 +905,12 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
 
         let mut session = store
-            .create(
+            .create(&SessionOpen::new(
                 &project,
                 "openai-codex",
+                "openai-codex",
                 "gpt-test",
-                None,
-                ApprovalMode::Ask,
-            )
+            ))
             .unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
@@ -890,6 +934,7 @@ mod tests {
         let meta = replay.meta.unwrap();
         assert_eq!(meta.schema, SCHEMA_VERSION);
         assert_eq!(meta.provider, "openai-codex");
+        assert_eq!(meta.kind.as_deref(), Some("openai-codex"));
         assert_eq!(meta.model, "gpt-test");
         assert_eq!(meta.approval.as_deref(), Some("ask"));
         assert_eq!(replay.messages.len(), 2);
@@ -906,20 +951,36 @@ mod tests {
     }
 
     #[test]
+    fn a_meta_record_names_the_instance_and_its_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut open = SessionOpen::new(dir.path(), "local", "openai-compat", "qwen3");
+        open.effort = Some(Effort::Low);
+        let meta = SessionMeta::now(&open);
+        assert_eq!(meta.provider, "local");
+        assert_eq!(meta.kind.as_deref(), Some("openai-compat"));
+        assert_eq!(meta.model, "qwen3");
+        assert_eq!(meta.effort.as_deref(), Some("low"));
+        assert_eq!(meta.approval.as_deref(), Some("ask"));
+
+        // A record from before the field reads without a kind.
+        let old: SessionMeta = serde_json::from_str(
+            "{\"schema\":1,\"cwd\":\"/x\",\"provider\":\"anthropic\",\"model\":\"m\",\
+             \"created\":\"2026-08-07T00:00:00Z\"}",
+        )
+        .unwrap();
+        assert_eq!(old.provider, "anthropic");
+        assert_eq!(old.kind, None);
+    }
+
+    #[test]
     fn the_replay_keeps_the_tool_clocks_and_places_each_usage_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let mut session = store
-            .create(
-                &project,
-                "openai-codex",
-                "gpt-test",
-                None,
-                ApprovalMode::Auto,
-            )
-            .unwrap();
+        let mut open = SessionOpen::new(&project, "openai-codex", "openai-codex", "gpt-test");
+        open.approval = ApprovalMode::Auto;
+        let mut session = store.create(&open).unwrap();
         let usage = Usage {
             input_tokens: 1,
             output_tokens: 1,
@@ -1045,7 +1106,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let mut session = store
-            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
         session
             .append_approval(
@@ -1068,7 +1129,7 @@ mod tests {
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
         let mut session = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         session
             .append_message(&text_message(Role::User, "one"))
@@ -1090,7 +1151,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let mut session = store
-            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
@@ -1123,7 +1184,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let mut session = store
-            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
         session
             .append_message(&text_message(Role::User, "kept"))
@@ -1153,16 +1214,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let mut session = store
-            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
         let records = [
-            SessionRecord::Meta(SessionMeta::now(
+            SessionRecord::Meta(SessionMeta::now(&SessionOpen::new(
                 dir.path(),
                 "p2",
+                "k2",
                 "m2",
-                None,
-                ApprovalMode::Ask,
-            )),
+            ))),
             SessionRecord::Message(text_message(Role::Assistant, "hi")),
             SessionRecord::Approval {
                 tool: "bash".into(),
@@ -1234,7 +1294,7 @@ mod tests {
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
         let mut session = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         session
             .append_message(&text_message(Role::User, "hi"))
@@ -1334,7 +1394,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path());
         let mut session = store
-            .create(dir.path(), "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
         session.append_usage(&Usage::default(), timing).unwrap();
         session
@@ -1411,10 +1471,10 @@ mod tests {
         assert!(store.latest(&project).unwrap().is_none());
 
         let first = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         let second = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         let latest = store.latest(&project).unwrap().unwrap();
         assert_eq!(latest, second.path());
@@ -1434,7 +1494,7 @@ mod tests {
         );
 
         let session = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         let id = session.id().to_string();
         let found = store.find(&project, &id).unwrap().unwrap();
@@ -1467,7 +1527,7 @@ mod tests {
         let store = SessionStore::at(dir.path());
         let project = dir.path().to_path_buf();
         let session = store
-            .create(&project, "p", "m", None, ApprovalMode::Ask)
+            .create(&SessionOpen::new(&project, "p", "p", "m"))
             .unwrap();
         let path = session.path().to_path_buf();
         drop(session);

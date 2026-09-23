@@ -67,8 +67,15 @@ pub(crate) fn model_note(model: &str) -> String {
 }
 
 /// The note both interfaces show for the current or new effort.
-pub(crate) fn effort_note(effort: Effort) -> String {
-    format!("effort: {effort}")
+/// The note for the effort the requests carry; `None` when the
+/// endpoint receives no effort field.
+pub(crate) fn effort_note(effort: Option<Effort>) -> String {
+    match effort {
+        Some(effort) => format!("effort: {effort}"),
+        None => {
+            "effort: default — this endpoint receives no effort until /effort sets one".to_string()
+        }
+    }
 }
 
 /// The note both interfaces show for the current or new approval
@@ -151,7 +158,7 @@ pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> 
         "effort" => {
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(effort_note(current.effort)),
+                (None, _) => Effect::Note(effort_note(current.request_effort())),
                 (Some(level), None) => match level.parse() {
                     Ok(effort) => Effect::SetEffort(effort),
                     Err(_) => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
@@ -205,6 +212,8 @@ mod tests {
         SessionSettings {
             model: model.to_string(),
             effort,
+            effort_set: false,
+            implicit_effort: true,
             approval,
         }
     }

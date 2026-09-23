@@ -20,13 +20,14 @@ use std::sync::OnceLock;
 
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, Effort, Engine, EngineConfig, EngineError, EventSink, Message,
-    NoPrompt, ProviderError, Replay, Session, SessionMeta, SessionStore, ToolAccess, ToolHost,
-    TurnOutcome,
+    NoPrompt, ProviderError, Replay, Session, SessionMeta, SessionOpen, SessionStore, ToolAccess,
+    ToolHost, TurnOutcome,
 };
 use demerzel_providers::Provider;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
+use demerzel_providers::openai_compat::{self, CompatConfig, OpenAiCompat};
 use demerzel_tools::Registry;
 pub use demerzel_tui::{FirstRun, LoginCommand, Theme, Thinking};
 
@@ -58,6 +59,15 @@ pub enum Resume {
 pub struct SessionSettings {
     pub model: String,
     pub effort: Effort,
+    /// Whether a flag, the environment, a config file, or `/effort`
+    /// set the effort. For an adapter without implicit effort, a file
+    /// counts only through the instance's own `[providers.<name>]`
+    /// table. Such an adapter receives only a set level; the others
+    /// receive the default too.
+    pub effort_set: bool,
+    /// Whether the active adapter receives the default level, from
+    /// its rules.
+    pub implicit_effort: bool,
     pub approval: ApprovalMode,
 }
 
@@ -67,8 +77,18 @@ impl SessionSettings {
         Self {
             model: config.model.clone(),
             effort: config.effort,
+            effort_set: config.effort_set,
+            implicit_effort: demerzel_providers::adapter_rules(config.kind())
+                .is_some_and(|rules| rules.implicit_effort),
             approval: config.approval,
         }
+    }
+
+    /// The effort the requests carry. An adapter without implicit
+    /// effort, such as a compatible endpoint, gets a level only when
+    /// one was set: many servers refuse a field they do not know.
+    pub fn request_effort(&self) -> Option<Effort> {
+        (self.effort_set || self.implicit_effort).then_some(self.effort)
     }
 }
 
@@ -89,10 +109,18 @@ pub struct AuthPaths {
 pub struct RunConfig {
     /// The project directory tools and sessions are scoped to.
     pub project_dir: PathBuf,
-    /// The active provider id. This build ships `openai-codex` and
-    /// `anthropic`.
+    /// The active provider instance name. A shipped adapter's implicit
+    /// instance carries the adapter id.
     pub provider: String,
+    /// The adapter id behind the instance: `openai-codex`,
+    /// `anthropic`, or `openai-compat`. `None` when the instance name
+    /// is the adapter id, the meaning a config table without `kind`
+    /// keeps. See [`RunConfig::kind`].
+    pub kind: Option<String>,
     pub model: String,
+    /// The environment variable that holds the instance's key; `None`
+    /// keeps the adapter's own credential source.
+    pub api_key_env: Option<String>,
     pub approval: ApprovalMode,
     /// Which session the first prompt opens.
     pub resume: Resume,
@@ -102,6 +130,10 @@ pub struct RunConfig {
     pub base_url: Option<String>,
     /// The reasoning effort every request carries.
     pub effort: Effort,
+    /// Whether a flag, the environment, or a config file set `effort`;
+    /// see [`SessionSettings::effort_set`] for the adapter rule. Unset,
+    /// a compatible endpoint receives no effort field.
+    pub effort_set: bool,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: u32,
     /// The context window, in tokens. Set, it wins over the provider
@@ -131,12 +163,15 @@ impl RunConfig {
         Self {
             project_dir,
             provider: config::DEFAULT_PROVIDER.to_string(),
+            kind: None,
             model: openai_codex::DEFAULT_MODEL.to_string(),
+            api_key_env: None,
             approval: ApprovalMode::ReadOnly,
             resume: Resume::Fresh,
             data_root: None,
             base_url: None,
             effort: config::DEFAULT_EFFORT,
+            effort_set: false,
             max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
             context_window: None,
             auth: None,
@@ -146,6 +181,11 @@ impl RunConfig {
             thinking: Thinking::default(),
             theme: Theme::default(),
         }
+    }
+
+    /// The adapter id behind the active instance.
+    pub fn kind(&self) -> &str {
+        self.kind.as_deref().unwrap_or(&self.provider)
     }
 }
 
@@ -203,14 +243,21 @@ impl Runtime {
         let mut read_only_registry = Registry::full(&config.project_dir);
         read_only_registry.retain(|tool| tool.access() == ToolAccess::ReadOnly);
 
-        // The provider id is a config value: an unknown one stops the
-        // run at boot, before the interface opens. The credentials
+        // The instance is a config value: an unknown adapter, a
+        // missing endpoint or model, or a key that would reach the
+        // wrong endpoint stops the run at boot, before the interface
+        // opens. The same check serves `doctor`. The credentials
         // resolve at the first turn.
-        if !demerzel_providers::PROVIDER_IDS.contains(&config.provider.as_str()) {
-            return Err(unknown_provider(&config.provider));
+        let mut instance = config::Instance::new(config.provider.clone(), config.kind());
+        instance.base_url = config.base_url.clone();
+        instance.model = (!config.model.is_empty()).then(|| config.model.clone());
+        instance.api_key_env = config.api_key_env.clone();
+        if let Some(problem) = config::instance_problems(&instance).into_iter().next() {
+            return Err(RunError::Config(problem));
         }
 
         let mut engine_config = EngineConfig::new(config.model.clone());
+        engine_config.instance = Some(config.provider.clone());
         engine_config.max_model_calls = config.max_model_calls;
 
         Ok(Self {
@@ -253,10 +300,18 @@ impl Runtime {
     /// not open is a state to show, not a stop: the first turn fails
     /// on it with the same error.
     pub fn first_run(&self) -> Option<FirstRun> {
+        // An instance with its own key variable, and an adapter
+        // without credentials of its own, have no login to offer: the
+        // first turn names the missing variable.
+        let own_credentials = demerzel_providers::adapter_rules(self.config.kind())
+            .is_some_and(|rules| rules.own_credentials);
+        if self.config.api_key_env.is_some() || !own_credentials {
+            return None;
+        }
         let env_key = std::env::var(anthropic::ENV_API_KEY)
             .ok()
             .filter(|key| !key.is_empty());
-        let provider = self.config.provider.as_str();
+        let provider = self.config.kind();
         // The environment wins and skips the store, the order the
         // provider build applies.
         if provider == anthropic::PROVIDER_ID && env_key.is_some() {
@@ -317,7 +372,24 @@ impl Runtime {
     /// Build the provider the config names, with its credentials.
     fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
         let open_store = || Self::open_store(config);
-        match config.provider.as_str() {
+        // The instance's own key variable wins over every other
+        // source. Named but unset, it stops the turn with its name.
+        let named_key = match &config.api_key_env {
+            Some(variable) => Some(
+                std::env::var(variable)
+                    .ok()
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| {
+                        RunError::Auth(ProviderError::Auth(format!(
+                            "provider `{}` reads its key from {variable}, and {variable} \
+                             is unset or empty",
+                            config.provider
+                        )))
+                    })?,
+            ),
+            None => None,
+        };
+        match config.kind() {
             openai_codex::PROVIDER_ID => {
                 let mut auth = open_store()?;
                 auth.ensure().map_err(RunError::Auth)?;
@@ -333,10 +405,11 @@ impl Runtime {
                 // owns. The store opens only when the environment
                 // misses, so a broken store file cannot block a run
                 // that carries its key in the environment.
-                let api_key = match std::env::var(anthropic::ENV_API_KEY)
-                    .ok()
-                    .filter(|key| !key.is_empty())
-                {
+                let api_key = match named_key.or_else(|| {
+                    std::env::var(anthropic::ENV_API_KEY)
+                        .ok()
+                        .filter(|key| !key.is_empty())
+                }) {
                     Some(key) => key,
                     None => open_store()?
                         .resolve_anthropic_key(None)
@@ -353,7 +426,16 @@ impl Runtime {
                 }
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
-            other => Err(unknown_provider(other)),
+            openai_compat::PROVIDER_ID => {
+                // The boot check requires the endpoint; a compatible
+                // instance has no default one.
+                let base_url = config.base_url.clone().ok_or_else(|| {
+                    RunError::Config(format!("provider `{}` needs `base_url`", config.provider))
+                })?;
+                let compat_config = CompatConfig::new(config.provider.clone(), base_url);
+                Ok(Box::new(OpenAiCompat::new(compat_config, named_key)))
+            }
+            _ => Err(unknown_provider(&config.provider)),
         }
     }
 
@@ -395,13 +477,7 @@ impl Runtime {
                 .as_ref()
                 .is_none_or(|meta| meta.cwd == canonical.display().to_string());
             if same_project {
-                session.append_meta(&SessionMeta::now(
-                    &self.config.project_dir,
-                    &self.config.provider,
-                    &settings.model,
-                    Some(settings.effort),
-                    settings.approval,
-                ))?;
+                session.append_meta(&SessionMeta::now(&self.session_open(settings)))?;
                 return Ok((session, replay));
             }
             if let Resume::Id(id) = resume {
@@ -410,14 +486,21 @@ impl Runtime {
                 )));
             }
         }
-        let session = self.store.create(
+        let session = self.store.create(&self.session_open(settings))?;
+        Ok((session, Replay::default()))
+    }
+
+    /// What a meta record names for this run and these settings.
+    fn session_open<'a>(&'a self, settings: &'a SessionSettings) -> SessionOpen<'a> {
+        let mut open = SessionOpen::new(
             &self.config.project_dir,
             &self.config.provider,
+            self.config.kind(),
             &settings.model,
-            Some(settings.effort),
-            settings.approval,
-        )?;
-        Ok((session, Replay::default()))
+        );
+        open.effort = settings.request_effort();
+        open.approval = settings.approval;
+        open
     }
 
     /// Whether `id` names the project's latest session, the one `-c`
@@ -439,7 +522,7 @@ impl Runtime {
     pub(crate) fn context_window(&self, model: &str) -> Option<u64> {
         self.config
             .context_window
-            .or_else(|| demerzel_providers::context_window(&self.config.provider, model))
+            .or_else(|| demerzel_providers::context_window(self.config.kind(), model))
     }
 
     /// The tool set for an approval mode: `read-only` advertises the
@@ -463,7 +546,7 @@ impl Runtime {
     ) -> Result<Engine<'_>, RunError> {
         let mut engine_config = self.engine_config.clone();
         engine_config.model = settings.model.clone();
-        engine_config.effort = Some(settings.effort);
+        engine_config.effort = settings.request_effort();
         Ok(Engine::with_history(
             self.provider()?,
             self.tools(settings.approval),

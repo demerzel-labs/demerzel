@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, run_one_shot};
 use demerzel_core::{
     ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, NoPrompt, Role,
-    Session, SessionStore, TurnOutcome, replay,
+    Session, SessionOpen, SessionStore, TurnOutcome, replay,
 };
 use demerzel_mock::{MockResponse, MockServer};
 use demerzel_providers::auth::AuthStore;
@@ -97,13 +97,16 @@ impl Bed {
 
     fn engine(&self, mode: ApprovalMode) -> Engine<'_> {
         let session = SessionStore::at(self.data.path())
-            .create(
-                self.project.path(),
-                "openai-codex",
-                "test-model",
-                None,
-                mode,
-            )
+            .create(&{
+                let mut open = SessionOpen::new(
+                    self.project.path(),
+                    "openai-codex",
+                    "openai-codex",
+                    "test-model",
+                );
+                open.approval = mode;
+                open
+            })
             .unwrap();
         Engine::new(
             &self.provider,
