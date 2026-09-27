@@ -12,14 +12,13 @@ ordered, verifiable steps. It follows the shape of
 **Checked 2026-09-06:** M0 through M2.5 are complete, with both close-outs.
 This plan is step 1 of M3. No M3 code exists yet.
 
-Step 2 landed on `main` on 2026-09-22. Its dogfood receipt is pending;
-see the step's build notes. Start the next work in this order:
+Step 2 landed on `main` on 2026-09-22. Its dogfood receipt landed on
+2026-09-26; see the step's build notes. Start the next work in this
+order:
 
-1. Record the step 2 dogfood on a machine with a local compatible
-   server.
-2. Build the general Responses adapter as step 3. Add its row to
+1. Build the general Responses adapter as step 3. Add its row to
    `adapter_rules`.
-3. Follow the remaining steps in order. Each step names its dependencies.
+2. Follow the remaining steps in order. Each step names its dependencies.
    Until Daniel restores pull requests, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
 
@@ -1422,9 +1421,6 @@ for judgments. Letters keep the later step numbers stable.
     fields that steps 17 and 18 add stay on each record.
   - The fixtures reproduce the documented streams of six
     implementations, with the source and the read date in each file.
-  - The dogfood receipt is pending: the Mac that built the step runs no
-    local model server. It lands as a follow-up commit from a machine
-    with one, and it names the server, the model, and the revision.
   - Crate API: `EngineConfig` becomes non-exhaustive and gains
     `instance`; `RunConfig` gains `kind`, `api_key_env`, and
     `effort_set`; `SessionSettings` gains `effort_set`,
@@ -1432,6 +1428,30 @@ for judgments. Letters keep the later step numbers stable.
     optional and `Settings` gains `kind`, `api_key_env`, `effort_set`,
     and `problems`; `PROVIDER_IDS` lists adapter ids, the `kind`
     values; `Session::meta` returns the last meta record.
+- **Dogfood receipt (2026-09-26):** the release build of `f4b7900` ran
+  on the Linux reference machine against Ollama 0.34.4. The models were
+  `qwen3:8b` and `qwen3-8b-16k`, a derived model with `num_ctx` 16384.
+  The instance had no key. Results:
+  - A one-shot prompt called `read` and completed its turn. The next
+    request sent the `reasoning` field back on the assistant message.
+  - The full screen ran two turns in `ask` mode with `read`, `edit`, and
+    `bash` calls. The turns covered approval, denial, an interrupt, and
+    an `edit` input that the tool refused.
+  - `-c` resumed the session. The first request sent `reasoning` on all
+    9 earlier assistant messages. A resume with the other model sent it
+    on none of 10.
+  - The session file names `local` in `meta.provider` and
+    `openai-compat` in `meta.kind`. Each payload names its instance and
+    its model.
+- **Dogfood findings:**
+  - Ollama loaded `qwen3:8b` with a context of 4,096 tokens. One reply
+    overran it with 6,304 tokens, and the model lost its task. The
+    derived model ran the rest of the dogfood. Demerzel cannot detect
+    this limit, so `context_window` must match the server's context.
+  - All 6 `edit` calls put literal `\n` escapes into multi-line content,
+    also after a correction. The request and the tool schema hold no
+    such escape, so the model causes the failure. It is a bank candidate
+    for step 8.
 
 ### 3. General Responses API adapter
 
