@@ -25,7 +25,8 @@ use std::time::Duration;
 use demerzel_core::{ContentBlock, Role, SealedPayload, StopReason, Usage};
 use serde_json::{Map, Value, json};
 
-use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
+use crate::endpoint::KeyedEndpoint;
+use crate::retry::redact;
 use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
 use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
 
@@ -41,6 +42,7 @@ const ROUTE: &str = "/chat/completions";
 const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CompatConfig {
     /// The instance name. Sealed payloads carry it.
     pub instance: String,
@@ -108,109 +110,19 @@ impl Provider for OpenAiCompat {
         drop(request);
         Box::pin(async move {
             let url = format!("{}{ROUTE}", self.config.base_url);
-            let max_attempts = self.config.max_attempts;
-            let secret = self.api_key.as_deref().unwrap_or("");
-            log::debug!("request POST {} body_bytes={}", ROUTE, body.len());
-            log::trace!("request body {}", String::from_utf8_lossy(&body));
-            let mut attempt: u32 = 0;
-            let response = loop {
-                let mut builder = self
-                    .http
-                    .post(&url)
-                    .header("accept", "text/event-stream")
-                    .header("content-type", "application/json")
-                    .body(body.clone());
-                if let Some(key) = &self.api_key {
-                    builder = builder.bearer_auth(key);
-                }
-                match builder.send().await {
-                    Err(error) => {
-                        attempt += 1;
-                        if attempt >= max_attempts {
-                            log::error!(
-                                "request failed after {attempt} of {max_attempts} attempts: \
-                                 network error: {error}"
-                            );
-                            return Err(ProviderError::Network(error.to_string()));
-                        }
-                        let delay = backoff(self.config.base_delay, attempt);
-                        log::info!(
-                            "retry in {}ms after network error: {error} (attempt {attempt} of \
-                             {max_attempts})",
-                            delay.as_millis()
-                        );
-                        tokio::time::sleep(delay).await;
-                    }
-                    Ok(response) => {
-                        let status = response.status();
-                        log::info!(
-                            "POST {ROUTE} attempt {} of {max_attempts}: status {} \
-                             request-id={}",
-                            attempt + 1,
-                            status.as_u16(),
-                            request_id(&response)
-                        );
-                        if status.is_success() {
-                            // A wrong `base_url` can answer 200 with a
-                            // page or a whole JSON reply; the SSE
-                            // parser would hold all of it. Refuse it
-                            // now and show its start.
-                            if let Some(kind) = not_event_stream(&response) {
-                                let head = redact(&read_head(response).await, secret);
-                                return Err(ProviderError::Protocol(format!(
-                                    "the endpoint of instance `{}` answered with {kind}, not \
-                                     an event stream; check its base_url: {head}",
-                                    self.config.instance
-                                )));
-                            }
-                            break response;
-                        }
-                        // A key has no refresh flow: a 401 fails at
-                        // once and names the instance.
-                        if status.as_u16() == 401 {
-                            return Err(ProviderError::Auth(format!(
-                                "the endpoint of instance `{}` rejected the request \
-                                 (status 401): check the instance's key",
-                                self.config.instance
-                            )));
-                        }
-                        if status.as_u16() == 429 || status.is_server_error() {
-                            attempt += 1;
-                            if attempt >= max_attempts {
-                                log::error!(
-                                    "request failed after {attempt} of {max_attempts} attempts: \
-                                     status {}",
-                                    status.as_u16()
-                                );
-                                return Err(if status.as_u16() == 429 {
-                                    ProviderError::RateLimited {
-                                        retry_after: retry_after(&response),
-                                    }
-                                } else {
-                                    ProviderError::Server(format!("status {status}"))
-                                });
-                            }
-                            let delay = retry_delay(&response, self.config.base_delay, attempt);
-                            log::info!(
-                                "retry in {}ms after status {} (attempt {attempt} of \
-                                 {max_attempts})",
-                                delay.as_millis(),
-                                status.as_u16()
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        // The body is the server's text; it must not
-                        // echo the key into the record.
-                        let text = redact(&response.text().await.unwrap_or_default(), secret);
-                        return Err(ProviderError::InvalidRequest(format!(
-                            "status {status}: {text}"
-                        )));
-                    }
-                }
+            let key = self.api_key.as_deref();
+            let endpoint = KeyedEndpoint {
+                http: &self.http,
+                instance: &self.config.instance,
+                url: &url,
+                route: ROUTE,
+                key,
+                max_attempts: self.config.max_attempts,
+                base_delay: self.config.base_delay,
             };
+            let response = endpoint.post(body).await?;
             let state = StreamState {
-                secret: secret.to_string(),
+                secret: key.unwrap_or("").to_string(),
                 instance: self.config.instance.clone(),
                 model,
                 ..StreamState::default()
@@ -218,29 +130,6 @@ impl Provider for OpenAiCompat {
             Ok(spawn_event_stream(response, state))
         })
     }
-}
-
-/// The content type of a reply that is not an event stream; `None`
-/// for an event stream, and for a reply without the header, which the
-/// parser then judges.
-fn not_event_stream(response: &reqwest::Response) -> Option<String> {
-    let value = response.headers().get("content-type")?.to_str().ok()?;
-    let media = value.split(';').next().unwrap_or("").trim();
-    (!media.eq_ignore_ascii_case("text/event-stream")).then(|| media.to_string())
-}
-
-/// The first bytes of a reply body, at most 512, for an error text.
-async fn read_head(mut response: reqwest::Response) -> String {
-    const HEAD: usize = 512;
-    let mut head = Vec::new();
-    while head.len() < HEAD {
-        match response.chunk().await {
-            Ok(Some(bytes)) => head.extend_from_slice(&bytes),
-            _ => break,
-        }
-    }
-    head.truncate(HEAD);
-    String::from_utf8_lossy(&head).into_owned()
 }
 
 /// Build the Chat Completions request body from the neutral request.

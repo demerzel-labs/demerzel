@@ -74,11 +74,13 @@ pub async fn run(provider: Option<&str>, options: &Options) -> Result<(), RunErr
         Some(anthropic::PROVIDER_ID) => anthropic_login(options).await,
         // Instance login arrives with the `keys` auth section; until
         // then the key comes from the environment.
-        Some(demerzel_providers::openai_compat::PROVIDER_ID) => Err(RunError::Config(
-            "an openai-compat instance reads its key from the variable that its \
-             `api_key_env` names; `dmz login` does not store it"
-                .to_string(),
-        )),
+        Some(
+            kind @ (demerzel_providers::openai_compat::PROVIDER_ID
+            | demerzel_providers::openai_responses::PROVIDER_ID),
+        ) => Err(RunError::Config(format!(
+            "an {kind} instance reads its key from the variable that its `api_key_env` \
+             names; `dmz login` does not store it"
+        ))),
         Some(other) => Err(RunError::Config(format!(
             "unknown provider `{other}` — `dmz login` takes `{}` or `{}`",
             openai_codex::PROVIDER_ID,

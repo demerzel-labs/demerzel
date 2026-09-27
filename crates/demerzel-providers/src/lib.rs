@@ -7,9 +7,11 @@
 
 pub mod anthropic;
 pub mod auth;
+mod endpoint;
 pub mod oauth;
 pub mod openai_codex;
 pub mod openai_compat;
+pub mod openai_responses;
 mod retry;
 mod sse;
 
@@ -25,6 +27,7 @@ pub const PROVIDER_IDS: &[&str] = &[
     openai_codex::PROVIDER_ID,
     anthropic::PROVIDER_ID,
     openai_compat::PROVIDER_ID,
+    openai_responses::PROVIDER_ID,
 ];
 
 /// What the harness checks about an adapter before it builds one: the
@@ -62,7 +65,7 @@ pub fn adapter_rules(kind: &str) -> Option<AdapterRules> {
             key_variable: true,
             own_credentials: true,
         },
-        openai_compat::PROVIDER_ID => AdapterRules {
+        openai_compat::PROVIDER_ID | openai_responses::PROVIDER_ID => AdapterRules {
             needs_endpoint: true,
             implicit_effort: false,
             key_variable: true,
@@ -74,8 +77,8 @@ pub fn adapter_rules(kind: &str) -> Option<AdapterRules> {
 }
 
 /// The default model of an adapter; `None` for an unknown id and for
-/// an adapter without a default, such as `openai-compat`, whose
-/// instance must name its model.
+/// an adapter without a default, such as `openai-compat` or
+/// `openai-responses`, whose instance must name its model.
 pub fn default_model(provider_id: &str) -> Option<&'static str> {
     match provider_id {
         openai_codex::PROVIDER_ID => Some(openai_codex::DEFAULT_MODEL),
@@ -110,8 +113,11 @@ mod tests {
             }
             assert_eq!(context_window(id, "not-a-model"), None, "{id}");
         }
-        // The compatible adapter has no default and no catalog.
-        assert_eq!(default_model(openai_compat::PROVIDER_ID), None);
+        // The endpoint adapters have no default and no catalog.
+        for id in [openai_compat::PROVIDER_ID, openai_responses::PROVIDER_ID] {
+            assert_eq!(default_model(id), None);
+            assert!(adapter_rules(id).unwrap().needs_endpoint);
+        }
     }
 
     #[test]

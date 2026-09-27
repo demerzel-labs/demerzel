@@ -28,6 +28,7 @@ use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
 use demerzel_providers::openai_compat::{self, CompatConfig, OpenAiCompat};
+use demerzel_providers::openai_responses::{self, OpenAiResponses, ResponsesConfig};
 use demerzel_tools::Registry;
 pub use demerzel_tui::{FirstRun, LoginCommand, Theme, Thinking};
 
@@ -113,7 +114,7 @@ pub struct RunConfig {
     /// instance carries the adapter id.
     pub provider: String,
     /// The adapter id behind the instance: `openai-codex`,
-    /// `anthropic`, or `openai-compat`. `None` when the instance name
+    /// `anthropic`, `openai-compat`, or `openai-responses`. `None` when the instance name
     /// is the adapter id, the meaning a config table without `kind`
     /// keeps. See [`RunConfig::kind`].
     pub kind: Option<String>,
@@ -426,14 +427,22 @@ impl Runtime {
                 }
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
-            openai_compat::PROVIDER_ID => {
-                // The boot check requires the endpoint; a compatible
-                // instance has no default one.
+            kind @ (openai_compat::PROVIDER_ID | openai_responses::PROVIDER_ID) => {
+                // The boot check requires the endpoint: these adapters
+                // have no default one. The key comes only from the
+                // instance's own variable.
                 let base_url = config.base_url.clone().ok_or_else(|| {
                     RunError::Config(format!("provider `{}` needs `base_url`", config.provider))
                 })?;
-                let compat_config = CompatConfig::new(config.provider.clone(), base_url);
-                Ok(Box::new(OpenAiCompat::new(compat_config, named_key)))
+                let instance = config.provider.clone();
+                let provider: Box<dyn Provider> = if kind == openai_compat::PROVIDER_ID {
+                    let compat_config = CompatConfig::new(instance, base_url);
+                    Box::new(OpenAiCompat::new(compat_config, named_key))
+                } else {
+                    let responses_config = ResponsesConfig::new(instance, base_url);
+                    Box::new(OpenAiResponses::new(responses_config, named_key))
+                };
+                Ok(provider)
             }
             _ => Err(unknown_provider(&config.provider)),
         }

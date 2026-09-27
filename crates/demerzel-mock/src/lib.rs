@@ -1,8 +1,9 @@
 //! Mock model endpoint for hermetic tests and Layer-2 benchmarks.
 //!
-//! The server implements `POST /responses`, `POST /v1/messages`,
-//! `POST /v1/chat/completions`, and `GET /v1/models` for key checks.
-//! All four replay one scripted list of responses in request order. It also implements
+//! The server implements `POST /responses`, `POST /v1/responses`,
+//! `POST /v1/messages`, `POST /v1/chat/completions`, and
+//! `GET /v1/models` for key checks. All five replay one scripted list
+//! of responses in request order. It also implements
 //! `POST /oauth/token` for the credential-refresh and login-exchange
 //! paths. It records every request so tests can assert on
 //! serialization and headers. Never part of the shipped binary.
@@ -10,6 +11,7 @@
 pub mod anthropic;
 pub mod codex;
 pub mod compat;
+pub mod responses;
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -216,6 +218,7 @@ impl MockServer {
         });
         let app = Router::new()
             .route("/responses", post(handle_responses))
+            .route("/v1/responses", post(handle_api_responses))
             .route("/v1/messages", post(handle_messages))
             .route("/v1/chat/completions", post(handle_chat))
             .route("/v1/models", get(handle_models))
@@ -272,6 +275,14 @@ async fn handle_responses(
     body: String,
 ) -> Response {
     scripted_reply(&state, "/responses", &headers, body)
+}
+
+async fn handle_api_responses(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    scripted_reply(&state, "/v1/responses", &headers, body)
 }
 
 async fn handle_messages(

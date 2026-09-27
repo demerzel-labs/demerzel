@@ -10,7 +10,7 @@ provider that you choose.
 
 **Status: pre-alpha.** Demerzel is usable from source. It has no
 packaged release yet. The current build has a full-screen interface,
-a plain fallback, two providers, layered config, login, resume,
+a plain fallback, four provider adapters, layered config, login, resume,
 slash commands, and the core file and shell tools. M5 is the planned
 packaged launch.
 
@@ -39,7 +39,7 @@ another project, run this binary by its absolute path.
 
 ## Log in
 
-Use one of the two shipped providers:
+Two providers have a login:
 
 ```bash
 ./target/release/demerzel login
@@ -65,6 +65,21 @@ provider = "anthropic"
 ```
 
 You can also set `ANTHROPIC_API_KEY` for Anthropic.
+
+A named instance connects Demerzel to any server that speaks the Chat
+Completions or the Responses API protocol, such as a local model
+server. Define the instance in your user config file:
+
+```toml
+provider = "local"
+
+[providers.local]
+kind = "openai-compat"            # or "openai-responses"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3-coder"
+```
+
+[Provider instances](docs/config.md#provider-instances) lists the keys.
 
 Run `doctor` before the first session:
 
@@ -146,21 +161,22 @@ can write wherever the process can write.
 
 ## Principles
 
-- **Provider-neutral.** The current build ships `openai-codex` and
-  `anthropic`. Each adapter translates into Demerzel's provider
-  contract.
+- **Provider-neutral.** The current build ships four adapters:
+  `openai-codex`, `anthropic`, `openai-compat`, and
+  `openai-responses`. Each adapter translates into Demerzel's
+  provider contract.
 - **Lightweight.** Speed and memory use are product features. Each published
   number comes from a reproducible benchmark in [`bench/`](bench/).
-- **Yours to extend.** Skills, hooks, MCP, subagents, memory, and
-  compatible local endpoints are planned work. The current extension
-  surface is config plus the built-in slash commands.
+- **Yours to extend.** Skills, hooks, MCP, subagents, and memory are
+  planned work. The current extension surface is config, provider
+  instances, and the built-in slash commands.
 
 ## Current limits
 
 - Linux and macOS are the supported targets. Windows is out of scope.
 - There is no packaged release or installer yet.
-- `openai-compat`, managed local models, skills, hooks, MCP,
-  subagents, memory, personality, and compaction are planned.
+- Managed local models, skills, hooks, MCP, subagents, memory,
+  personality, and compaction are planned.
 - Long-running background commands are not supported. The shell tool
   ends its process group after each call.
 - The ChatGPT-subscription provider uses an endpoint that is not a

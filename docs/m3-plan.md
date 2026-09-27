@@ -12,13 +12,13 @@ ordered, verifiable steps. It follows the shape of
 **Checked 2026-09-06:** M0 through M2.5 are complete, with both close-outs.
 This plan is step 1 of M3. No M3 code exists yet.
 
-Step 2 landed on `main` on 2026-09-22. Its dogfood receipt landed on
-2026-09-26; see the step's build notes. Start the next work in this
-order:
+Steps 2 and 3 landed on `main`. Step 3's hosted receipt is pending,
+because no OpenAI or xAI API key is available; see the step's build
+notes. Start the next work in this order:
 
-1. Build the general Responses adapter as step 3. Add its row to
-   `adapter_rules`.
-2. Follow the remaining steps in order. Each step names its dependencies.
+1. Build instance login and the thinking key as step 4.
+2. Record the step 3 hosted receipt when a key is available.
+3. Follow the remaining steps in order. Each step names its dependencies.
    Until Daniel restores pull requests, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
 
@@ -383,9 +383,12 @@ fields require an observed need and an adapter or instance contract.
 
 Text, tool calls, reasoning, and usage map to existing neutral events.
 Both reasoning text and reasoning-summary deltas can supply display text.
-The adapter requests `reasoning.encrypted_content` and preserves complete
-reasoning output items in `SealedPayload`. Replay checks adapter,
-instance, and model identity, and keeps each item's original position.
+The adapter reads the `encrypted_content` that current servers return
+unasked. It does not send `include`, because some hosted models refuse
+that field. It preserves complete reasoning output items in
+`SealedPayload`. Replay checks adapter, instance, and model identity,
+and keeps each item's original position. A reasoning item without a
+following text or tool-call item stays off the wire.
 Display text never replaces opaque state.
 Local text and tool history remain usable across provider switches;
 foreign reasoning payloads stay off the wire.
@@ -1465,8 +1468,10 @@ for judgments. Letters keep the later step numbers stable.
 - **Depends on:** step 2.
 - **Crates:** `demerzel-providers`, `demerzel`, and `demerzel-mock`.
 - **Contracts:** provider trait none; engine events none; tools none;
-  config adds the `openai-responses` value to `providers.<name>.kind`;
-  session uses the existing identity fields and opaque payload; CLI none.
+  config adds the `openai-responses` value to `providers.<name>.kind`,
+  and `provider` takes it as an implicit instance; session uses the
+  existing identity fields and opaque payload; CLI `--provider` and
+  `DEMERZEL_PROVIDER` take the new value.
 - **Compatibility:** existing instances and sessions keep their behavior.
   Model ids remain config values. The adapter preserves local text and
   tool history without server storage or Codex credentials.
@@ -1485,6 +1490,68 @@ for judgments. Letters keep the later step numbers stable.
 - **Done when:** the tests pass and the hosted tool/resume receipt lands.
 - **Measure:** the turn bench gains `turn_text_responses`; boot and idle
   keep lazy provider construction. The existing size budget applies.
+- **Build notes (2026-09-26):**
+  - The adapter shares no protocol code with `openai-codex`. The Codex
+    adapter maps every incomplete reply to `MaxTokens` and has no
+    refusal or identity rules. No fixture proves a shared path.
+  - `endpoint::KeyedEndpoint` holds the request loop of the two
+    endpoint adapters: an optional bearer key, a 401 that names the
+    instance, and retries before the stream opens. `openai-compat`
+    moved to it with no behavior change. Its log lines now name the
+    instance.
+  - One `adapter_rules` row serves both endpoint adapters.
+  - The body takes the request apart, so the history is not copied
+    twice before serialization. Each reasoning item moves into its
+    sealed payload.
+  - Wire decisions from the public references, read on 2026-09-26:
+    - The adapter does not send `include`. OpenAI, xAI, and Ollama
+      return `encrypted_content` unasked. Some hosted models refuse
+      `include` with status 400.
+    - A reasoning item goes back verbatim, with its `rs_` id. A tool
+      call goes back from `call_id`, `name`, and `arguments`, without
+      its `fc_` item id. The references show both ids or no ids. The
+      `openai-codex` adapter uses this mix against its endpoint. If a
+      hosted server refuses the mix, strip the reasoning ids.
+    - A reasoning item goes back only when text or a tool call follows
+      it in the same reply. A server refuses a reasoning item without
+      its following item.
+    - Assistant text goes back as a message with plain `content`, the
+      documented short form.
+    - A `[DONE]` marker before `response.completed` fails the call.
+      An unknown or missing `incomplete` reason fails the call.
+    - `parallel_tool_calls` stays at the server default. The engine
+      runs every call of a reply.
+  - The mapper keys each item by its output index, or by its id when
+    the server sends no index. A call starts only when the wire names
+    its call id and its tool. A completed message or reasoning item
+    whose text never streamed shows its text. Two adjacent message
+    items of one reply join with a paragraph break.
+  - Reasoning replay follows the instance name and the model, not the
+    endpoint. [`config.md`](config.md) tells the user to start a new
+    session after a `base_url` or key change. Step 5 can add the
+    endpoint to the payload identity.
+  - Known gaps, for the hosted receipt:
+    - Replay drops a message's `phase`; see
+      [Tracked separately](#tracked-separately).
+    - A server that counts cached tokens outside `input_tokens` shows
+      a low context count.
+  - Fixtures: six files from the OpenAI references, two from the xAI
+    references, and two trimmed local captures. Each header names the
+    source and the read date.
+  - Local receipt: Ollama 0.34.4 with `qwen3-8b-16k` ran a tool turn,
+    a resume, and a model switch through `/v1/responses` on the Linux
+    reference machine.
+  - The hosted receipt is pending: no OpenAI or xAI API key is
+    available. It lands as a follow-up commit and covers these runs:
+    - a tool turn and a resume;
+    - a reasoning reply that ends in text, then another user turn;
+    - one model without reasoning.
+
+    The receipt names the provider, the model, and the revision.
+  - Crate API: `demerzel_providers::openai_responses` with
+    `PROVIDER_ID`, `ResponsesConfig`, and `OpenAiResponses`;
+    `CompatConfig` and `ResponsesConfig` become non-exhaustive;
+    `demerzel_mock::responses` and the mock route `POST /v1/responses`.
 
 ### 4. Instance login and the thinking key
 
@@ -1528,6 +1595,10 @@ for judgments. Letters keep the later step numbers stable.
   CLI none.
 - **Compatibility:** old payloads without identity fields replay as before.
   Their original instance and model cannot be recovered reliably.
+- **From step 3:** payload identity names the instance, not its
+  endpoint. A Responses payload sent to another endpoint under the same
+  instance name fails the call. Decide here whether the identity takes
+  the endpoint.
 - **Verify:** tests: a resume adopts the file's head target and a flag
   overrides it; a recorded instance missing from config falls back
   with a notice; a payload from another model stays off the wire; a
@@ -2164,6 +2235,11 @@ step:
 - The two M4 follow-ups: bounded layout retention and bulk card
   expansion, after the public benchmark baseline.
 - Mac system-cold timing, deferred by decision.
+- Message `phase` on Responses replay. The neutral text block has no
+  field for it, so replay drops it. Two message items of one reply
+  also merge into one text block. Keeping `phase` needs a field on
+  `ContentBlock::Text`, a session-schema change. The step 3 hosted
+  receipt shows whether a hosted model needs it.
 
 ## Measurements
 

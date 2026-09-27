@@ -9,6 +9,8 @@
 //! - `turn_read_tool`: a turn with one read dispatch, two model calls.
 //! - `turn_text_compat`: `turn_text` through a named `openai-compat`
 //!   instance on the Chat Completions route.
+//! - `turn_text_responses`: `turn_text` through a named
+//!   `openai-responses` instance on the Responses API route.
 //!
 //! The bench drives `demerzel::Runtime`, the same wiring the
 //! interfaces use. Session and engine construction, and session-file
@@ -29,6 +31,7 @@ use demerzel::{AuthPaths, RunConfig, Runtime};
 use demerzel_core::{ApprovalMode, EngineEvent, NoPrompt, TurnOutcome};
 use demerzel_mock::codex::{text_turn, tool_turn};
 use demerzel_mock::compat;
+use demerzel_mock::responses;
 use demerzel_mock::{MockResponse, MockServer};
 use serde_json::json;
 
@@ -213,6 +216,27 @@ fn bench_turns(c: &mut Criterion) {
         config.base_url = config.base_url.take().map(|url| format!("{url}/v1"));
     });
     c.bench_function("turn_text_compat", |b| {
+        b.to_async(&bench_rt).iter_custom(|iters| {
+            let bed = &bed;
+            async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    total += bed.timed_turn(2).await;
+                }
+                total
+            }
+        })
+    });
+    drop(bed);
+
+    // `turn_text` through a named Responses instance: the same turn on
+    // the Responses API route, with no credential.
+    let bed = Bed::start_with(vec![responses::text_turn("done")], |config| {
+        config.provider = "bench-responses".into();
+        config.kind = Some("openai-responses".into());
+        config.base_url = config.base_url.take().map(|url| format!("{url}/v1"));
+    });
+    c.bench_function("turn_text_responses", |b| {
         b.to_async(&bench_rt).iter_custom(|iters| {
             let bed = &bed;
             async move {

@@ -1,0 +1,55 @@
+: fixture: a local server reply that reasons, then calls one tool
+: source: real capture from a local Ollama server, POST /v1/responses, model qwen3-8b-16k
+: read: 2026-09-26; ollama version is 0.34.4
+: note: the adapter no longer sends include; a probe on 2026-09-26 showed this server
+: returns encrypted_content without it.
+: shape: captured records, trimmed. The request set store false, included
+: reasoning.encrypted_content, and sent one function tool with strict false. Only
+: reasoning deltas were dropped: the first 3 and the last stay, so the kept deltas do
+: not join to the done text and sequence_number skips. Every kept record is verbatim.
+: The server streams reasoning as summary deltas with no summary part events, copies
+: the plain reasoning text into encrypted_content, sends the arguments in one delta,
+: and ends the stream after response.completed with no [DONE] record.
+
+event: response.created
+data: {"response":{"background":false,"completed_at":null,"created_at":1790473475,"error":null,"frequency_penalty":0,"id":"resp_594100","incomplete_details":null,"instructions":"Use the read tool.","max_output_tokens":null,"max_tool_calls":null,"metadata":{},"model":"qwen3-8b-16k","object":"response","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","strict":false,"parameters":{"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"background":false,"completed_at":null,"created_at":1790473475,"error":null,"frequency_penalty":0,"id":"resp_594100","incomplete_details":null,"instructions":"Use the read tool.","max_output_tokens":null,"max_tool_calls":null,"metadata":{},"model":"qwen3-8b-16k","object":"response","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","strict":false,"parameters":{"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"id":"rs_609818","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"Okay","item_id":"rs_609818","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":",","item_id":"rs_609818","output_index":0,"sequence_number":4,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":" the","item_id":"rs_609818","output_index":0,"sequence_number":5,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":".\n","item_id":"rs_609818","output_index":0,"sequence_number":67,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.reasoning_summary_text.done
+data: {"item_id":"rs_609818","output_index":0,"sequence_number":68,"summary_index":0,"text":"Okay, the user wants me to read the file notes.txt. Let me check the tools available. There's a function called read that takes a path parameter. So I need to call that function with the path set to \"notes.txt\". I'll make sure the arguments are correctly formatted as JSON within the tool_call tags.\n","type":"response.reasoning_summary_text.done"}
+
+event: response.output_item.done
+data: {"item":{"encrypted_content":"Okay, the user wants me to read the file notes.txt. Let me check the tools available. There's a function called read that takes a path parameter. So I need to call that function with the path set to \"notes.txt\". I'll make sure the arguments are correctly formatted as JSON within the tool_call tags.\n","id":"rs_609818","summary":[{"text":"Okay, the user wants me to read the file notes.txt. Let me check the tools available. There's a function called read that takes a path parameter. So I need to call that function with the path set to \"notes.txt\". I'll make sure the arguments are correctly formatted as JSON within the tool_call tags.\n","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":69,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_5tf72qsq","id":"fc_297259_0","name":"read","status":"in_progress","type":"function_call"},"output_index":1,"sequence_number":70,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"path\":\"notes.txt\"}","item_id":"fc_297259_0","output_index":1,"sequence_number":71,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"path\":\"notes.txt\"}","item_id":"fc_297259_0","output_index":1,"sequence_number":72,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"path\":\"notes.txt\"}","call_id":"call_5tf72qsq","id":"fc_297259_0","name":"read","status":"completed","type":"function_call"},"output_index":1,"sequence_number":73,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"background":false,"completed_at":1790473475,"created_at":1790473475,"error":null,"frequency_penalty":0,"id":"resp_594100","incomplete_details":null,"instructions":"Use the read tool.","max_output_tokens":null,"max_tool_calls":null,"metadata":{},"model":"qwen3-8b-16k","object":"response","output":[{"encrypted_content":"Okay, the user wants me to read the file notes.txt. Let me check the tools available. There's a function called read that takes a path parameter. So I need to call that function with the path set to \"notes.txt\". I'll make sure the arguments are correctly formatted as JSON within the tool_call tags.\n","id":"rs_609818","summary":[{"text":"Okay, the user wants me to read the file notes.txt. Let me check the tools available. There's a function called read that takes a path parameter. So I need to call that function with the path set to \"notes.txt\". I'll make sure the arguments are correctly formatted as JSON within the tool_call tags.\n","type":"summary_text"}],"type":"reasoning"},{"arguments":"{\"path\":\"notes.txt\"}","call_id":"call_5tf72qsq","id":"fc_297259_0","name":"read","status":"completed","type":"function_call"}],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"completed","store":false,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","strict":false,"parameters":{"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":136,"input_tokens_details":{"cached_tokens":0},"output_tokens":89,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":225}},"sequence_number":74,"type":"response.completed"}
+

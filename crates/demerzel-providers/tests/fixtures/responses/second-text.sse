@@ -1,0 +1,36 @@
+: fixture: a second hosted provider text reply from a model with no reasoning item
+: source: https://docs.x.ai/developers/model-capabilities/text/generate-text and
+: https://docs.x.ai/developers/rest-api-reference/inference/responses; layout and
+: field order from packages/xai/src/responses/__fixtures__/xai-text-streaming.1.chunks.txt
+: in github.com/vercel/ai at 0a5dd0f9c3
+: read: 2026-09-26; generate-text last updated 2026-09-21, the Responses reference
+: 2026-09-14
+: shape: ids, text, and the model are synthetic. The response id is a bare UUID and
+: item ids are prefixed UUIDs. The response object has fewer fields than in the
+: hosted-* files, deltas carry no obfuscation, and usage has one unknown field. The
+: stream is data-only and ends with data: [DONE], per the reference text.
+
+data: {"sequence_number":0,"type":"response.created","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000b","max_output_tokens":null,"model":"second-vendor-fast-2026","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{}}}
+
+data: {"sequence_number":1,"type":"response.in_progress","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000b","max_output_tokens":null,"model":"second-vendor-fast-2026","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{}}}
+
+data: {"sequence_number":2,"type":"response.output_item.added","item":{"content":[],"id":"msg_00000000-0000-4000-8000-00000000000b","role":"assistant","type":"message","status":"in_progress"},"output_index":0}
+
+data: {"sequence_number":3,"type":"response.content_part.added","content_index":0,"item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}
+
+data: {"sequence_number":4,"type":"response.output_text.delta","content_index":0,"delta":"Hello","item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"logprobs":[]}
+
+data: {"sequence_number":5,"type":"response.output_text.delta","content_index":0,"delta":"! How ","item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"logprobs":[]}
+
+data: {"sequence_number":6,"type":"response.output_text.delta","content_index":0,"delta":"can I help?","item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"logprobs":[]}
+
+data: {"sequence_number":7,"type":"response.output_text.done","content_index":0,"item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"text":"Hello! How can I help?"}
+
+data: {"sequence_number":8,"type":"response.content_part.done","content_index":0,"item_id":"msg_00000000-0000-4000-8000-00000000000b","output_index":0,"part":{"type":"output_text","text":"Hello! How can I help?","annotations":[],"logprobs":[]}}
+
+data: {"sequence_number":9,"type":"response.output_item.done","item":{"content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[],"logprobs":[]}],"id":"msg_00000000-0000-4000-8000-00000000000b","role":"assistant","type":"message","status":"completed"},"output_index":0}
+
+data: {"sequence_number":10,"type":"response.completed","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000b","max_output_tokens":null,"model":"second-vendor-fast-2026","object":"response","output":[{"content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[],"logprobs":[]}],"id":"msg_00000000-0000-4000-8000-00000000000b","role":"assistant","type":"message","status":"completed"}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":null,"usage":{"input_tokens":40,"input_tokens_details":{"cached_tokens":32},"output_tokens":6,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":46,"num_sources_used":0,"num_server_side_tools_used":0,"synthetic_future_usage_field":0},"user":null,"incomplete_details":null,"status":"completed","store":false,"metadata":{}}}
+
+data: [DONE]
+

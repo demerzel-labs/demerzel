@@ -514,6 +514,48 @@ fn doctor_lists_instances_and_takes_a_key_variable_for_a_name() {
 }
 
 #[test]
+fn doctor_lists_a_responses_instance_and_needs_its_key_variable() {
+    let bed = Bed::new();
+    bed.write_user_config(
+        "provider = \"api\"\n\
+         [providers.api]\n\
+         kind = \"openai-responses\"\n\
+         base_url = \"https://api.example.test/v1\"\n\
+         model = \"vendor-model\"\n\
+         api_key_env = \"DMZ_TEST_RESPONSES_KEY\"",
+    );
+    let line = |out: &str| {
+        out.lines()
+            .find(|line| line.trim_start().starts_with("api: openai-responses"))
+            .unwrap_or_else(|| panic!("no line for instance `api`:\n{out}"))
+            .to_string()
+    };
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("kind = openai-responses"), "{out}");
+    let api = line(&out);
+    for part in [
+        "https://api.example.test/v1",
+        "vendor-model",
+        "DMZ_TEST_RESPONSES_KEY",
+        "unset",
+    ] {
+        assert!(api.contains(part), "{api}");
+    }
+
+    let output = bed
+        .command()
+        .env("DMZ_TEST_RESPONSES_KEY", "fake-responses-key")
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{out}");
+    assert!(line(&out).contains("(set)"), "{out}");
+    assert!(!out.contains("fake-responses-key"), "{out}");
+}
+
+#[test]
 fn a_compat_instance_without_its_endpoint_or_model_stops_the_run() {
     let bed = Bed::new();
     bed.write_user_config("provider = \"local\"\n[providers.local]\nkind = \"openai-compat\"");

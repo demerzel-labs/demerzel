@@ -44,6 +44,12 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3-coder"
 api_key_env = "LOCAL_API_KEY"    # the variable that holds the key
 
+[providers.api]                  # a Responses API instance
+kind = "openai-responses"
+base_url = "https://api.example.com/v1"
+model = "vendor-model"
+api_key_env = "API_KEY"
+
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
 markdown = true                  # render model replies as markdown
@@ -84,27 +90,29 @@ A top-level `effort` applies to any provider.
 ## Provider instances
 
 A `[providers.<name>]` table with `kind` defines a provider instance.
-`kind` names the adapter: `openai-codex`, `anthropic`, or
-`openai-compat`. `provider` then selects the instance by its name. One
-adapter can serve many instances.
+`kind` names the adapter: `openai-codex`, `anthropic`,
+`openai-compat`, or `openai-responses`. `provider` then selects the
+instance by its name. One adapter can serve many instances.
 
 A table without `kind` keeps its earlier meaning: the name is the
 adapter id, and the table tunes that adapter. Each adapter id also
 names its own instance without a table. A table named after an adapter
 cannot set another `kind`.
 
-The `openai-compat` adapter speaks the Chat Completions protocol. It
-serves hosted vendors, gateways, and local servers. Its instance needs
-two keys:
+The `openai-compat` adapter speaks the Chat Completions protocol. The
+`openai-responses` adapter speaks the Responses API protocol. Each one
+serves hosted vendors, gateways, and local servers. An instance of
+either adapter needs two keys:
 
 - `base_url`: the API root, such as `http://127.0.0.1:11434/v1`. The
-  adapter sends requests to `{base_url}/chat/completions`.
+  adapter sends requests to `{base_url}/chat/completions` or
+  `{base_url}/responses`.
 - `model`: the model id that the server takes. The adapter has no
   default model and no model catalog.
 
 A run stops at boot when either key is missing. `--base-url`,
 `--model`, and their variables supply them for one run.
-`context_window` is the only window source for a compatible instance.
+`context_window` is the only window source for these instances.
 A local server can load a smaller context than the model supports.
 Set `context_window` to the loaded context. For Ollama, `ollama ps`
 shows it, and the `num_ctx` model parameter sets it. The server can
@@ -113,8 +121,17 @@ drop text without an error when a turn outgrows that context.
 `api_key_env` names the environment variable that holds the key. The
 file holds the variable's name, never the key. When the variable is
 unset or empty, the first turn stops and names it. Without
-`api_key_env`, a compatible instance sends no `Authorization` header;
-a local server needs none.
+`api_key_env`, an `openai-compat` or `openai-responses` instance sends
+no `Authorization` header; a local server needs none.
+
+The `openai-responses` adapter keeps the conversation on your machine.
+Each request sends the whole conversation and tells the server to store
+nothing. The server can return its reasoning in an opaque form. The
+adapter sends that reasoning back only to the same instance name and
+model. Only the server that wrote the reasoning can read it back.
+Start a new session after you change an instance's `base_url` or key.
+The adapter never uses the ChatGPT login. That login serves only the
+`openai-codex` adapter.
 
 The `anthropic` and `openai-codex` adapters have credentials of their
 own: `ANTHROPIC_API_KEY` or the auth store, and the ChatGPT login.
@@ -125,10 +142,10 @@ goes to an endpoint that you did not name it for. A named
 `openai-codex` instance takes no `api_key_env`, so it cannot set its
 own `base_url`.
 
-An adapter without a default model, such as `openai-compat`, takes a
-top-level `model` only from a file that also names the instance in
-`provider`. A top-level `model` without `provider` names a model of a
-shipped adapter.
+An adapter without a default model, such as `openai-compat` or
+`openai-responses`, takes a top-level `model` only from a file that
+also names the instance in `provider`. A top-level `model` without
+`provider` names a model of a shipped adapter.
 
 `--base-url` and `DEMERZEL_BASE_URL` apply to the active instance.
 The session file names the instance in `meta.provider` and its adapter
@@ -148,13 +165,15 @@ request, so a model that does not accept the field refuses the call;
 the current models accept it. Unknown keys warn on stderr and do not
 stop the run.
 
-The `openai-compat` adapter sends `reasoning_effort` only when a flag,
-a variable, the instance's own `[providers.<name>]` table, or `/effort`
-sets the level. A top-level `effort` belongs to no instance, so it
-does not count. Many compatible servers refuse a field they do not
-know, so the default level stays off the wire. The full-screen
-interface and `/effort` then show `default` as the effort. The adapter
-sends the level by name and does not clamp it.
+The `openai-compat` adapter sends `reasoning_effort`, and the
+`openai-responses` adapter sends `reasoning.effort`. Each one sends the
+level only when a flag, a variable, the instance's own
+`[providers.<name>]` table, or `/effort` sets it. A top-level `effort`
+belongs to no instance, so it does not count. Many compatible servers
+refuse a field they do not know, so the default level stays off the
+wire. The full-screen interface and `/effort` then show `default` as
+the effort. Each adapter sends the level by name and does not clamp
+it.
 
 `/effort [level]` shows or sets the level for the session. The
 full-screen interface names the level on its status.
@@ -504,4 +523,5 @@ landed with M2.5 step 8f. `DEMERZEL_LOG` landed on 2026-09-01,
 after a dogfood hit a server overload that nothing recorded.
 M3 step 2 ([`m3-plan.md`](m3-plan.md)) added provider instances,
 `providers.<name>.kind`, `providers.<name>.api_key_env`, and the
-`openai-compat` adapter on 2026-09-22.
+`openai-compat` adapter on 2026-09-22. M3 step 3 added the
+`openai-responses` adapter on 2026-09-26.

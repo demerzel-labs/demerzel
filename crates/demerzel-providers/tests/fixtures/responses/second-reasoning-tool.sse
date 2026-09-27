@@ -1,0 +1,45 @@
+: fixture: a second hosted provider reply that reasons, then calls one tool
+: source: https://docs.x.ai/developers/model-capabilities/text/reasoning and
+: https://docs.x.ai/developers/model-capabilities/text/generate-text and
+: https://docs.x.ai/developers/rest-api-reference/inference/responses and
+: https://docs.x.ai/developers/tools/function-calling; layout and field order from the captured stream
+: packages/xai/src/responses/__fixtures__/xai-text-with-reasoning-streaming-store-false.1.chunks.txt
+: in github.com/vercel/ai at 0a5dd0f9c3
+: read: 2026-09-26; generate-text and reasoning pages last updated 2026-09-21, the
+: Responses reference 2026-09-14, function calling 2026-09-04
+: shape: ids, text, blobs, and the model are synthetic. The docs say summaries stream
+: with no reasoning.summary request, encrypted_content comes back, and a streamed call
+: arrives "in whole in a single chunk"; here that is one arguments.done with no
+: deltas, which is synthetic. The reference calls the stream data-only and ended by
+: data: [DONE], so records have no event lines. Usage adds documented extra fields.
+
+data: {"sequence_number":0,"type":"response.created","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000a","max_output_tokens":null,"model":"second-vendor-reasoner-2026","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}],"top_p":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{}}}
+
+data: {"sequence_number":1,"type":"response.in_progress","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000a","max_output_tokens":null,"model":"second-vendor-reasoner-2026","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}],"top_p":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{}}}
+
+data: {"sequence_number":2,"type":"response.output_item.added","item":{"id":"rs_00000000-0000-4000-8000-00000000000a","summary":[],"type":"reasoning","status":"in_progress"},"output_index":0}
+
+data: {"sequence_number":3,"type":"response.reasoning_summary_part.added","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"part":{"text":"","type":"summary_text"},"summary_index":0}
+
+data: {"sequence_number":4,"type":"response.reasoning_summary_text.delta","delta":"The user wants ","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"summary_index":0}
+
+data: {"sequence_number":5,"type":"response.reasoning_summary_text.delta","delta":"the manifest. ","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"summary_index":0}
+
+data: {"sequence_number":6,"type":"response.reasoning_summary_text.delta","delta":"Call read on Cargo.toml.","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"summary_index":0}
+
+data: {"sequence_number":7,"type":"response.reasoning_summary_text.done","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"summary_index":0,"text":"The user wants the manifest. Call read on Cargo.toml."}
+
+data: {"sequence_number":8,"type":"response.reasoning_summary_part.done","item_id":"rs_00000000-0000-4000-8000-00000000000a","output_index":0,"part":{"text":"The user wants the manifest. Call read on Cargo.toml.","type":"summary_text"},"summary_index":0}
+
+data: {"sequence_number":9,"type":"response.output_item.done","item":{"id":"rs_00000000-0000-4000-8000-00000000000a","summary":[{"text":"The user wants the manifest. Call read on Cargo.toml.","type":"summary_text"}],"type":"reasoning","status":"completed","encrypted_content":"enc_synthetic_second_reasoning_blob"},"output_index":0}
+
+data: {"sequence_number":10,"type":"response.output_item.added","item":{"id":"fc_00000000-0000-4000-8000-00000000000a","call_id":"call_synthetic_second_1","name":"read","arguments":"","type":"function_call","status":"in_progress"},"output_index":1}
+
+data: {"sequence_number":11,"type":"response.function_call_arguments.done","item_id":"fc_00000000-0000-4000-8000-00000000000a","output_index":1,"arguments":"{\"path\":\"Cargo.toml\"}"}
+
+data: {"sequence_number":12,"type":"response.output_item.done","item":{"id":"fc_00000000-0000-4000-8000-00000000000a","call_id":"call_synthetic_second_1","name":"read","arguments":"{\"path\":\"Cargo.toml\"}","type":"function_call","status":"completed"},"output_index":1}
+
+data: {"sequence_number":13,"type":"response.completed","response":{"created_at":1790000000,"id":"00000000-0000-4000-8000-00000000000a","max_output_tokens":null,"model":"second-vendor-reasoner-2026","object":"response","output":[{"id":"rs_00000000-0000-4000-8000-00000000000a","summary":[{"text":"The user wants the manifest. Call read on Cargo.toml.","type":"summary_text"}],"type":"reasoning","status":"completed","encrypted_content":"enc_synthetic_second_reasoning_blob"},{"id":"fc_00000000-0000-4000-8000-00000000000a","call_id":"call_synthetic_second_1","name":"read","arguments":"{\"path\":\"Cargo.toml\"}","type":"function_call","status":"completed"}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"function","name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}],"top_p":null,"usage":{"input_tokens":512,"input_tokens_details":{"cached_tokens":384},"output_tokens":180,"output_tokens_details":{"reasoning_tokens":150},"total_tokens":692,"num_sources_used":0,"num_server_side_tools_used":0,"cost_in_usd_ticks":1234567},"user":null,"incomplete_details":null,"status":"completed","store":false,"metadata":{}}}
+
+data: [DONE]
+

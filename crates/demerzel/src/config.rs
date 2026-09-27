@@ -1134,6 +1134,30 @@ mod tests {
     }
 
     #[test]
+    fn a_responses_instance_resolves_and_needs_its_endpoint_and_model() {
+        let user = layer(
+            "provider = \"hosted\"\n\
+             [providers.hosted]\n\
+             kind = \"openai-responses\"\n\
+             base_url = \"https://api.example.test/v1\"\n\
+             model = \"vendor-model\"\n\
+             api_key_env = \"HOSTED_KEY\"",
+        );
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.kind.value.as_deref(), Some("openai-responses"));
+        assert_eq!(settings.api_key_env.value.as_deref(), Some("HOSTED_KEY"));
+        assert!(settings.problems().is_empty(), "{:?}", settings.problems());
+        // Unset, effort stays off this adapter's wire.
+        assert!(!settings.effort_set);
+
+        let user = layer("provider = \"hosted\"\n[providers.hosted]\nkind = \"openai-responses\"");
+        let problems = resolve_clean(&Flags::default(), &no_env, None, Some(&user)).problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("`base_url`"), "{problems:?}");
+        assert!(problems[1].contains("`model`"), "{problems:?}");
+    }
+
+    #[test]
     fn an_undefined_instance_is_a_problem() {
         let flags = Flags {
             provider: Some("nope".into()),
