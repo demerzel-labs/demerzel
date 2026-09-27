@@ -9,18 +9,31 @@ ordered, verifiable steps. It follows the shape of
 
 ## Next-session handoff
 
-**Checked 2026-09-06:** M0 through M2.5 are complete, with both close-outs.
-This plan is step 1 of M3. No M3 code exists yet.
+**Checked 2026-09-26:** M0 through M2.5 are complete, with both close-outs.
+M3 steps 1 to 3 are on `main`: this plan, `openai-compat` with named
+instances (`f4b7900`), and `openai-responses` (`d9e51e8`). Step 3's
+hosted receipt is pending, because no OpenAI or xAI API key is
+available. See the step's build notes.
 
-Steps 2 and 3 landed on `main`. Step 3's hosted receipt is pending,
-because no OpenAI or xAI API key is available; see the step's build
-notes. Start the next work in this order:
+Start the next work in this order:
 
-1. Build instance login and the thinking key as step 4.
-2. Record the step 3 hosted receipt when a key is available.
+1. Build instance login and the thinking key as step 4. Its `keys` auth
+   section serves both endpoint adapters. The runtime builds them in one
+   branch, where a stored key joins `api_key_env`.
+2. Record the step 3 hosted receipt when a key is available. The step's
+   build notes list the three runs that it covers.
 3. Follow the remaining steps in order. Each step names its dependencies.
    Until Daniel restores pull requests, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
+
+The Linux reference machine runs a local Ollama server. It serves both
+protocols at `http://127.0.0.1:11434/v1` for dogfood. Its default
+context is 4,096 tokens. Use a model with a larger `num_ctx` for tool
+sessions; see the step 2 build notes.
+
+The full-screen PTY tests time out under heavy machine load. Check the
+load before a full test run. Run the test binary alone to tell a flake
+from a failure.
 
 Steps 8a to 8c add [judgments](#judgments), the milestone's
 differentiator. Read that design before step 5, because `EngineParts`
