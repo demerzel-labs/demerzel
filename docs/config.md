@@ -105,6 +105,10 @@ two keys:
 A run stops at boot when either key is missing. `--base-url`,
 `--model`, and their variables supply them for one run.
 `context_window` is the only window source for a compatible instance.
+A local server can load a smaller context than the model supports.
+Set `context_window` to the loaded context. For Ollama, `ollama ps`
+shows it, and the `num_ctx` model parameter sets it. The server can
+drop text without an error when a turn outgrows that context.
 
 `api_key_env` names the environment variable that holds the key. The
 file holds the variable's name, never the key. When the variable is
