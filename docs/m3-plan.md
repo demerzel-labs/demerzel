@@ -9,7 +9,7 @@ ordered, verifiable steps. It follows the shape of
 
 ## Next-session handoff
 
-**Checked 2026-09-26:** M0 through M2.5 are complete, with both close-outs.
+**Checked 2026-09-27:** M0 through M2.5 are complete, with both close-outs.
 M3 steps 1 to 3 are on `main`: this plan, `openai-compat` with named
 instances (`f4b7900`), and `openai-responses` (`d9e51e8`). Step 3's
 hosted receipt is pending, because no OpenAI or xAI API key is
@@ -21,7 +21,8 @@ Start the next work in this order:
    section serves both endpoint adapters. The runtime builds them in one
    branch, where a stored key joins `api_key_env`.
 2. Record the step 3 hosted receipt when a key is available. The step's
-   build notes list the three runs that it covers.
+   build notes list the three runs that it covers. Exit criterion 1
+   needs this receipt, so it must land before the M3 close-out.
 3. Follow the remaining steps in order. Each step names its dependencies.
    Until Daniel restores pull requests, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
@@ -43,14 +44,22 @@ Read [`config.md`](config.md) before you change config behavior. Read
 the [trust rules](#trust-rules-for-extension-content) before you add a
 key or a file that a project can supply.
 
+A step's block holds the notes that earlier steps left for it, under
+**From step N**. Read them with the block.
+
 The [tracked items](#tracked-separately) are not prerequisites for any
 step. Do not fold them into a step without a decision in this document.
 
-## Status (2026-09-06)
+## Status (2026-09-27)
 
-Step 1 merged in [PR #18](https://github.com/demerzel-labs/demerzel/pull/18).
-Step 3 adds general Responses support after the Chat Completions adapter.
-The 2026-09-22 revision adds steps 8a to 8c for judgments.
+| Step | State |
+|---|---|
+| 1. M3 plan | Done: [PR #18](https://github.com/demerzel-labs/demerzel/pull/18), [PR #19](https://github.com/demerzel-labs/demerzel/pull/19), and the judgments revision `9646b1d` |
+| 2. `openai-compat` and named provider instances | Done: `f4b7900`, with the dogfood receipt `9ca5fe1` |
+| 3. General Responses API adapter | Built: `d9e51e8`. The hosted receipt is pending. |
+| 4. Instance login and the thinking key | Next |
+| 5 to 19, with 8a to 8c | Not started |
+
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
 reference machines and the decisions that carry into M3:
@@ -1581,6 +1590,9 @@ for judgments. Letters keep the later step numbers stable.
   `login <instance>`.
 - **Compatibility:** an M2.5 binary reads a version-3 store. A store
   without the section behaves as today.
+- **From step 3:** the runtime builds both endpoint adapters in one
+  branch, where a stored key joins `api_key_env`. `login.rs` refuses
+  both kinds today; this step replaces that refusal.
 - **Verify:** each compatible adapter stores a key after a mock `/models` check,
   refuses it on 401, and stores it with a warning on 404. A config test
   resolves `thinking` and sends the request shape. A strict fixture accepts
@@ -1608,6 +1620,10 @@ for judgments. Letters keep the later step numbers stable.
   CLI none.
 - **Compatibility:** old payloads without identity fields replay as before.
   Their original instance and model cannot be recovered reliably.
+- **From step 2:** the runtime keeps one lazy provider slot, and
+  `ProviderHost` adds one slot per instance. The effort rule and the
+  first-run check read the head instance. Apply them per route target,
+  from each target's `adapter_rules` row.
 - **From step 3:** payload identity names the instance, not its
   endpoint. A Responses payload sent to another endpoint under the same
   instance name fails the call. Decide here whether the identity takes
@@ -1639,6 +1655,10 @@ for judgments. Letters keep the later step numbers stable.
   `usage.model`; CLI `/model <provider> <model>`.
 - **Compatibility:** no `[roles]` table means the top-level keys define
   the head target, as today.
+- **From step 2:** `config::Instance` and `config::instance_problems`
+  serve `doctor` and the boot check. Resolve every chain target under
+  the same trust rules: add one `resolve_instance`, and let `Settings`
+  hold the head's result.
 - **Verify:** tests: the chain falls to the second target on an
   authentication, network, or invalid-request failure before the first
   event; no fallback after a text delta; a `usage` record names the
@@ -2248,6 +2268,10 @@ step:
 - The two M4 follow-ups: bounded layout retention and bulk card
   expansion, after the public benchmark baseline.
 - Mac system-cold timing, deferred by decision.
+- The open Dependabot pull requests, #23 to #28. CI cannot pass while
+  the Actions budget is out. The `base64` 0.23 and `criterion` 0.8
+  bumps can need code changes. Each one needs a completed body before
+  merge; see [`ci.md`](ci.md).
 - Message `phase` on Responses replay. The neutral text block has no
   field for it, so replay drops it. Two message items of one reply
   also merge into one text block. Keeping `phase` needs a field on
