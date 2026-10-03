@@ -1639,6 +1639,11 @@ for judgments. Letters keep the later step numbers stable.
   - A key that `dmz login` stores during a session takes effect at
     the next run. A keyless compatible instance builds once and stays
     cached.
+  - Four choices go beyond the plan text: the endpoint binding, the
+    `thinking` trust rule, the stop on a store that is not JSON, and
+    `meta.effort` under `off`. Daniel left the call to the build on
+    2026-10-02. All four stand, because each one fails closed or keeps
+    a rule that the plan already states.
   - Local receipt: Ollama 0.34.4 on the Linux reference machine.
     `dmz login` stored a key for an `openai-compat` and an
     `openai-responses` instance after a 200 reply from `/v1/models`.
