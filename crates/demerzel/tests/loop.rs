@@ -465,6 +465,78 @@ async fn one_shot_dispatches_to_the_anthropic_provider() {
 }
 
 #[tokio::test]
+async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_change() {
+    use demerzel::SessionSettings;
+    use demerzel_core::Effort;
+    use demerzel_mock::anthropic::{refuses_thinking, text_turn, tool_turn};
+    use demerzel_providers::ThinkingMode;
+
+    // A strict server whose model takes neither adaptive thinking nor
+    // effort: every request must pass its check.
+    let mock = MockServer::start(
+        vec![
+            tool_turn("toolu_1", "read", json!({"path": "f.txt"})).with_check(refuses_thinking),
+            text_turn("two lines").with_check(refuses_thinking),
+            text_turn("still two").with_check(refuses_thinking),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("f.txt"), "alpha\nbeta\n").unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let store_path = data.path().join("auth.json");
+    std::fs::write(
+        &store_path,
+        json!({"version": 2, "anthropic": {"api_key": "sk-fake-store-key"}}).to_string(),
+    )
+    .unwrap();
+    let mut config = RunConfig::new(project.path().to_path_buf());
+    config.provider = "anthropic".into();
+    config.model = "claude-test".into();
+    config.approval = ApprovalMode::Auto;
+    config.data_root = Some(data.path().join("store"));
+    config.base_url = Some(mock.url());
+    config.thinking_mode = Some(ThinkingMode::Off);
+    config.auth = Some(AuthPaths {
+        store: store_path,
+        codex_cli: None,
+    });
+
+    let runtime = Runtime::new(config).unwrap();
+    let settings = SessionSettings::from_config(runtime.config());
+    assert!(settings.effort_omitted);
+    let (session, replay) = runtime.open_session(&Resume::Fresh, &settings).unwrap();
+    let mut engine = runtime.engine(session, replay.messages, &settings).unwrap();
+    let noop = |_: EngineEvent<'_>| {};
+    let outcome = engine
+        .user_turn("read f.txt".into(), &noop, &mut NoPrompt)
+        .await
+        .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    // `/effort max` sets the session's level; the instance still
+    // sends none.
+    engine.set_effort(Effort::Max).unwrap();
+    let outcome = engine
+        .user_turn("again".into(), &noop, &mut NoPrompt)
+        .await
+        .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let received = mock.received();
+    assert_eq!(received.len(), 3);
+    assert_eq!(
+        received[1].body["messages"][1]["content"][0]["type"],
+        "tool_use"
+    );
+    assert_eq!(
+        received[1].body["messages"][2]["content"][0]["type"],
+        "tool_result"
+    );
+}
+
+#[tokio::test]
 async fn one_shot_continue_resumes_the_latest_session() {
     let bed = Bed::start(vec![text_turn("first"), text_turn("second")]).await;
     let mut config = RunConfig::new(bed.project.path().to_path_buf());

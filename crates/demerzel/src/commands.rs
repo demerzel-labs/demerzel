@@ -66,11 +66,29 @@ pub(crate) fn model_note(model: &str) -> String {
     format!("model: {model}")
 }
 
-/// The note both interfaces show for the current or new effort.
-/// The note for the effort the requests carry; `None` when the
-/// endpoint receives no effort field.
-pub(crate) fn effort_note(effort: Option<Effort>) -> String {
-    match effort {
+/// The effort on the full-screen status: the level the requests
+/// carry, never a level they do not send.
+pub(crate) fn effort_status(settings: &SessionSettings) -> String {
+    match settings.request_effort() {
+        _ if settings.effort_omitted => "not sent".to_string(),
+        Some(effort) => effort.to_string(),
+        None => "default".to_string(),
+    }
+}
+
+/// The note both interfaces show for the current or new effort: the
+/// level the requests carry, the default an endpoint does not
+/// receive, or the session's level that an instance with thinking off
+/// omits.
+pub(crate) fn effort_note(settings: &SessionSettings) -> String {
+    if settings.effort_omitted {
+        return format!(
+            "effort: {} — not sent: this instance turns thinking off and omits the effort; \
+             the session keeps the level",
+            settings.effort
+        );
+    }
+    match settings.request_effort() {
         Some(effort) => format!("effort: {effort}"),
         None => {
             "effort: default — this endpoint receives no effort until /effort sets one".to_string()
@@ -158,7 +176,7 @@ pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> 
         "effort" => {
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(effort_note(current.request_effort())),
+                (None, _) => Effect::Note(effort_note(current)),
                 (Some(level), None) => match level.parse() {
                     Ok(effort) => Effect::SetEffort(effort),
                     Err(_) => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
@@ -214,6 +232,7 @@ mod tests {
             effort,
             effort_set: false,
             implicit_effort: true,
+            effort_omitted: false,
             approval,
         }
     }
@@ -297,6 +316,20 @@ mod tests {
             panic!("expected usage");
         };
         assert!(note.starts_with("usage: /effort"));
+        // An instance with thinking off keeps the level and says it
+        // does not send it.
+        let mut omitted = settings("m", Effort::Low, ApprovalMode::Ask);
+        omitted.effort_omitted = true;
+        let Some(Effect::Note(note)) = dispatch("/effort", &omitted) else {
+            panic!("expected the current effort");
+        };
+        assert!(note.contains("low") && note.contains("not sent"), "{note}");
+        // The status names no level that the requests do not carry.
+        assert_eq!(
+            effort_status(&settings("m", Effort::Low, ApprovalMode::Ask)),
+            "low"
+        );
+        assert!(!effort_status(&omitted).contains("low"));
         let Some(Effect::Note(note)) = dispatch(
             "/model",
             &settings("current-model", Effort::Medium, ApprovalMode::Ask),

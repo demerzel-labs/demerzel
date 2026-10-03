@@ -79,3 +79,19 @@ pub fn tool_turn(id: &str, name: &str, input: Value) -> MockResponse {
     events.extend(message_end("tool_use"));
     MockResponse::stream(events)
 }
+
+/// The check of a strict server whose model takes neither adaptive
+/// thinking nor effort: the request disables thinking and carries no
+/// `output_config.effort`. Pass it to [`MockResponse::with_check`].
+pub fn refuses_thinking(body: &Value) -> Result<(), String> {
+    if body["thinking"] != json!({"type": "disabled"}) {
+        return Err(format!(
+            "this model does not support thinking: {}",
+            body["thinking"]
+        ));
+    }
+    if body["output_config"].get("effort").is_some() {
+        return Err("this model does not support the effort parameter".to_string());
+    }
+    Ok(())
+}

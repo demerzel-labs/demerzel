@@ -17,8 +17,8 @@ use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, S
 use serde_json::Value;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line, model_note,
-    session_note,
+    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, effort_status, exit_line,
+    model_note, session_note,
 };
 use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
@@ -42,12 +42,10 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     ));
     options.model = config.model.clone();
     options.mode = mode;
-    // A compatible endpoint receives no effort until one is set; the
-    // status says so rather than naming a level it does not send.
-    options.effort = match SessionSettings::from_config(config).request_effort() {
-        Some(effort) => effort.to_string(),
-        None => "default".to_string(),
-    };
+    // A compatible endpoint receives no effort until one is set, and
+    // an instance with thinking off receives none; the status says so
+    // rather than naming a level it does not send.
+    options.effort = effort_status(&SessionSettings::from_config(config));
     options.context_window = runtime.context_window(&config.model);
     // The config takes any path; the name and the branch need a
     // real one, so `.` and `..` name their directory and the walk
@@ -198,9 +196,9 @@ impl Driver for TuiDriver<'_> {
                 self.settings.effort = effort;
                 self.settings.effort_set = true;
                 let mut patch = StatusPatch::default();
-                patch.effort = Some(effort.to_string());
+                patch.effort = Some(effort_status(&self.settings));
                 events.status(patch);
-                return Submission::Note(effort_note(Some(effort)));
+                return Submission::Note(effort_note(&self.settings));
             }
             Some(Effect::SetApproval(mode)) => {
                 if let Some(engine) = self.engine.as_mut()

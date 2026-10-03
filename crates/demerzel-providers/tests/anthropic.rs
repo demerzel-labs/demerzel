@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use demerzel_core::{ContentBlock, Effort, Message, Role, SealedPayload, StopReason};
 use demerzel_mock::{MockResponse, MockServer, anthropic as fixtures};
+use demerzel_providers::ThinkingMode;
 use demerzel_providers::anthropic::{Anthropic, AnthropicConfig};
 use demerzel_providers::{
     EventStream, Provider, ProviderError, Request, StreamEvent, ToolDefinition,
@@ -68,6 +69,45 @@ async fn the_request_effort_lands_in_output_config() {
     // The Messages API takes `low` through `max`: the ends clamp.
     assert_eq!(received[2].body["output_config"]["effort"], "max");
     assert_eq!(received[3].body["output_config"]["effort"], "low");
+}
+
+#[tokio::test]
+async fn thinking_off_disables_thinking_and_omits_every_effort() {
+    // A strict server refuses adaptive thinking and the effort field;
+    // each request must pass it, whatever effort the request carries.
+    let strict = || fixtures::text_turn("ok").with_check(fixtures::refuses_thinking);
+    let mock = MockServer::start(vec![strict(), strict(), strict()], vec![]).await;
+    let config = AnthropicConfig {
+        base_url: mock.url(),
+        max_attempts: 1,
+        thinking: ThinkingMode::Off,
+        ..AnthropicConfig::default()
+    };
+    let provider = Anthropic::new(config, "sk-test-key".to_string());
+
+    for effort in [None, Some(Effort::Low), Some(Effort::Max)] {
+        let mut request = request(Vec::new(), Vec::new());
+        request.effort = effort;
+        let events = collect(provider.stream(request).await.unwrap()).await;
+        assert!(events.iter().all(Result::is_ok), "{effort:?}: {events:?}");
+    }
+    let received = mock.received();
+    assert_eq!(received.len(), 3);
+    for request in &received {
+        assert_eq!(request.body["thinking"], json!({"type": "disabled"}));
+        assert!(request.body["output_config"].get("effort").is_none());
+    }
+
+    // The same server refuses the adaptive shape, so the check is
+    // live.
+    let mock = MockServer::start(vec![strict()], vec![]).await;
+    let mut request = request(Vec::new(), Vec::new());
+    request.effort = Some(Effort::High);
+    let error = provider_for(&mock).stream(request).await.err().unwrap();
+    assert!(
+        matches!(&error, ProviderError::InvalidRequest(message) if message.contains("thinking")),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

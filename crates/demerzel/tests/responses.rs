@@ -68,6 +68,11 @@ impl Bed {
         config.base_url = Some(format!("{}/v1", self.mock.url()));
         config.approval = demerzel_core::ApprovalMode::Auto;
         config.data_root = Some(self.data.path().join("store"));
+        // The run reads its own store, never the developer's.
+        config.auth = Some(AuthPaths {
+            store: self.data.path().join("auth.json"),
+            codex_cli: None,
+        });
         config
     }
 
@@ -208,24 +213,33 @@ async fn effort_reaches_the_endpoint_only_when_set() {
 }
 
 #[tokio::test]
-async fn an_instance_never_reads_the_login_store() {
+async fn an_instance_reads_only_its_own_key_from_the_store() {
     let bed = Bed::start(vec![text_turn("one"), text_turn("two")]).await;
-    // A store that holds a subscription login, and one that does not
-    // parse: the adapter reads neither, so the first sends no login
-    // and the second stops nothing.
-    let store = bed.data.path().join("auth.json");
+    // The adapters' own credentials and another instance's key never
+    // reach this instance's endpoint.
+    let foreign = bed.data.path().join("foreign.json");
     std::fs::write(
-        &store,
+        &foreign,
         json!({
-            "version": 1,
+            "version": 3,
             "openai_codex": {"access_token": "login-token", "refresh_token": "refresh"},
+            "anthropic": {"api_key": "sk-fake-anthropic"},
+            "keys": {"elsewhere": {"api_key": "fake-other-key"}},
         })
         .to_string(),
     )
     .unwrap();
-    let broken = bed.data.path().join("broken.json");
-    std::fs::write(&broken, "{ not json").unwrap();
-    for path in [store, broken] {
+    // The instance's own entry, checked at its endpoint, goes out as
+    // the bearer key.
+    let own = bed.data.path().join("own.json");
+    let endpoint = format!("{}/v1", bed.mock.url());
+    std::fs::write(
+        &own,
+        json!({"version": 3, "keys": {"hosted": {"api_key": "fake-own-key", "base_url": endpoint}}})
+            .to_string(),
+    )
+    .unwrap();
+    for path in [foreign, own] {
         let mut config = bed.config();
         config.auth = Some(AuthPaths {
             store: path,
@@ -237,10 +251,78 @@ async fn an_instance_never_reads_the_login_store() {
             .await
             .unwrap();
     }
-    for received in bed.mock.received() {
-        assert_eq!(received.authorization, None);
-        assert_eq!(received.account_id, None);
-    }
+    let received = bed.mock.received();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].authorization, None);
+    assert_eq!(received[0].account_id, None);
+    assert_eq!(
+        received[1].authorization.as_deref(),
+        Some("Bearer fake-own-key")
+    );
+
+    // A key checked at another endpoint stops the turn: it goes only
+    // to the endpoint its login named.
+    let moved = bed.data.path().join("moved.json");
+    std::fs::write(
+        &moved,
+        json!({"version": 3, "keys": {"hosted": {
+            "api_key": "fake-moved-key",
+            "base_url": "https://api.example.test/v1",
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = bed.config();
+    config.auth = Some(AuthPaths {
+        store: moved,
+        codex_cli: None,
+    });
+    let error = Runtime::new(config)
+        .unwrap()
+        .one_shot("hi".into(), &noop)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, RunError::Auth(ProviderError::Auth(message)) if message.contains("dmz login hosted")),
+        "{error:?}"
+    );
+
+    // A store that does not parse can hold the key, so it stops the
+    // turn before a request goes out.
+    let broken = bed.data.path().join("broken.json");
+    std::fs::write(&broken, "{ not json").unwrap();
+    let mut config = bed.config();
+    config.auth = Some(AuthPaths {
+        store: broken,
+        codex_cli: None,
+    });
+    let error = Runtime::new(config.clone())
+        .unwrap()
+        .one_shot("hi".into(), &noop)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, RunError::Auth(ProviderError::Auth(message)) if message.contains("auth store")),
+        "{error:?}"
+    );
+    // A key variable decides before the store: an unset one names the
+    // variable, not the store. The real binary covers a set one in
+    // tests/doctor.rs.
+    config.api_key_env = Some("DMZ_TEST_RESPONSES_KEY_NEVER_SET".into());
+    let error = Runtime::new(config)
+        .unwrap()
+        .one_shot("hi".into(), &noop)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("DMZ_TEST_RESPONSES_KEY_NEVER_SET"),
+        "{error:?}"
+    );
     assert_eq!(bed.mock.received().len(), 2);
 }
 

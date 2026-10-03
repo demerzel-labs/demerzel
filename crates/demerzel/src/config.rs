@@ -20,6 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use demerzel_core::{ApprovalMode, Effort};
+use demerzel_providers::ThinkingMode;
 use demerzel_tui::theme::{self, Color, Role};
 use demerzel_tui::{Theme, Thinking};
 
@@ -113,6 +114,9 @@ pub struct Settings {
     /// The context window, in tokens. Set, it wins over the provider
     /// catalog. `None` leaves the catalog in charge.
     pub context_window: Setting<Option<u64>>,
+    /// The instance's `thinking` key. `None` keeps the adapter's
+    /// default; only an adapter with a thinking switch takes a value.
+    pub thinking_mode: Setting<Option<ThinkingMode>>,
     pub history_file: Setting<bool>,
     /// The `[tui]` table.
     pub tui: TuiSettings,
@@ -145,6 +149,7 @@ impl Settings {
             base_url: self.base_url.value.clone(),
             model: self.model.value.clone(),
             api_key_env: self.api_key_env.value.clone(),
+            thinking_mode: self.thinking_mode.value,
         })
     }
 
@@ -181,6 +186,7 @@ struct ProviderKeys {
     model: Option<String>,
     effort: Option<Effort>,
     context_window: Option<u64>,
+    thinking: Option<ThinkingMode>,
 }
 
 /// Interface keys from the `[tui]` table.
@@ -303,6 +309,7 @@ fn parse_providers(
                 "context_window" => {
                     keys.context_window = Some(u64::from(expect_positive_u32(&path, value)?));
                 }
+                "thinking" => keys.thinking = Some(expect_thinking_mode(&path, value)?),
                 _ => warnings.push(format!("unknown key `{path}`")),
             }
         }
@@ -428,6 +435,12 @@ fn expect_thinking(key: &str, value: toml::Value) -> Result<Thinking, String> {
         .map_err(|error| format!("`{key}` {error}"))
 }
 
+fn expect_thinking_mode(key: &str, value: toml::Value) -> Result<ThinkingMode, String> {
+    expect_string(key, value)?
+        .parse()
+        .map_err(|error| format!("`{key}` {error}"))
+}
+
 fn expect_bool(key: &str, value: toml::Value) -> Result<bool, String> {
     match value {
         toml::Value::Boolean(flag) => Ok(flag),
@@ -513,8 +526,9 @@ impl Locations {
 /// The trust rule: a project file travels with the repository, so it
 /// must not raise privilege or move credentials. It cannot raise the
 /// approval mode, it cannot set an endpoint, it cannot turn the
-/// history file on against a user who turned it off, and it cannot
-/// turn mouse capture on against a user who turned it off.
+/// history file on against a user who turned it off, it cannot turn
+/// mouse capture on against a user who turned it off, and it cannot
+/// turn thinking on against a user who turned it off.
 pub fn resolve(
     flags: &Flags,
     env: &dyn Fn(&str) -> Option<String>,
@@ -660,6 +674,54 @@ pub fn resolve(
     };
     let context_window = layer_window(project, Origin::Project)
         .or_else(|| layer_window(user, Origin::User))
+        .map(some_setting)
+        .unwrap_or_else(|| Setting::new(None, Origin::Default));
+
+    // The thinking switch. Trust rule: the project file can turn
+    // thinking off, never on against a user file that turned it off:
+    // thinking costs tokens, and a user with `off` can run a model that
+    // refuses it. A project file names the instance but not its
+    // adapter, so on an adapter without the switch its value warns
+    // and drops; the user file's own value there stops the run.
+    let layer_thinking = |layer: Option<&Layer>, origin| {
+        layer_key(layer, origin, |l| {
+            l.providers.get(&provider.value).and_then(|p| p.thinking)
+        })
+    };
+    let user_thinking = layer_thinking(user, Origin::User);
+    let has_switch = kind
+        .value
+        .as_deref()
+        .and_then(demerzel_providers::adapter_rules)
+        .is_none_or(|rules| rules.thinking_switch);
+    let project_thinking = match layer_thinking(project, Origin::Project) {
+        Some(setting) if !has_switch => {
+            warnings.push(format!(
+                "ignored: the project file sets providers.{}.thinking = {}; the {} adapter \
+                 has no thinking switch",
+                provider.value,
+                setting.value,
+                kind.value.as_deref().unwrap_or("")
+            ));
+            None
+        }
+        Some(setting)
+            if setting.value != ThinkingMode::Off
+                && user_thinking
+                    .as_ref()
+                    .is_some_and(|user| user.value == ThinkingMode::Off) =>
+        {
+            warnings.push(format!(
+                "ignored: the project file sets providers.{}.thinking = {}; a project file \
+                 cannot turn thinking on against a user file that turned it off",
+                provider.value, setting.value
+            ));
+            None
+        }
+        other => other,
+    };
+    let thinking_mode = project_thinking
+        .or(user_thinking)
         .map(some_setting)
         .unwrap_or_else(|| Setting::new(None, Origin::Default));
 
@@ -840,6 +902,7 @@ pub fn resolve(
             effort_set,
             max_model_calls,
             context_window,
+            thinking_mode,
             history_file,
             tui: TuiSettings {
                 mouse,
@@ -863,6 +926,8 @@ pub struct Instance {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key_env: Option<String>,
+    /// The `thinking` key; `None` when unset.
+    pub thinking_mode: Option<ThinkingMode>,
 }
 
 impl Instance {
@@ -874,6 +939,7 @@ impl Instance {
             base_url: None,
             model: None,
             api_key_env: None,
+            thinking_mode: None,
         }
     }
 
@@ -886,9 +952,9 @@ impl Instance {
 
 /// The problems that stop a run on `instance` at boot, from the
 /// adapter's rules: an unknown adapter, a missing endpoint or model, a
-/// key variable the adapter does not take, and a named instance that
-/// would carry the adapter's own credentials to an endpoint of its
-/// own. `Settings::problems` and the runtime's boot check share it.
+/// key variable or a thinking switch the adapter does not take, and a
+/// named instance that would carry the adapter's own credentials to an
+/// endpoint of its own. `Settings::problems` and the runtime's boot check share it.
 pub fn instance_problems(instance: &Instance) -> Vec<String> {
     let name = &instance.name;
     let kind = instance.kind.as_str();
@@ -936,6 +1002,14 @@ pub fn instance_problems(instance: &Instance) -> Vec<String> {
         }
         _ => {}
     }
+    if let Some(mode) = instance.thinking_mode
+        && !rules.thinking_switch
+    {
+        problems.push(format!(
+            "provider `{name}` ({kind}) takes no `thinking`: the {kind} adapter has no thinking \
+             switch; remove `thinking = \"{mode}\"` from `[providers.{name}]`"
+        ));
+    }
     problems
 }
 
@@ -953,6 +1027,7 @@ pub fn instances(user: Option<&Layer>) -> Vec<Instance> {
                 base_url: keys.base_url.clone(),
                 model: keys.model.clone(),
                 api_key_env: keys.api_key_env.clone(),
+                thinking_mode: keys.thinking,
             })
         })
         .collect()
@@ -1043,6 +1118,79 @@ mod tests {
                 error.contains("providers.openai-codex.context_window"),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn the_thinking_key_resolves_per_instance_and_only_an_adapter_with_a_switch_takes_it() {
+        // Unset: the adapter's default, and no problem.
+        let flags = Flags {
+            provider: Some(anthropic::PROVIDER_ID.into()),
+            ..Flags::default()
+        };
+        let settings = resolve_clean(&flags, &no_env, None, None);
+        assert_eq!(settings.thinking_mode.value, None);
+        assert!(settings.problems().is_empty());
+
+        // Either file sets it, the project file first.
+        let user = layer("[providers.anthropic]\nthinking = \"off\"");
+        let settings = resolve_clean(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.thinking_mode.value, Some(ThinkingMode::Off));
+        assert_eq!(settings.thinking_mode.origin, Origin::User);
+        assert!(settings.problems().is_empty());
+        let off = layer("[providers.anthropic]\nthinking = \"off\"");
+        let settings = resolve_clean(&flags, &no_env, Some(&off), None);
+        assert_eq!(settings.thinking_mode.value, Some(ThinkingMode::Off));
+        assert_eq!(settings.thinking_mode.origin, Origin::Project);
+
+        // Trust rule: a project file cannot turn thinking on against a
+        // user file that turned it off.
+        let adaptive = layer("[providers.anthropic]\nthinking = \"adaptive\"");
+        let (settings, warnings) = resolve(&flags, &no_env, Some(&adaptive), Some(&user));
+        assert_eq!(settings.thinking_mode.value, Some(ThinkingMode::Off));
+        assert_eq!(settings.thinking_mode.origin, Origin::User);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("thinking"), "{warnings:?}");
+        let settings = resolve_clean(&flags, &no_env, Some(&adaptive), None);
+        assert_eq!(settings.thinking_mode.value, Some(ThinkingMode::Adaptive));
+
+        // A named anthropic instance takes it from its own table; the
+        // adapter's table does not reach it.
+        let user = layer(
+            "provider = \"work\"\n\
+             [providers.work]\n\
+             kind = \"anthropic\"\n\
+             thinking = \"off\"\n\
+             [providers.anthropic]\n\
+             thinking = \"adaptive\"",
+        );
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.thinking_mode.value, Some(ThinkingMode::Off));
+        let instances = instances(Some(&user));
+        assert_eq!(instances[0].thinking_mode, Some(ThinkingMode::Off));
+
+        // An adapter without a thinking switch refuses the user file's
+        // key at boot; a project file's warns and drops.
+        let user = layer(&format!("{LOCAL}\nthinking = \"off\""));
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        let problems = settings.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("`thinking`"), "{problems:?}");
+        let user = layer(LOCAL);
+        let project = layer("[providers.local]\nthinking = \"off\"");
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.thinking_mode.value, None);
+        assert!(settings.problems().is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let user = layer("[providers.openai-codex]\nthinking = \"adaptive\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.problems().len(), 1);
+
+        // Another word, or another type, is an error naming the key.
+        for bad in ["\"disabled\"", "false"] {
+            let text = format!("[providers.anthropic]\nthinking = {bad}");
+            let error = Layer::parse(&text).unwrap_err();
+            assert!(error.contains("`providers.anthropic.thinking`"), "{error}");
         }
     }
 
@@ -1376,6 +1524,7 @@ mod tests {
                 base_url: Some("http://127.0.0.1:11434/v1".into()),
                 model: Some("qwen3".into()),
                 api_key_env: Some("LOCAL_KEY".into()),
+                thinking_mode: None,
             }]
         );
         assert!(instances(None).is_empty());

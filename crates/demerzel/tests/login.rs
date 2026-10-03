@@ -15,7 +15,6 @@ fn options(dir: &Path, mock: &MockServer) -> Options {
     options.token_url = format!("{}/oauth/token", mock.url());
     options.redirect_ports = vec![0];
     options.open_browser = false;
-    options.anthropic_base_url = mock.url();
     options
 }
 

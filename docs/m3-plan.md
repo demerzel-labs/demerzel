@@ -9,17 +9,17 @@ ordered, verifiable steps. It follows the shape of
 
 ## Next-session handoff
 
-**Checked 2026-09-27:** M0 through M2.5 are complete, with both close-outs.
-M3 steps 1 to 3 are on `main`: this plan, `openai-compat` with named
-instances (`f4b7900`), and `openai-responses` (`d9e51e8`). Step 3's
-hosted receipt is pending, because no OpenAI or xAI API key is
-available. See the step's build notes.
+**Checked 2026-10-02:** M0 through M2.5 are complete, with both close-outs.
+M3 steps 1 to 4 are on `main`: this plan, `openai-compat` with named
+instances (`f4b7900`), `openai-responses` (`d9e51e8`), and instance
+login with the thinking key. Step 3's hosted receipt is pending,
+because no OpenAI or xAI API key is available. See the step's build
+notes.
 
 Start the next work in this order:
 
-1. Build instance login and the thinking key as step 4. Its `keys` auth
-   section serves both endpoint adapters. The runtime builds them in one
-   branch, where a stored key joins `api_key_env`.
+1. Build one runtime call and model identity as step 5. Read the
+   **From step 4** notes in its block first.
 2. Record the step 3 hosted receipt when a key is available. The step's
    build notes list the three runs that it covers. Exit criterion 1
    needs this receipt, so it must land before the M3 close-out.
@@ -50,15 +50,16 @@ A step's block holds the notes that earlier steps left for it, under
 The [tracked items](#tracked-separately) are not prerequisites for any
 step. Do not fold them into a step without a decision in this document.
 
-## Status (2026-09-27)
+## Status (2026-10-02)
 
 | Step | State |
 |---|---|
 | 1. M3 plan | Done: [PR #18](https://github.com/demerzel-labs/demerzel/pull/18), [PR #19](https://github.com/demerzel-labs/demerzel/pull/19), and the judgments revision `9646b1d` |
 | 2. `openai-compat` and named provider instances | Done: `f4b7900`, with the dogfood receipt `9ca5fe1` |
 | 3. General Responses API adapter | Built: `d9e51e8`. The hosted receipt is pending. |
-| 4. Instance login and the thinking key | Next |
-| 5 to 19, with 8a to 8c | Not started |
+| 4. Instance login and the thinking key | Done on 2026-10-02, with a local login receipt |
+| 5. One runtime call and model identity | Next |
+| 6 to 19, with 8a to 8c | Not started |
 
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
@@ -292,12 +293,14 @@ Rules:
   and `thinking` under the existing rules. It cannot define an instance
   or pick a credential.
 - Step 4 adds `dmz login <instance>` for both compatible adapters.
-  It prompts for a key with echo off and checks it
-  with `GET {base_url}/models`. A 401 refuses the key. Any other
-  failure warns and stores the key, because many compatible servers do
-  not serve that route. The auth store gains a `keys` section, file
-  version 3. Older builds keep unknown sections through a save, so an
-  M2.5 binary reads the file. The benchmark auth fixture stays valid
+  It names the endpoint, prompts for a key with echo off, and checks it
+  with `GET {base_url}/models`. A 401 refuses the key, and so does a
+  check that does not build. Any other failure warns and stores the
+  key, because many compatible servers do not serve that route. The
+  auth store gains a `keys` section, file version 3. Each entry holds
+  the key and the `base_url` of its check, and the key goes only to
+  that endpoint. Older builds keep unknown sections through a save, so
+  an M2.5 binary reads the file. The benchmark auth fixture stays valid
   under version 3, so the first-run screen does not block the boot
   probe.
 - The `thinking` key, `anthropic` kind only: `adaptive`, the default, or
@@ -943,7 +946,7 @@ that adds it:
 | Key | Project file may |
 |---|---|
 | `providers.<name>.kind`, `.base_url`, `.api_key_env`, `prompt.base_file` | not set it |
-| `providers.<name>.thinking` | set it |
+| `providers.<name>.thinking` | turn it off, not on against a user `off` |
 | `roles.<name>.chain` | name user-defined instances only |
 | `discovery` | remove sources, not add |
 | `memory.enabled` | turn off, not on |
@@ -1602,6 +1605,57 @@ for judgments. Letters keep the later step numbers stable.
   against the updated fixture.
 - **Done when:** the tests pass and the boot probe runs.
 - **Measure:** none.
+- **Build notes (2026-10-02):**
+  - The store keeps each `keys` entry with the key and the `base_url`
+    of its check. A session sends the key only to that endpoint. After
+    a `base_url` change, the first turn stops and names the login. The
+    review asked for the binding: a stray `DEMERZEL_BASE_URL` must not
+    carry a stored key to another server.
+  - Readers take the `keys` section leniently. An entry of another
+    shape is no key, so a later build can add another kind of entry.
+    A compatible instance reads its own entry alone, so another
+    section that this build cannot read never blocks it. A store that
+    is not JSON stops the turn of an instance without `api_key_env`.
+  - A save rereads the file and replaces only its own section. A
+    session holds its store for hours. Without the merge, its next
+    token refresh deleted a key that a login stored meanwhile.
+  - The adapter owns the omission of effort. The request carries the
+    session's level, and an instance with thinking off drops it from
+    the wire. Step 6 sends one request to several targets, so the
+    omission cannot live in the session settings. `meta.effort` keeps
+    the session's level; its doc now says that the adapter maps the
+    level to its wire.
+  - Trust: a project file can turn thinking off, but not on against a
+    user `off`. Thinking costs tokens, and a user with `off` can run a
+    model that refuses thinking. A project file's `thinking` on an
+    adapter without the switch warns and drops; the user file's stops
+    the run. The trust table above records the rule.
+  - `dmz login openai-codex` reads no config. A named login reads the
+    flags, the environment, and the user file, never the project file:
+    nothing in a project file can set a login's adapter, key variable,
+    or endpoint.
+  - `ThinkingMode` lives at the crate root next to `AdapterRules`,
+    because the rules table says which adapter takes it.
+  - A key that `dmz login` stores during a session takes effect at
+    the next run. A keyless compatible instance builds once and stays
+    cached.
+  - Local receipt: Ollama 0.34.4 on the Linux reference machine.
+    `dmz login` stored a key for an `openai-compat` and an
+    `openai-responses` instance after a 200 reply from `/v1/models`.
+    One-shot turns on both instances completed. No log or session file
+    held the key. No live `anthropic` check ran: the stored test key
+    returns 401 since 2026-09-26.
+  - Crate API: `demerzel_providers::ThinkingMode`;
+    `AdapterRules::thinking_switch`; `pub mod endpoint` with
+    `verify_key` and `KeyCheck`; `auth::StoredKey`, and the
+    path-based `AuthStore::read_instance_key` and
+    `AuthStore::set_instance_key`;
+    `AnthropicConfig.thinking` changes from `Option<Value>` to
+    `ThinkingMode`; `login::Method` and `login::method`, with
+    `login::run` taking a `Method`; `Options.anthropic_base_url` moves
+    into `Method::Anthropic`; `SessionSettings.effort_omitted`;
+    `RunConfig.thinking_mode`; `Settings.thinking_mode`;
+    `Instance.thinking_mode`; `demerzel_mock::anthropic::refuses_thinking`.
 
 ### 5. One runtime call and model identity
 
@@ -1628,6 +1682,15 @@ for judgments. Letters keep the later step numbers stable.
   endpoint. A Responses payload sent to another endpoint under the same
   instance name fails the call. Decide here whether the identity takes
   the endpoint.
+- **From step 4:** `SessionSettings.effort_omitted` and
+  `implicit_effort` describe the head instance. Make both a per-target
+  lookup from `(AdapterRules, Instance)`, and move `implicit_effort` to
+  the adapter layer, as thinking off did. One function then answers
+  "sent, default, or omitted" for `doctor`, the status, and the
+  `/effort` note, which each derive it today. `RunConfig` copies each
+  instance key into a field of its own; let it carry a resolved
+  `config::Instance` instead. One per-instance key took 13 edits in
+  step 4.
 - **Verify:** tests: a resume adopts the file's head target and a flag
   overrides it; a recorded instance missing from config falls back
   with a notice; a payload from another model stays off the wire; a
@@ -1735,6 +1798,13 @@ for judgments. Letters keep the later step numbers stable.
   record; CLI `login <instance>` accepts a `typesafe` instance.
 - **Compatibility:** without `[judgments]`, the harness sends no judgment
   request and writes no record. Old binaries skip the `judgment` record.
+- **From step 4:** `login::method` refuses an instance without
+  `base_url`, and `endpoint::verify_key` checks `{base_url}/models`. A
+  `typesafe` instance has a default endpoint and checks
+  `{base_url}/v1/models`. Carry the kind in `Method::Instance`, take the
+  endpoint from the adapter's default when the config names none, and
+  let the adapter own its check route. Consider one `KeyCheck` result
+  for `anthropic::verify_key` too, before a third check lands.
 - **Verify:** hermetic tests against the mock:
   - one request carries every question of one event;
   - each answer type maps to the reply;
@@ -2272,6 +2342,11 @@ step:
   the Actions budget is out. The `base64` 0.23 and `criterion` 0.8
   bumps can need code changes. Each one needs a completed body before
   merge; see [`ci.md`](ci.md).
+- The body builders of the `anthropic`, `openai-compat`, and
+  `openai-codex` adapters copy the history once more per request. The
+  top-level `json!` turns the moved message array into a new tree. A
+  hand-built top-level map, or a typed borrowed body, removes the copy.
+  The step 4 performance review found it. It needs a turn-bench A/B.
 - Message `phase` on Responses replay. The neutral text block has no
   field for it, so replay drops it. Two message items of one reply
   also merge into one text block. Keeping `phase` needs a field on

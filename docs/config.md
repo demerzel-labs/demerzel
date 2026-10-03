@@ -37,6 +37,7 @@ effort = "medium"                # per-provider override
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-5"
 context_window = 200000          # in tokens; wins over the model catalog
+thinking = "adaptive"            # adaptive | off, see Thinking off
 
 [providers.local]                # a named instance, see Provider instances
 kind = "openai-compat"           # the adapter behind the instance
@@ -72,6 +73,7 @@ error = "bright-red"
 | `context_window` | — | — | the provider catalog |
 | `providers.<name>.kind` | — | — | the table name, when it is an adapter id |
 | `providers.<name>.api_key_env` | — | — | unset: the adapter's own credentials |
+| `providers.<name>.thinking` | — | — | `adaptive` |
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
@@ -118,11 +120,34 @@ Set `context_window` to the loaded context. For Ollama, `ollama ps`
 shows it, and the `num_ctx` model parameter sets it. The server can
 drop text without an error when a turn outgrows that context.
 
-`api_key_env` names the environment variable that holds the key. The
-file holds the variable's name, never the key. When the variable is
-unset or empty, the first turn stops and names it. Without
-`api_key_env`, an `openai-compat` or `openai-responses` instance sends
-no `Authorization` header; a local server needs none.
+An `openai-compat` or `openai-responses` instance finds its key in
+this order:
+
+1. The environment variable that `api_key_env` names. The file holds
+   the variable's name, never the key. When the variable is unset or
+   empty, the first turn stops and names it.
+2. The key that `dmz login <name>` stored for the instance in the auth
+   store. The key goes only to the endpoint that the login checked it
+   at. After a `base_url` change, the first turn stops and asks for a
+   new login.
+3. No key. The instance sends no `Authorization` header. A local
+   server needs none.
+
+`dmz login <name>` names the endpoint that gets the key. Then it asks
+for the key with echo off and checks the key with
+`GET {base_url}/models`:
+
+- A 2xx reply stores the key.
+- A 401 reply refuses the key.
+- A request that does not build refuses the key. An example is a
+  `base_url` that is not a URL.
+- Any other failure stores the key with a warning, because many
+  compatible servers do not serve that route.
+
+The login refuses an instance with `api_key_env`, because the variable
+wins over a stored key. An auth store that does not read as a JSON
+object stops the turn of an instance without `api_key_env`. A login
+during a session takes effect at the next run.
 
 The `openai-responses` adapter keeps the conversation on your machine.
 Each request sends the whole conversation and tells the server to store
@@ -150,7 +175,7 @@ also names the instance in `provider`. A top-level `model` without
 `--base-url` and `DEMERZEL_BASE_URL` apply to the active instance.
 The session file names the instance in `meta.provider` and its adapter
 in `meta.kind`. `doctor` lists each instance with its adapter, its
-endpoint, its model, and the state of its key variable.
+endpoint, its model, and the source of its key.
 
 ## Reasoning effort
 
@@ -161,9 +186,9 @@ model catalog says which levels a model takes. The Anthropic adapter
 sends `output_config.effort`, next to adaptive thinking; the Messages
 API takes `low` through `max`, so the adapter clamps `none` and
 `minimal` to `low` and `ultra` to `max`. The level goes on every
-request, so a model that does not accept the field refuses the call;
-the current models accept it. Unknown keys warn on stderr and do not
-stop the run.
+request, so a model that does not accept the field refuses the call.
+For such a model, set `thinking = "off"` on the instance; see
+"Thinking off". Unknown keys warn on stderr and do not stop the run.
 
 The `openai-compat` adapter sends `reasoning_effort`, and the
 `openai-responses` adapter sends `reasoning.effort`. Each one sends the
@@ -177,9 +202,27 @@ it.
 
 `/effort [level]` shows or sets the level for the session. The
 full-screen interface names the level on its status.
-Each `meta` record in the session file names the effort in force, so
-a reader can tell what a run used. A resumed session takes its level
-from config, not from the file.
+Each `meta` record in the session file names the session's level, so
+a reader can tell what a run used. The adapter maps the level to its
+wire: it can clamp the level, or omit it with thinking off. A resumed
+session takes its level from config, not from the file.
+
+## Thinking off
+
+`thinking` sets the request shape of an `anthropic` instance:
+
+- `adaptive`, the default, sends adaptive thinking and the effort
+  level.
+- `off` sends `thinking: {"type": "disabled"}` and no
+  `output_config.effort`.
+
+Use `off` for a model that does not take adaptive thinking or effort.
+A model that requires thinking refuses `off`. With `off`, the instance
+omits the effort at every level, also after `/effort`. The session
+keeps its level. `/effort`, the status, and `doctor` say that the
+instance does not send it. On another adapter, the user file's
+`thinking` stops the run at boot. The project file's `thinking` there
+gives a warning, and the run ignores it.
 
 ## The approval mode at runtime
 
@@ -486,7 +529,8 @@ privilege, move credentials, or raise cost:
 - It cannot set `base_url`.
 - It cannot define a provider instance: it cannot set
   `providers.<name>.kind`. It can select an instance that the user
-  file defines and set its `model`, `effort`, and `context_window`.
+  file defines and set its `model`, `effort`, `context_window`, and
+  `thinking`.
 - It cannot set `providers.<name>.api_key_env`.
 - It cannot turn `history_file` on against a user file that turned
   it off.
@@ -495,6 +539,8 @@ privilege, move credentials, or raise cost:
   from a user who turned capture off to keep it.
 - It cannot raise `effort` above the user file's level, or above the
   default `high`.
+- It cannot set `thinking = "adaptive"` against a user file that set
+  `off`. Thinking costs tokens, and a model can refuse it.
 - It cannot raise `max_model_calls` above the user file's value, or
   above the default `128`.
 - It cannot define a theme's colors. It can pick `tui.theme`. A color
@@ -524,4 +570,6 @@ after a dogfood hit a server overload that nothing recorded.
 M3 step 2 ([`m3-plan.md`](m3-plan.md)) added provider instances,
 `providers.<name>.kind`, `providers.<name>.api_key_env`, and the
 `openai-compat` adapter on 2026-09-22. M3 step 3 added the
-`openai-responses` adapter on 2026-09-26.
+`openai-responses` adapter on 2026-09-26. M3 step 4 added
+`dmz login <instance>`, the `keys` section of the auth store, and
+`providers.<name>.thinking` on 2026-10-02.

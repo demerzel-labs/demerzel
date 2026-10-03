@@ -69,8 +69,9 @@ enum Command {
     /// With no argument the flow is the ChatGPT subscription, through
     /// the browser.
     Login {
-        /// anthropic (an API key, prompted and verified) or
-        /// openai-codex (the browser flow, the default).
+        /// openai-codex (the browser flow, the default), anthropic (an
+        /// API key, prompted and verified), or the name of an
+        /// openai-compat or openai-responses instance (its API key).
         #[arg(value_name = "PROVIDER")]
         provider: Option<String>,
     },
@@ -232,8 +233,8 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
     // The positional wins; the global `--provider` flag is the same
     // request in flag form.
     let provider = provider.or(cli.provider.as_deref());
-    let options = match login_options(cli, provider, cwd) {
-        Ok(options) => options,
+    let (method, options) = match login_options(cli, provider, cwd) {
+        Ok(resolved) => resolved,
         Err(message) => {
             eprintln!("demerzel: {message}");
             return 1;
@@ -256,7 +257,7 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
                 }
                 None
             }
-            result = login::run(provider, &options) => Some(result),
+            result = login::run(&method, &options) => Some(result),
         }
     });
     match outcome {
@@ -274,34 +275,38 @@ fn run_login(cli: &Cli, provider: Option<&str>, cwd: &Path) -> i32 {
     }
 }
 
-/// Build the login options: the store path the provider crate owns,
-/// and for the key check the endpoint the config layers resolve for
-/// the anthropic provider — flags beat environment beat user file,
-/// the same order a session uses.
-fn login_options(cli: &Cli, provider: Option<&str>, cwd: &Path) -> Result<login::Options, String> {
+/// Pick the login method and build its options: the store path the
+/// provider crate owns, and for a key check the endpoint that the
+/// config resolves for the named instance — flags beat environment
+/// beat user file, the same order a session uses. The project file
+/// stays unread: nothing in it can set a login's adapter, key
+/// variable, or endpoint. The ChatGPT subscription reads no config.
+fn login_options(
+    cli: &Cli,
+    provider: Option<&str>,
+    cwd: &Path,
+) -> Result<(login::Method, login::Options), String> {
     let store_path =
         demerzel_providers::auth::AuthStore::default_path().map_err(|e| e.to_string())?;
-    let mut options = login::Options::new(store_path);
-    if provider == Some(demerzel_providers::anthropic::PROVIDER_ID) {
-        let locations = config::Locations::locate(cwd);
-        let user = load_layer(locations.user.as_deref())?;
-        let project = load_layer(Some(&locations.project))?;
-        let mut flags = cli.flags();
-        flags.provider = Some(demerzel_providers::anthropic::PROVIDER_ID.to_string());
-        let (settings, ignored) = config::resolve(
-            &flags,
-            &|name| std::env::var(name).ok(),
-            project.as_ref(),
-            user.as_ref(),
-        );
-        for warning in &ignored {
-            eprintln!("demerzel: {warning}");
+    let options = login::Options::new(store_path);
+    let provider = match provider {
+        None | Some(demerzel_providers::openai_codex::PROVIDER_ID) => {
+            return Ok((login::Method::Codex, options));
         }
-        if let Some(base_url) = settings.base_url.value {
-            options.anthropic_base_url = base_url;
-        }
-    }
-    Ok(options)
+        Some(provider) => provider,
+    };
+    let locations = config::Locations::locate(cwd);
+    let user = load_layer(locations.user.as_deref())?;
+    let mut flags = cli.flags();
+    flags.provider = Some(provider.to_string());
+    let (settings, _) = config::resolve(
+        &flags,
+        &|name| std::env::var(name).ok(),
+        None,
+        user.as_ref(),
+    );
+    let method = login::method(&settings).map_err(|error| error.to_string())?;
+    Ok((method, options))
 }
 
 /// Resolve flags, environment, and config files into the run config.
@@ -344,6 +349,7 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.effort_set = settings.effort_set;
     config.max_model_calls = settings.max_model_calls.value;
     config.context_window = settings.context_window.value;
+    config.thinking_mode = settings.thinking_mode.value;
     config.resume = match &cli.session {
         Some(id) => Resume::Id(id.clone()),
         None if cli.continue_last => Resume::Latest,

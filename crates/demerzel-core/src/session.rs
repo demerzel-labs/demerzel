@@ -92,10 +92,12 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub model: String,
-    /// The reasoning effort the run's requests carry, by its level
-    /// name; absent when the provider's default applies. A name, not
-    /// the enum, so a reader keeps the file when a later build writes
-    /// a level it does not know.
+    /// The session's reasoning effort as the run's requests carry it,
+    /// by its level name; absent when the provider's default applies.
+    /// The adapter maps the level to its wire: it can clamp it to its
+    /// range, or omit it, as an instance with thinking off does. A
+    /// name, not the enum, so a reader keeps the file when a later
+    /// build writes a level it does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// The approval mode in force, by its name; absent in a file from
@@ -143,7 +145,8 @@ pub struct SessionOpen<'a> {
     pub kind: &'a str,
     pub model: &'a str,
     /// The reasoning effort the requests carry; `None` when the
-    /// provider's default applies.
+    /// provider's default applies. The adapter maps it to its wire;
+    /// see [`SessionMeta::effort`].
     pub effort: Option<Effort>,
     pub approval: ApprovalMode,
 }

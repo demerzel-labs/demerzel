@@ -79,7 +79,7 @@ impl Bed {
         std::fs::write(
             &auth_path,
             json!({
-                "version": 1,
+                "version": 3,
                 "openai_codex": {"access_token": "bench-token", "refresh_token": "bench-refresh"},
             })
             .to_string(),

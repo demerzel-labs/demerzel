@@ -54,11 +54,17 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLOOR_BIN = "/usr/bin/printf"
 FLOOR_ARGV = ["printf", "demerzel ready"]
 
+# A store at the current file version, 3. The Codex login keeps the
+# first-run screen out of the boot probe; the instance key makes the
+# boot parse the `keys` section as a real store does.
 AUTH_FIXTURE = {
-    "version": 1,
+    "version": 3,
     "openai_codex": {
         "access_token": "bench-access",
         "refresh_token": "bench-refresh",
+    },
+    "keys": {
+        "bench-local": {"api_key": "bench-key", "base_url": "http://127.0.0.1:9/v1"},
     },
 }
 

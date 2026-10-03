@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 
 use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
 use crate::sse::{EventCounts, PayloadMapper, spawn_event_stream};
-use crate::{BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent};
+use crate::{
+    BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent,
+    ThinkingMode,
+};
 
 /// Stable adapter id. Sealed payloads carry this id.
 pub const PROVIDER_ID: &str = "anthropic";
@@ -60,8 +63,8 @@ pub struct AnthropicConfig {
     /// `max_tokens` when the request does not set one. The Messages
     /// API requires the field.
     pub max_output_tokens: u64,
-    /// `thinking` request field, sent as-is when set.
-    pub thinking: Option<Value>,
+    /// The `thinking` field, and whether the effort field goes along.
+    pub thinking: ThinkingMode,
 }
 
 impl Default for AnthropicConfig {
@@ -71,7 +74,7 @@ impl Default for AnthropicConfig {
             max_attempts: 4,
             base_delay: Duration::from_millis(500),
             max_output_tokens: 32_000,
-            thinking: Some(json!({"type": "adaptive", "display": "summarized"})),
+            thinking: ThinkingMode::Adaptive,
         }
     }
 }
@@ -329,14 +332,19 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
         // capability flag says the same.
         body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": true});
     }
-    if let Some(thinking) = &config.thinking {
-        body["thinking"] = thinking.clone();
-    }
+    body["thinking"] = match config.thinking {
+        ThinkingMode::Adaptive => json!({"type": "adaptive", "display": "summarized"}),
+        ThinkingMode::Off => json!({"type": "disabled"}),
+    };
     // Effort steers the depth of adaptive thinking; the two fields go
     // together, and the effort sets how much of the budget the model
     // spends. The Messages API takes `low` through `max`; the levels
-    // outside that range clamp to its ends.
-    if let Some(effort) = request.effort {
+    // outside that range clamp to its ends. With thinking off the
+    // field stays off the wire: the instance is for a model that
+    // takes neither.
+    if let Some(effort) = request.effort
+        && config.thinking.sends_effort()
+    {
         let effort = effort.clamp(Effort::Low, Effort::Max);
         match body["output_config"].as_object_mut() {
             Some(output) => {

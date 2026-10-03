@@ -24,6 +24,7 @@ use demerzel_core::{
     ToolHost, TurnOutcome,
 };
 use demerzel_providers::Provider;
+use demerzel_providers::ThinkingMode;
 use demerzel_providers::anthropic::{self, Anthropic, AnthropicConfig};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{self, CodexConfig, OpenAiCodex};
@@ -69,6 +70,10 @@ pub struct SessionSettings {
     /// Whether the active adapter receives the default level, from
     /// its rules.
     pub implicit_effort: bool,
+    /// Whether the active instance keeps the effort off the wire at
+    /// every level: an instance with thinking off. The session keeps
+    /// its level, and the effort notes say the instance omits it.
+    pub effort_omitted: bool,
     pub approval: ApprovalMode,
 }
 
@@ -81,6 +86,9 @@ impl SessionSettings {
             effort_set: config.effort_set,
             implicit_effort: demerzel_providers::adapter_rules(config.kind())
                 .is_some_and(|rules| rules.implicit_effort),
+            effort_omitted: config
+                .thinking_mode
+                .is_some_and(|mode| !mode.sends_effort()),
             approval: config.approval,
         }
     }
@@ -140,6 +148,10 @@ pub struct RunConfig {
     /// The context window, in tokens. Set, it wins over the provider
     /// catalog; `None` leaves the catalog in charge.
     pub context_window: Option<u64>,
+    /// The instance's `thinking` key; `None` keeps the adapter's
+    /// default. Only an adapter with a thinking switch takes a value;
+    /// the boot check refuses it on another.
+    pub thinking_mode: Option<ThinkingMode>,
     /// Auth store override; `None` uses the default paths.
     pub auth: Option<AuthPaths>,
     /// Input-history file for the REPL; `None` keeps history in
@@ -175,6 +187,7 @@ impl RunConfig {
             effort_set: false,
             max_model_calls: config::DEFAULT_MAX_MODEL_CALLS,
             context_window: None,
+            thinking_mode: None,
             auth: None,
             history_path: None,
             mouse: config::DEFAULT_MOUSE,
@@ -253,6 +266,7 @@ impl Runtime {
         instance.base_url = config.base_url.clone();
         instance.model = (!config.model.is_empty()).then(|| config.model.clone());
         instance.api_key_env = config.api_key_env.clone();
+        instance.thinking_mode = config.thinking_mode;
         if let Some(problem) = config::instance_problems(&instance).into_iter().next() {
             return Err(RunError::Config(problem));
         }
@@ -370,6 +384,33 @@ impl Runtime {
         }
     }
 
+    /// The stored key of the active instance, for `base_url`. The read
+    /// takes the instance's entry alone, so a run without `HOME` or
+    /// with a section this build cannot read still builds; no data
+    /// directory means no store and no key. A store that is not JSON
+    /// stops the turn: it can hold the key the endpoint needs. A key
+    /// checked at another endpoint stops it too: the key goes only to
+    /// the endpoint the login named.
+    fn stored_instance_key(config: &RunConfig, base_url: &str) -> Result<Option<String>, RunError> {
+        let path = match &config.auth {
+            Some(paths) => paths.store.clone(),
+            None => match AuthStore::default_path() {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            },
+        };
+        let name = &config.provider;
+        match AuthStore::read_instance_key(&path, name).map_err(RunError::Auth)? {
+            None => Ok(None),
+            Some(stored) if stored.serves(base_url) => Ok(Some(stored.api_key)),
+            Some(stored) => Err(RunError::Auth(ProviderError::Auth(format!(
+                "the stored key of provider `{name}` was checked at {}, not at {base_url}; \
+                 run `dmz login {name}` to store a key for this endpoint",
+                stored.base_url.as_deref().unwrap_or("no endpoint")
+            )))),
+        }
+    }
+
     /// Build the provider the config names, with its credentials.
     fn build_provider(config: &RunConfig) -> Result<Box<dyn Provider>, RunError> {
         let open_store = || Self::open_store(config);
@@ -425,22 +466,28 @@ impl Runtime {
                 if let Some(base_url) = &config.base_url {
                     anthropic_config.base_url = base_url.clone();
                 }
+                anthropic_config.thinking = config.thinking_mode.unwrap_or_default();
                 Ok(Box::new(Anthropic::new(anthropic_config, api_key)))
             }
             kind @ (openai_compat::PROVIDER_ID | openai_responses::PROVIDER_ID) => {
                 // The boot check requires the endpoint: these adapters
-                // have no default one. The key comes only from the
-                // instance's own variable.
+                // have no default one. The key comes from the
+                // instance's own variable, else from the instance's
+                // entry in the store, else nowhere: no header.
                 let base_url = config.base_url.clone().ok_or_else(|| {
                     RunError::Config(format!("provider `{}` needs `base_url`", config.provider))
                 })?;
+                let key = match named_key {
+                    Some(key) => Some(key),
+                    None => Self::stored_instance_key(config, &base_url)?,
+                };
                 let instance = config.provider.clone();
                 let provider: Box<dyn Provider> = if kind == openai_compat::PROVIDER_ID {
                     let compat_config = CompatConfig::new(instance, base_url);
-                    Box::new(OpenAiCompat::new(compat_config, named_key))
+                    Box::new(OpenAiCompat::new(compat_config, key))
                 } else {
                     let responses_config = ResponsesConfig::new(instance, base_url);
-                    Box::new(OpenAiResponses::new(responses_config, named_key))
+                    Box::new(OpenAiResponses::new(responses_config, key))
                 };
                 Ok(provider)
             }

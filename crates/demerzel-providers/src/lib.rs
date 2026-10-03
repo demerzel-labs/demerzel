@@ -7,7 +7,7 @@
 
 pub mod anthropic;
 pub mod auth;
-mod endpoint;
+pub mod endpoint;
 pub mod oauth;
 pub mod openai_codex;
 pub mod openai_compat;
@@ -30,6 +30,57 @@ pub const PROVIDER_IDS: &[&str] = &[
     openai_responses::PROVIDER_ID,
 ];
 
+/// How an instance sets the thinking and effort fields: the value of
+/// the `thinking` config key, for an adapter with a thinking switch
+/// (see [`AdapterRules::thinking_switch`]). The adapter maps it to its
+/// wire fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ThinkingMode {
+    /// Adaptive thinking, and the request's effort.
+    #[default]
+    Adaptive,
+    /// Thinking disabled and no effort field, whatever the request's
+    /// effort. For a model without adaptive thinking or effort; a
+    /// model that requires thinking refuses it.
+    Off,
+}
+
+impl ThinkingMode {
+    /// The value names, for help and error text.
+    pub const NAMES: &'static str = "adaptive, off";
+
+    /// The value's config name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThinkingMode::Adaptive => "adaptive",
+            ThinkingMode::Off => "off",
+        }
+    }
+
+    /// Whether requests carry the effort field.
+    pub fn sends_effort(self) -> bool {
+        self == ThinkingMode::Adaptive
+    }
+}
+
+impl std::str::FromStr for ThinkingMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [ThinkingMode::Adaptive, ThinkingMode::Off]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+            .ok_or_else(|| format!("must be one of {}, not `{value}`", ThinkingMode::NAMES))
+    }
+}
+
+impl std::fmt::Display for ThinkingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What the harness checks about an adapter before it builds one: the
 /// config an instance must supply and the request fields the adapter
 /// takes without a setting. One table, so an adapter states its rules
@@ -48,6 +99,9 @@ pub struct AdapterRules {
     /// The adapter has credentials of its own: a login or a key that
     /// serves every instance at the adapter's default endpoint.
     pub own_credentials: bool,
+    /// An instance can set `thinking`: the adapter can turn its
+    /// thinking and effort fields off.
+    pub thinking_switch: bool,
 }
 
 /// The rules of adapter `kind`; `None` for an id this build lacks.
@@ -58,18 +112,21 @@ pub fn adapter_rules(kind: &str) -> Option<AdapterRules> {
             implicit_effort: true,
             key_variable: false,
             own_credentials: true,
+            thinking_switch: false,
         },
         anthropic::PROVIDER_ID => AdapterRules {
             needs_endpoint: false,
             implicit_effort: true,
             key_variable: true,
             own_credentials: true,
+            thinking_switch: true,
         },
         openai_compat::PROVIDER_ID | openai_responses::PROVIDER_ID => AdapterRules {
             needs_endpoint: true,
             implicit_effort: false,
             key_variable: true,
             own_credentials: false,
+            thinking_switch: false,
         },
         _ => return None,
     };

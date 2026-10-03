@@ -1,5 +1,6 @@
 //! The request loop for adapters that serve a user-named endpoint with
-//! an optional bearer key: `openai-compat` and `openai-responses`.
+//! an optional bearer key: `openai-compat` and `openai-responses`, and
+//! the key check that `dmz login <instance>` runs for both.
 //!
 //! A key has no refresh flow, so a 401 fails at once and names the
 //! instance. Status 429, a 5xx, and a network failure retry with
@@ -12,6 +13,63 @@ use std::time::Duration;
 
 use crate::ProviderError;
 use crate::retry::{backoff, redact, request_id, retry_after, retry_delay};
+
+/// What a key check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyCheck {
+    /// The models route accepted the key.
+    Accepted,
+    /// The check did not confirm the key: the route answered with
+    /// another status, or the request failed. Many compatible servers
+    /// do not serve the route. The text says what happened.
+    Unconfirmed(String),
+}
+
+/// Check a key with `GET {base_url}/models`. A 2xx reply accepts it.
+/// A 401 refuses it with an error, and so does a request that does not
+/// build — a `base_url` that is no URL, or a key that is no header
+/// value — because no session could send it either. Any other outcome
+/// is [`KeyCheck::Unconfirmed`]. `instance` names the instance in the
+/// text.
+pub async fn verify_key(
+    http: &reqwest::Client,
+    instance: &str,
+    base_url: &str,
+    key: &str,
+) -> Result<KeyCheck, ProviderError> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let request = http.get(&url).bearer_auth(key).build().map_err(|error| {
+        ProviderError::InvalidRequest(redact(
+            &format!(
+                "the key check of instance `{instance}` at `{url}` does not build: {error}; \
+                 check its base_url and key"
+            ),
+            key,
+        ))
+    })?;
+    let response = match http.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(KeyCheck::Unconfirmed(redact(
+                &format!("GET {url} failed: {error}"),
+                key,
+            )));
+        }
+    };
+    let status = response.status();
+    if status.is_success() {
+        return Ok(KeyCheck::Accepted);
+    }
+    if status.as_u16() == 401 {
+        return Err(ProviderError::Auth(format!(
+            "the endpoint of instance `{instance}` rejected the key (status 401 from GET {url})"
+        )));
+    }
+    Ok(KeyCheck::Unconfirmed(format!(
+        "GET {url} answered with status {status}"
+    )))
+}
 
 /// One user-named endpoint of one instance.
 pub(crate) struct KeyedEndpoint<'a> {
@@ -108,7 +166,7 @@ impl KeyedEndpoint<'_> {
             if status.as_u16() == 401 {
                 return Err(ProviderError::Auth(format!(
                     "the endpoint of instance `{instance}` rejected the request (status 401): \
-                     check the instance's key"
+                     check the instance's key — its `api_key_env`, or `dmz login {instance}`"
                 )));
             }
             if status.as_u16() == 429 || status.is_server_error() {

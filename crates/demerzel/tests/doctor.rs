@@ -593,3 +593,308 @@ fn a_project_file_cannot_define_an_instance() {
     );
     assert!(out.contains("problem: unknown provider `evil`"), "{out}");
 }
+
+impl Bed {
+    /// Run `login <name>` with `key` on a piped stdin. Returns stdout,
+    /// stderr, and the exit code.
+    fn login(&self, name: &str, key: &str) -> (String, String, i32) {
+        let mut child = self
+            .command()
+            .args(["login", name])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A refused login can exit before it reads the key: a broken
+        // pipe here is fine.
+        let _ = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{key}\n").as_bytes());
+        let output = child.wait_with_output().unwrap();
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.code().unwrap(),
+        )
+    }
+
+    /// The auth store file, parsed; `Null` when there is none.
+    fn store(&self) -> serde_json::Value {
+        match std::fs::read_to_string(self.data.join("demerzel").join("auth.json")) {
+            Ok(text) => serde_json::from_str(&text).unwrap(),
+            Err(_) => serde_json::Value::Null,
+        }
+    }
+}
+
+/// A user file whose active instance `name` of adapter `kind` sits at
+/// the mock's `/v1` root.
+fn instance_config(name: &str, kind: &str, mock: &demerzel_mock::MockServer) -> String {
+    format!(
+        "provider = \"{name}\"\n\
+         [providers.{name}]\n\
+         kind = \"{kind}\"\n\
+         base_url = \"{}/v1\"\n\
+         model = \"m1\"",
+        mock.url()
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instance_login_stores_a_key_that_its_sessions_send() {
+    use demerzel_mock::{MockResponse, MockServer, compat, responses};
+
+    for (kind, turn) in [
+        ("openai-compat", compat::text_turn("one")),
+        ("openai-responses", responses::text_turn("one")),
+    ] {
+        // The key check, then one session turn.
+        let mock =
+            MockServer::start(vec![MockResponse::stream(Vec::new()), turn], Vec::new()).await;
+        let bed = Bed::new();
+        bed.write_user_config(&instance_config("gateway", kind, &mock));
+
+        let (out, err, code) = bed.login("gateway", "fake-gateway-key");
+        assert_eq!(code, 0, "{kind}: {err}");
+        assert!(!err.contains("warning"), "{kind}: {err}");
+        // The login names the endpoint that gets the key.
+        assert!(out.contains(&mock.url()), "{kind}: {out}");
+        let store = bed.store();
+        assert_eq!(store["version"], 3, "{kind}");
+        assert_eq!(store["keys"]["gateway"]["api_key"], "fake-gateway-key");
+        assert_eq!(
+            store["keys"]["gateway"]["base_url"],
+            format!("{}/v1", mock.url())
+        );
+
+        let output = bed.command().arg("hi").output().unwrap();
+        assert!(output.status.success(), "{kind}: {output:?}");
+        let received = mock.received();
+        assert_eq!(received.len(), 2, "{kind}");
+        assert_eq!(received[0].path, "/v1/models");
+        for request in &received {
+            assert_eq!(
+                request.authorization.as_deref(),
+                Some("Bearer fake-gateway-key"),
+                "{kind}: {}",
+                request.path
+            );
+        }
+
+        // `doctor` names the store as the key's source, never the key.
+        let (out, code) = bed.doctor(&[]);
+        assert_eq!(code, 0, "{kind}: {out}");
+        let line = out
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("gateway: {kind}")))
+            .unwrap_or_else(|| panic!("no instance line:\n{out}"));
+        assert!(line.contains("store"), "{line}");
+        assert!(!out.contains("fake-gateway-key"), "{out}");
+
+        // Pointed at another endpoint, the instance keeps the key off
+        // it: the run stops and names the login that would store one.
+        bed.write_user_config(&format!(
+            "provider = \"gateway\"\n\
+             [providers.gateway]\n\
+             kind = \"{kind}\"\n\
+             base_url = \"http://127.0.0.1:9/v1\"\n\
+             model = \"m1\""
+        ));
+        let output = bed.command().arg("hi").output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{kind}: {output:?}");
+        let err = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(err.contains("dmz login gateway"), "{kind}: {err}");
+        assert!(!err.contains("fake-gateway-key"), "{kind}: {err}");
+        let (out, code) = bed.doctor(&[]);
+        assert_eq!(code, 1, "{kind}: {out}");
+        assert_eq!(mock.received().len(), 2, "{kind}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instance_login_refuses_a_key_on_401_and_stores_it_with_a_warning_on_404() {
+    use demerzel_mock::{MockResponse, MockServer};
+
+    for kind in ["openai-compat", "openai-responses"] {
+        let mock = MockServer::start(
+            vec![MockResponse::error(401), MockResponse::error(404)],
+            Vec::new(),
+        )
+        .await;
+        let bed = Bed::new();
+        bed.write_user_config(&instance_config("gateway", kind, &mock));
+
+        let (_, err, code) = bed.login("gateway", "fake-refused-key");
+        assert_eq!(code, 1, "{kind}: {err}");
+        assert!(err.contains("401"), "{kind}: {err}");
+        assert!(bed.store()["keys"].is_null(), "{kind}: {}", bed.store());
+
+        let (_, err, code) = bed.login("gateway", "fake-unchecked-key");
+        assert_eq!(code, 0, "{kind}: {err}");
+        assert!(
+            err.contains("warning") && err.contains("404"),
+            "{kind}: {err}"
+        );
+        assert_eq!(
+            bed.store()["keys"]["gateway"]["api_key"],
+            "fake-unchecked-key"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_key_variable_wins_over_a_stored_instance_key() {
+    use demerzel_mock::{MockServer, compat};
+
+    let mock = MockServer::start(
+        vec![compat::text_turn("one"), compat::text_turn("two")],
+        Vec::new(),
+    )
+    .await;
+    let bed = Bed::new();
+    let dir = bed.data.join("demerzel");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        serde_json::json!({"version": 3, "keys": {"gateway": {
+            "api_key": "fake-stored-key",
+            "base_url": format!("{}/v1", mock.url()),
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    let config = instance_config("gateway", "openai-compat", &mock);
+    bed.write_user_config(&config);
+    let output = bed.command().arg("hi").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    // With `api_key_env`, the variable's key goes out, and login
+    // refuses to store a key that no session would read.
+    bed.write_user_config(&format!("{config}\napi_key_env = \"DMZ_TEST_GATEWAY_KEY\""));
+    let output = bed
+        .command()
+        .env("DMZ_TEST_GATEWAY_KEY", "fake-variable-key")
+        .arg("hi")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let received = mock.received();
+    assert_eq!(
+        received[0].authorization.as_deref(),
+        Some("Bearer fake-stored-key")
+    );
+    assert_eq!(
+        received[1].authorization.as_deref(),
+        Some("Bearer fake-variable-key")
+    );
+    let (_, err, code) = bed.login("gateway", "fake-other-key");
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("DMZ_TEST_GATEWAY_KEY"), "{err}");
+    assert_eq!(mock.received().len(), 2);
+
+    // A set variable never opens the store, so a store that does not
+    // parse stops nothing.
+    std::fs::write(dir.join("auth.json"), "{ not json").unwrap();
+    let mock = MockServer::start(vec![compat::text_turn("three")], Vec::new()).await;
+    bed.write_user_config(&format!(
+        "{}\napi_key_env = \"DMZ_TEST_GATEWAY_KEY\"",
+        instance_config("gateway", "openai-compat", &mock)
+    ));
+    let output = bed
+        .command()
+        .env("DMZ_TEST_GATEWAY_KEY", "fake-variable-key")
+        .arg("hi")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        mock.received()[0].authorization.as_deref(),
+        Some("Bearer fake-variable-key")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_off_in_the_user_file_reaches_the_wire() {
+    use demerzel_mock::MockServer;
+    use demerzel_mock::anthropic::{refuses_thinking, text_turn};
+
+    // A strict server whose model takes neither adaptive thinking nor
+    // effort, and a flag that sets the highest level.
+    let mock = MockServer::start(
+        vec![text_turn("ok").with_check(refuses_thinking)],
+        Vec::new(),
+    )
+    .await;
+    let bed = Bed::new();
+    let dir = bed.data.join("demerzel");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        r#"{"version": 2, "anthropic": {"api_key": "sk-fake-store-key"}}"#,
+    )
+    .unwrap();
+    bed.write_user_config("[providers.anthropic]\nthinking = \"off\"");
+    let output = bed
+        .command()
+        .args([
+            "--provider",
+            "anthropic",
+            "--base-url",
+            &mock.url(),
+            "--effort",
+            "max",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let body = &mock.received()[0].body;
+    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+}
+
+#[test]
+fn doctor_shows_the_request_shape_of_an_instance_with_thinking_off() {
+    let bed = Bed::new();
+    bed.write_user_config("[providers.anthropic]\nthinking = \"off\"");
+    let (out, _) = bed.doctor(&["--provider", "anthropic"]);
+    let line = |key: &str| {
+        out.lines()
+            .find(|line| line.trim_start().starts_with(&format!("{key} = ")))
+            .unwrap_or_else(|| panic!("no `{key}` line:\n{out}"))
+            .to_string()
+    };
+    assert!(line("thinking").contains("off"), "{out}");
+    assert!(line("thinking").contains("user file"), "{out}");
+    // The session keeps its level; the line says it does not go out.
+    let effort = line("effort");
+    assert!(
+        effort.contains("high") && effort.contains("not sent"),
+        "{effort}"
+    );
+
+    // Unset, the default shape sends the effort.
+    let bed = Bed::new();
+    let (out, _) = bed.doctor(&["--provider", "anthropic"]);
+    assert!(out.contains("thinking = adaptive"), "{out}");
+    assert!(out.contains("effort = high (default)"), "{out}");
+
+    // An adapter without the switch refuses the key.
+    let bed = Bed::new();
+    bed.write_user_config(
+        "provider = \"local\"\n\
+         [providers.local]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"m\"\n\
+         thinking = \"off\"",
+    );
+    let (out, code) = bed.doctor(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("problem:") && out.contains("`thinking`"),
+        "{out}"
+    );
+}

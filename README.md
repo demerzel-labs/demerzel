@@ -79,6 +79,13 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3-coder"
 ```
 
+A local server needs no key. For a server that needs one, store the
+key for the instance:
+
+```bash
+./target/release/demerzel login local
+```
+
 [Provider instances](docs/config.md#provider-instances) lists the keys.
 
 Run `doctor` before the first session:

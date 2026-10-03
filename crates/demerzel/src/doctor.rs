@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use demerzel_core::{ApprovalMode, SessionStore};
 use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP};
-use demerzel_providers::{anthropic, openai_codex};
+use demerzel_providers::{AdapterRules, anthropic, openai_codex};
 
 use crate::config::{self, Flags, Layer, Locations, Origin};
 
@@ -68,20 +68,36 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         None => "ask in an interactive session, read-only for one-shot".to_string(),
     };
     print_setting(out, "approval", &approval, settings.approval.origin)?;
-    // An adapter without implicit effort receives only a set level.
-    let effort_sent = settings.effort_set
-        || settings
-            .kind
-            .value
-            .as_deref()
-            .and_then(demerzel_providers::adapter_rules)
-            .is_none_or(|rules| rules.implicit_effort);
-    let effort = if effort_sent {
+    let rules = settings
+        .kind
+        .value
+        .as_deref()
+        .and_then(demerzel_providers::adapter_rules);
+    // The request shape: an adapter without implicit effort receives
+    // only a set level, and an instance with thinking off receives
+    // none.
+    let thinking = settings.thinking_mode.value;
+    let effort_sent = settings.effort_set || rules.is_none_or(|rules| rules.implicit_effort);
+    let effort = if thinking.is_some_and(|mode| !mode.sends_effort()) {
+        format!(
+            "{} — not sent: this instance turns thinking off",
+            settings.effort.value
+        )
+    } else if effort_sent {
         settings.effort.value.as_str().to_string()
     } else {
         "default — not sent to this adapter".to_string()
     };
     print_setting(out, "effort", &effort, settings.effort.origin)?;
+    if thinking.is_some() || rules.is_some_and(|rules| rules.thinking_switch) {
+        let mode = thinking.unwrap_or_default();
+        let shape = if mode.sends_effort() {
+            format!("{mode} — sends {mode} thinking and the effort")
+        } else {
+            format!("{mode} — sends disabled thinking and no effort")
+        };
+        print_setting(out, "thinking", &shape, settings.thinking_mode.origin)?;
+    }
     print_setting(
         out,
         "max_model_calls",
@@ -149,8 +165,15 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         writeln!(out, "  problem: {problem}")?;
     }
 
-    report_instances(&config::instances(user.as_ref()), out)?;
-    report_credentials(&settings, &mut problems, out)?;
+    // The instance keys read the store's path, the way a session does,
+    // so a run without HOME still finds them.
+    let store_path = AuthStore::default_path().ok();
+    report_instances(
+        &config::instances(user.as_ref()),
+        store_path.as_deref(),
+        out,
+    )?;
+    report_credentials(&settings, store_path.as_deref(), &mut problems, out)?;
     // A read-only session never writes the project root, so a
     // non-writable root is only a note there.
     let read_only = settings.approval.value == Some(ApprovalMode::ReadOnly);
@@ -309,10 +332,15 @@ pub(crate) fn credential_states(store: &AuthStore, env_key: Option<&str>) -> [Cr
 
 /// List the instances the user file defines: the adapter, the
 /// endpoint, the model, and where the key comes from. Presence, not
-/// values: a key variable shows its name and whether it is set. An
+/// values: a key variable shows its name and whether it is set, a
+/// stored key only that the store holds one for the endpoint. An
 /// instance that could not run gets a warning; the active one's
-/// problems count above.
-fn report_instances(instances: &[config::Instance], out: &mut dyn Write) -> std::io::Result<()> {
+/// problems count below.
+fn report_instances(
+    instances: &[config::Instance],
+    store_path: Option<&Path>,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
     writeln!(out, "provider instances")?;
     if instances.is_empty() {
         writeln!(
@@ -337,12 +365,22 @@ fn report_instances(instances: &[config::Instance], out: &mut dyn Write) -> std:
             (None, false) => "none — set model",
             (None, true) => "the adapter's default",
         };
+        let stored = stored_key(store_path, &instance.name, instance.base_url.as_deref());
+        let thinking = match instance.thinking_mode {
+            Some(mode) => format!(", thinking {mode}"),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "  {}: {} — endpoint {endpoint}, model {model}, key {}",
+            "  {}: {} — endpoint {endpoint}, model {model}, key {}{thinking}",
             instance.name,
             instance.kind,
-            key_state(instance.api_key_env.as_deref(), rules)
+            key_state(
+                &instance.name,
+                instance.api_key_env.as_deref(),
+                rules,
+                stored
+            )
         )?;
         for problem in config::instance_problems(instance) {
             writeln!(out, "  warning: {problem}")?;
@@ -351,15 +389,48 @@ fn report_instances(instances: &[config::Instance], out: &mut dyn Write) -> std:
     Ok(())
 }
 
-/// Where an instance's key comes from, by name and presence.
-fn key_state(api_key_env: Option<&str>, rules: demerzel_providers::AdapterRules) -> String {
+/// What the store holds for one instance, read the way a session
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    None,
+    /// A key for the instance's endpoint.
+    Serves,
+    /// A key checked at another endpoint: a session stops on it.
+    OtherEndpoint,
+    /// The store does not read: a session stops on it.
+    Unreadable,
+}
+
+fn stored_key(store_path: Option<&Path>, name: &str, base_url: Option<&str>) -> Stored {
+    let Some(path) = store_path else {
+        return Stored::None;
+    };
+    match AuthStore::read_instance_key(path, name) {
+        Err(_) => Stored::Unreadable,
+        Ok(None) => Stored::None,
+        // Without an endpoint the run stops on that first, with its own
+        // problem line.
+        Ok(Some(key)) if base_url.is_none_or(|url| key.serves(url)) => Stored::Serves,
+        Ok(Some(_)) => Stored::OtherEndpoint,
+    }
+}
+
+/// Where an instance's key comes from, by name and presence. The
+/// variable wins over the store, the order a session applies.
+fn key_state(name: &str, api_key_env: Option<&str>, rules: AdapterRules, stored: Stored) -> String {
     match api_key_env {
         Some(variable) if env_set(variable) => format!("from {variable} (set)"),
         Some(variable) => format!("from {variable} (unset)"),
-        None if !rules.own_credentials => {
-            "none — requests carry no Authorization header".to_string()
-        }
-        None => "from the adapter's credentials below".to_string(),
+        None if rules.own_credentials => "from the adapter's credentials below".to_string(),
+        None => match stored {
+            Stored::Serves => "in the dmz store".to_string(),
+            Stored::OtherEndpoint => format!(
+                "in the dmz store for another endpoint — run `dmz login {name}` for this one"
+            ),
+            Stored::Unreadable => "unknown — the auth store does not read".to_string(),
+            Stored::None => "none — requests carry no Authorization header".to_string(),
+        },
     }
 }
 
@@ -372,6 +443,7 @@ fn env_set(variable: &str) -> bool {
 /// is information, not a blocker.
 fn report_credentials(
     settings: &config::Settings,
+    store_path: Option<&Path>,
     problems: &mut u32,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
@@ -388,16 +460,33 @@ fn report_credentials(
         && own_line
     {
         let variable = settings.api_key_env.value.as_deref();
-        let missing = variable.is_some_and(|variable| !env_set(variable));
-        if missing {
+        let stored = match variable {
+            Some(_) => Stored::None,
+            None => stored_key(store_path, name, settings.base_url.value.as_deref()),
+        };
+        // The session stops on an unset variable, a key for another
+        // endpoint, and a store that does not read.
+        let stops = variable.is_some_and(|variable| !env_set(variable))
+            || matches!(stored, Stored::OtherEndpoint | Stored::Unreadable);
+        if stops {
             *problems += 1;
         }
-        let prefix = if missing { "problem: " } else { "" };
-        writeln!(out, "  {prefix}{name}: key {}", key_state(variable, rules))?;
+        let prefix = if stops { "problem: " } else { "" };
+        writeln!(
+            out,
+            "  {prefix}{name}: key {}",
+            key_state(name, variable, rules, stored)
+        )?;
     }
     let active_provider = if own_line { "" } else { kind };
     let store = match AuthStore::open_default() {
         Ok(store) => store,
+        // An instance with its own key line reads its entry alone, so
+        // the adapters' store is information then.
+        Err(error) if own_line => {
+            writeln!(out, "  {error}")?;
+            return Ok(());
+        }
         Err(error) => {
             *problems += 1;
             writeln!(out, "  problem: {error}")?;

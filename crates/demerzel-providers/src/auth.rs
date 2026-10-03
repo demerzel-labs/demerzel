@@ -1,9 +1,15 @@
 //! The dmz credential store: one JSON file with mode 0600, one section
-//! per provider. File version 2 adds the `anthropic` section; a version-1
-//! file still parses, its `anthropic` section is simply absent. Unknown
-//! sections and unknown fields inside known sections ride through a
-//! save untouched, and a save never lowers the version stamp, so this
-//! build can rewrite a newer file without data loss.
+//! per provider. File version 2 adds the `anthropic` section, and
+//! version 3 the `keys` section; an older file still parses, its newer
+//! sections simply absent. Unknown sections and unknown fields inside
+//! known sections ride through a save untouched, and a save never
+//! lowers the version stamp, so this build can rewrite a newer file
+//! without data loss.
+//!
+//! A save rereads the file and replaces only the section it changed.
+//! A session holds its store for hours; a login in another terminal
+//! writes another section in that time, and the session's next token
+//! refresh must keep it.
 //!
 //! The `openai_codex` section carries the OAuth machinery. `dmz login`
 //! writes it through the PKCE flow in [`crate::oauth`]; the store can
@@ -18,6 +24,15 @@
 //!
 //! The `anthropic` section holds an API key. `dmz login anthropic`
 //! writes it; the `ANTHROPIC_API_KEY` variable stays the override.
+//!
+//! The `keys` section maps a provider instance name to an entry
+//! `{"api_key": …, "base_url": …}`. `dmz login <instance>` writes it
+//! for an instance of an adapter without credentials of its own, with
+//! the endpoint it checked the key at; the key serves that endpoint
+//! only. The variable that the instance's `api_key_env` names wins over
+//! it. Readers take the section leniently: an entry of another shape
+//! is no key, never a store that fails to open, so a later build can
+//! add another kind of entry.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -64,8 +79,41 @@ pub struct AnthropicCredentials {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// One entry of the `keys` section: an instance's API key and the
+/// endpoint that `dmz login` checked it at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoredKey {
+    pub api_key: String,
+    /// The `base_url` of the check; `None` in an entry that names
+    /// none.
+    pub base_url: Option<String>,
+}
+
+impl StoredKey {
+    /// Whether the key serves `base_url`: the endpoint it was checked
+    /// at, a trailing `/` aside. An entry without an endpoint serves
+    /// none.
+    pub fn serves(&self, base_url: &str) -> bool {
+        self.base_url
+            .as_deref()
+            .is_some_and(|checked| checked.trim_end_matches('/') == base_url.trim_end_matches('/'))
+    }
+}
+
+/// The section one save writes; see the module doc.
+enum Section<'a> {
+    Codex,
+    Anthropic,
+    Key {
+        name: &'a str,
+        api_key: &'a str,
+        base_url: &'a str,
+    },
+}
+
 /// The store file version this build writes.
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
@@ -75,7 +123,7 @@ struct StoreFile {
     openai_codex: Option<CodexCredentials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anthropic: Option<AnthropicCredentials>,
-    /// Sections a newer build wrote. They ride through a save
+    /// The `keys` section, and sections a newer build wrote. They ride through a save
     /// untouched, so an older binary never data-loses a newer file.
     #[serde(default, flatten)]
     extra: serde_json::Map<String, Value>,
@@ -136,8 +184,8 @@ pub struct AuthStore {
     token_url: String,
     creds: Option<CodexCredentials>,
     anthropic: Option<AnthropicCredentials>,
-    /// The rest of the parsed file: a newer build's sections and its
-    /// version, preserved across saves.
+    /// The rest of the parsed file: the `keys` section, a newer
+    /// build's sections, and the version, preserved across saves.
     version: u32,
     extra: serde_json::Map<String, Value>,
 }
@@ -193,6 +241,36 @@ impl AuthStore {
     /// The stored Anthropic API key, when the store holds one.
     pub fn anthropic_api_key(&self) -> Option<&str> {
         self.anthropic.as_ref().map(|creds| creds.api_key.as_str())
+    }
+
+    /// Read the `keys` entry of instance `name` from the store file at
+    /// `path`, without the strict parse of the other sections: a
+    /// section this build cannot read never blocks an instance. A
+    /// missing file, a missing entry, and an entry of another shape are
+    /// `None`. A file that does not read, or is not a JSON object, is
+    /// an error: it can hold the key.
+    pub fn read_instance_key(path: &Path, name: &str) -> Result<Option<StoredKey>, ProviderError> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ProviderError::Auth(format!(
+                    "cannot read the auth store {path:?}: {error}"
+                )));
+            }
+        };
+        let file: serde_json::Map<String, Value> = serde_json::from_str(&text)
+            .map_err(|e| ProviderError::Auth(format!("bad auth store {path:?}: {e}")))?;
+        let entry = file.get("keys").and_then(|keys| keys.get(name));
+        let Some(api_key) = entry.and_then(|entry| entry.get("api_key")?.as_str()) else {
+            return Ok(None);
+        };
+        Ok(Some(StoredKey {
+            api_key: api_key.to_string(),
+            base_url: entry
+                .and_then(|entry| entry.get("base_url")?.as_str())
+                .map(str::to_string),
+        }))
     }
 
     /// Resolve the key an anthropic session uses: the environment
@@ -274,7 +352,7 @@ impl AuthStore {
             }
         }
         self.creds = Some(creds);
-        self.save()
+        self.save(Section::Codex)
     }
 
     /// Store the Anthropic API key and save the file at mode 0600.
@@ -289,7 +367,36 @@ impl AuthStore {
                 })
             }
         }
-        self.save()
+        self.save(Section::Anthropic)
+    }
+
+    /// Store the key of provider instance `name`, checked at
+    /// `base_url`, in the store file at `path`, at mode 0600. Only the
+    /// instance's entry changes, and its other fields ride through.
+    /// The other sections need no strict parse, so a section this
+    /// build cannot read never blocks the login. A file that is not a
+    /// JSON object is refused, not replaced.
+    pub fn set_instance_key(
+        path: &Path,
+        name: &str,
+        api_key: &str,
+        base_url: &str,
+    ) -> Result<(), ProviderError> {
+        Self::read_instance_key(path, name)?;
+        let mut store = Self {
+            path: path.to_path_buf(),
+            codex_cli_path: None,
+            token_url: DEFAULT_TOKEN_URL.to_string(),
+            creds: None,
+            anthropic: None,
+            version: 0,
+            extra: serde_json::Map::new(),
+        };
+        store.save(Section::Key {
+            name,
+            api_key,
+            base_url,
+        })
     }
 
     /// The ChatGPT account id, from the store or from the id token.
@@ -326,7 +433,7 @@ impl AuthStore {
             last_refresh: file["last_refresh"].as_str().map(str::to_string),
             extra: serde_json::Map::new(),
         });
-        self.save()
+        self.save(Section::Codex)
     }
 
     /// Refresh the access token. Prefers a re-import when the Codex CLI
@@ -375,7 +482,7 @@ impl AuthStore {
             creds.id_token = Some(token.to_string());
         }
         creds.last_refresh = Some(humantime::format_rfc3339(SystemTime::now()).to_string());
-        self.save()
+        self.save(Section::Codex)
     }
 
     fn codex_cli_file_is_newer(&self) -> bool {
@@ -401,17 +508,96 @@ impl AuthStore {
         }
     }
 
-    fn save(&self) -> Result<(), ProviderError> {
+    /// Write `section` into the file as it is now and keep the rest of
+    /// the file. A missing file, or one that is not a JSON object,
+    /// starts from this store's own view, as the first save did. A
+    /// file that does not read stops the save, so nothing it holds is
+    /// lost.
+    fn save(&mut self, section: Section<'_>) -> Result<(), ProviderError> {
+        let current = match std::fs::read_to_string(&self.path) {
+            Ok(text) => serde_json::from_str::<serde_json::Map<String, Value>>(&text).ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ProviderError::Auth(format!(
+                    "cannot read the auth store {:?}: {error}",
+                    self.path
+                )));
+            }
+        };
+        let mut file = match current {
+            Some(file) => file,
+            None => self.snapshot()?,
+        };
+        match section {
+            Section::Codex => put(&mut file, "openai_codex", self.creds.as_ref())?,
+            Section::Anthropic => put(&mut file, "anthropic", self.anthropic.as_ref())?,
+            Section::Key {
+                name,
+                api_key,
+                base_url,
+            } => {
+                let keys = file
+                    .entry("keys")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                let Some(keys) = keys.as_object_mut() else {
+                    return Err(ProviderError::Auth(format!(
+                        "the `keys` section of the auth store {:?} is not an object; \
+                         this build does not overwrite it",
+                        self.path
+                    )));
+                };
+                let entry = keys
+                    .entry(name)
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                // A login replaces an entry of another shape: the user
+                // asked for this key.
+                if !entry.is_object() {
+                    *entry = Value::Object(serde_json::Map::new());
+                }
+                let entry = entry.as_object_mut().expect("an object, set above");
+                entry.insert("api_key".to_string(), Value::from(api_key));
+                entry.insert("base_url".to_string(), Value::from(base_url));
+            }
+        }
+        // Never downgrade the stamp of a newer file this build still
+        // understands enough to rewrite.
+        let version = file
+            .get("version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .max(u64::from(self.version))
+            .max(u64::from(STORE_VERSION));
+        file.insert("version".to_string(), Value::from(version));
+        let text = serde_json::to_string_pretty(&file)
+            .map_err(|e| ProviderError::Auth(format!("serialize auth store: {e}")))?;
+        self.write(&text)?;
+        // Keep the in-memory view in step with the file, so a later
+        // save that starts from it loses nothing.
+        self.version = u32::try_from(version).unwrap_or(u32::MAX);
+        file.remove("version");
+        file.remove("openai_codex");
+        file.remove("anthropic");
+        self.extra = file;
+        Ok(())
+    }
+
+    /// This store's own view of the file.
+    fn snapshot(&self) -> Result<serde_json::Map<String, Value>, ProviderError> {
         let file = StoreFile {
-            // Never downgrade the stamp of a newer file this build
-            // still understands enough to rewrite.
-            version: self.version.max(STORE_VERSION),
+            version: self.version,
             openai_codex: self.creds.clone(),
             anthropic: self.anthropic.clone(),
             extra: self.extra.clone(),
         };
-        let text = serde_json::to_string_pretty(&file)
-            .map_err(|e| ProviderError::Auth(format!("serialize auth store: {e}")))?;
+        match serde_json::to_value(file) {
+            Ok(Value::Object(map)) => Ok(map),
+            Ok(_) => unreachable!("a struct serializes to an object"),
+            Err(e) => Err(ProviderError::Auth(format!("serialize auth store: {e}"))),
+        }
+    }
+
+    /// Replace the file with `text` at mode 0600.
+    fn write(&self, text: &str) -> Result<(), ProviderError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ProviderError::Auth(format!("create {parent:?}: {e}")))?;
@@ -450,6 +636,25 @@ impl AuthStore {
             .map_err(|e| ProviderError::Auth(format!("write {:?}: {e}", self.path)))?;
         Ok(())
     }
+}
+
+/// Set section `key` of `file` to `value`, or remove it for `None`.
+fn put<T: Serialize>(
+    file: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&T>,
+) -> Result<(), ProviderError> {
+    match value {
+        Some(value) => {
+            let value = serde_json::to_value(value)
+                .map_err(|e| ProviderError::Auth(format!("serialize auth store: {e}")))?;
+            file.insert(key.to_string(), value);
+        }
+        None => {
+            file.remove(key);
+        }
+    }
+    Ok(())
 }
 
 fn parse_rfc3339(stamp: &str) -> Option<SystemTime> {
@@ -701,7 +906,7 @@ mod tests {
         store.ensure().unwrap();
 
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["version"], STORE_VERSION);
         assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
         assert_eq!(saved["openai_codex"]["access_token"], "access-1");
     }
@@ -713,7 +918,7 @@ mod tests {
         std::fs::write(
             &path,
             json!({
-                "version": 3,
+                "version": 4,
                 "anthropic": {"api_key": "sk-keep", "oauth": {"refresh": "r-9"}},
                 "openai_codex": {
                     "access_token": "a",
@@ -727,10 +932,10 @@ mod tests {
         .unwrap();
         let mut store = AuthStore::open(path.clone(), None).unwrap();
         store.creds.as_mut().unwrap().access_token = "a2".into();
-        store.save().unwrap();
+        store.save(Section::Codex).unwrap();
 
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["version"], 3, "never downgrade the version stamp");
+        assert_eq!(saved["version"], 4, "never downgrade the version stamp");
         assert_eq!(saved["future_provider"]["token"], "keep-me");
         // Unknown fields inside known sections survive too.
         assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
@@ -839,6 +1044,146 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["anthropic"]["api_key"], "sk-new");
         assert_eq!(saved["anthropic"]["future"], "keep-me");
+    }
+
+    #[test]
+    fn instance_keys_round_trip_beside_the_other_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 3,
+                "anthropic": {"api_key": "sk-keep"},
+                "keys": {"hosted": {"api_key": "hosted-old", "future": "keep-me"}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let read = |name| AuthStore::read_instance_key(&path, name).unwrap();
+        let old = read("hosted").unwrap();
+        assert_eq!(old.api_key, "hosted-old");
+        // An entry without an endpoint serves none.
+        assert!(!old.serves("https://api.example.test/v1"));
+        assert_eq!(read("local"), None);
+
+        AuthStore::set_instance_key(&path, "hosted", "hosted-new", "https://api.example.test/v1")
+            .unwrap();
+        AuthStore::set_instance_key(&path, "local", "local-key", "http://127.0.0.1:11434/v1/")
+            .unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 3);
+        assert_eq!(saved["anthropic"]["api_key"], "sk-keep");
+        assert_eq!(saved["keys"]["hosted"]["future"], "keep-me");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let hosted = read("hosted").unwrap();
+        assert_eq!(hosted.api_key, "hosted-new");
+        assert!(hosted.serves("https://api.example.test/v1/"));
+        assert!(!hosted.serves("https://other.example.test/v1"));
+        let local = read("local").unwrap();
+        assert_eq!(local.api_key, "local-key");
+        assert!(local.serves("http://127.0.0.1:11434/v1"));
+        assert_eq!(
+            AuthStore::read_instance_key(&dir.path().join("none.json"), "local").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_entry_shape_neither_blocks_the_store_nor_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": 4,
+                "openai_codex": {"access_token": "a", "refresh_token": "r"},
+                "keys": {
+                    "oauth-instance": {"oauth": {"refresh": "r-1"}},
+                    "odd": "not-an-object",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The strict sections still open, and the odd entries are no
+        // key.
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        assert_eq!(store.credentials().unwrap().access_token, "a");
+        for name in ["oauth-instance", "odd"] {
+            assert_eq!(AuthStore::read_instance_key(&path, name).unwrap(), None);
+        }
+        // A save of any section keeps them, and the newer stamp.
+        store.set_anthropic_key("sk-new".into()).unwrap();
+        AuthStore::set_instance_key(&path, "local", "k", "http://127.0.0.1:9/v1").unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 4);
+        assert_eq!(saved["keys"]["oauth-instance"]["oauth"]["refresh"], "r-1");
+        assert_eq!(saved["keys"]["odd"], "not-an-object");
+        assert_eq!(saved["keys"]["local"]["api_key"], "k");
+
+        // A section this build cannot read never blocks a login.
+        std::fs::write(
+            &path,
+            json!({"version": 9, "openai_codex": {"token": "new-shape"}}).to_string(),
+        )
+        .unwrap();
+        assert!(AuthStore::open(path.clone(), None).is_err());
+        AuthStore::set_instance_key(&path, "local", "k2", "http://127.0.0.1:9/v1").unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["openai_codex"]["token"], "new-shape");
+        assert_eq!(saved["keys"]["local"]["api_key"], "k2");
+
+        // A file that is not JSON is an error, not a missing key, and
+        // a login does not replace it.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(AuthStore::read_instance_key(&path, "local").is_err());
+        assert!(AuthStore::set_instance_key(&path, "local", "k", "http://127.0.0.1:9/v1").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn a_long_lived_store_keeps_a_section_that_another_process_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let source = write_codex_file(dir.path(), "2026-08-01T10:00:00Z", Some("acct_1"));
+        // A session opens the store and imports its login.
+        let mut session = AuthStore::open(path.clone(), Some(source)).unwrap();
+        session.ensure().unwrap();
+
+        // Logins in another terminal store two keys.
+        AuthStore::set_instance_key(&path, "gateway", "gw-key", "https://api.example.test/v1")
+            .unwrap();
+        let mut login = AuthStore::open(path.clone(), None).unwrap();
+        login.set_anthropic_key("sk-login".into()).unwrap();
+
+        // The session's next token update rewrites its own section only.
+        let mut creds = session.credentials().unwrap().clone();
+        creds.access_token = "access-2".into();
+        session.set_codex_credentials(creds).unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["openai_codex"]["access_token"], "access-2");
+        assert_eq!(saved["anthropic"]["api_key"], "sk-login");
+        assert_eq!(saved["keys"]["gateway"]["api_key"], "gw-key");
+    }
+
+    #[test]
+    fn a_store_without_keys_writes_no_keys_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::open(path.clone(), None).unwrap();
+        store.set_anthropic_key("sk-only".into()).unwrap();
+
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("keys").is_none(), "{saved}");
+        assert_eq!(saved["version"], STORE_VERSION);
     }
 
     #[test]

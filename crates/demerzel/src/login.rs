@@ -1,11 +1,15 @@
 //! `dmz login`: interactive credential setup.
 //!
-//! Two forms. `dmz login` runs the PKCE flow for the ChatGPT
+//! Three forms. `dmz login` runs the PKCE flow for the ChatGPT
 //! subscription: a loopback listener takes the browser redirect and
 //! the token exchange writes the auth store. `dmz login anthropic`
 //! prompts for an API key with echo off, verifies it with one cheap
-//! call, and stores it. The wire contract lives in
-//! `demerzel_providers::oauth`; this module owns the interaction.
+//! call, and stores it. `dmz login <instance>` does the same for an
+//! instance of an adapter without credentials of its own, such as
+//! `openai-compat`; only a 401 refuses that key, because many
+//! compatible servers do not serve the check route. The wire contract
+//! lives in `demerzel_providers::oauth` and
+//! `demerzel_providers::endpoint`; this module owns the interaction.
 //!
 //! The loopback listener hand-rolls its HTTP reply, so the flow needs
 //! no HTTP-server dependency. Each connection is served on its own
@@ -23,11 +27,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use demerzel_providers::auth::{self, AuthStore};
+use demerzel_providers::endpoint::{self, KeyCheck};
 use demerzel_providers::{ProviderError, anthropic, oauth, openai_codex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::RunError;
+use crate::config::{Origin, Settings};
 
 /// The time budget for reading one loopback request. The reply is a
 /// small buffered write and runs untimed, so a slow reply can never
@@ -48,8 +54,6 @@ pub struct Options {
     /// port 0 to get an ephemeral one.
     pub redirect_ports: Vec<u16>,
     pub open_browser: bool,
-    /// Endpoint for the API-key check.
-    pub anthropic_base_url: String,
 }
 
 impl Options {
@@ -60,32 +64,104 @@ impl Options {
             token_url: auth::DEFAULT_TOKEN_URL.to_string(),
             redirect_ports: oauth::REDIRECT_PORTS.to_vec(),
             open_browser: true,
-            anthropic_base_url: anthropic::DEFAULT_BASE_URL.to_string(),
         }
     }
 }
 
-/// Run one login. `provider` is the resolved provider id: `None` or
-/// `openai-codex` for the ChatGPT subscription, `anthropic` for the
-/// API key.
-pub async fn run(provider: Option<&str>, options: &Options) -> Result<(), RunError> {
-    match provider {
-        None | Some(openai_codex::PROVIDER_ID) => codex(options).await,
-        Some(anthropic::PROVIDER_ID) => anthropic_login(options).await,
-        // Instance login arrives with the `keys` auth section; until
-        // then the key comes from the environment.
-        Some(
-            kind @ (demerzel_providers::openai_compat::PROVIDER_ID
-            | demerzel_providers::openai_responses::PROVIDER_ID),
-        ) => Err(RunError::Config(format!(
-            "an {kind} instance reads its key from the variable that its `api_key_env` \
-             names; `dmz login` does not store it"
-        ))),
-        Some(other) => Err(RunError::Config(format!(
-            "unknown provider `{other}` — `dmz login` takes `{}` or `{}`",
+/// How one login signs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Method {
+    /// The ChatGPT subscription, through the browser.
+    Codex,
+    /// The anthropic adapter's API key, checked at `base_url`.
+    Anthropic { base_url: String },
+    /// The key of one instance of an adapter without credentials of
+    /// its own, checked at the instance's endpoint. `origin` names the
+    /// layer that set the endpoint, for the prompt.
+    Instance {
+        name: String,
+        base_url: String,
+        origin: Origin,
+    },
+}
+
+/// The login for the instance that `settings` resolved: the run's
+/// layers with the named instance as the provider. An adapter's
+/// implicit instance takes the adapter's own login, and a named
+/// instance of that adapter shares it. An instance of an adapter
+/// without credentials of its own takes a stored key, unless its
+/// `api_key_env` names the key: that variable wins over the store, so
+/// a stored key would never serve it.
+pub fn method(settings: &Settings) -> Result<Method, RunError> {
+    let name = settings.provider.value.as_str();
+    let Some(kind) = settings.kind.value.as_deref() else {
+        return Err(RunError::Config(format!(
+            "unknown provider `{name}` — `dmz login` takes `{}`, `{}`, or an instance that \
+             the user file defines",
             openai_codex::PROVIDER_ID,
             anthropic::PROVIDER_ID
-        ))),
+        )));
+    };
+    let Some(rules) = demerzel_providers::adapter_rules(kind) else {
+        return Err(RunError::Config(format!(
+            "provider `{name}` names the adapter `{kind}`, which this build does not have"
+        )));
+    };
+    if rules.own_credentials {
+        return match kind {
+            // A named instance with its own endpoint names its key
+            // variable; the boot check requires it.
+            _ if name != kind => Err(RunError::Config(match &settings.api_key_env.value {
+                Some(variable) => format!(
+                    "provider `{name}` reads its key from {variable}, its `api_key_env`; \
+                     `dmz login` stores no key for it"
+                ),
+                None => format!(
+                    "provider `{name}` uses the login of its adapter: run `dmz login {kind}`"
+                ),
+            })),
+            openai_codex::PROVIDER_ID => Ok(Method::Codex),
+            anthropic::PROVIDER_ID => Ok(Method::Anthropic {
+                base_url: settings
+                    .base_url
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| anthropic::DEFAULT_BASE_URL.to_string()),
+            }),
+            _ => Err(RunError::Config(format!("the {kind} adapter has no login"))),
+        };
+    }
+    if let Some(variable) = &settings.api_key_env.value {
+        return Err(RunError::Config(format!(
+            "provider `{name}` reads its key from {variable}, its `api_key_env`; remove \
+             `api_key_env` from `[providers.{name}]` to use a stored key"
+        )));
+    }
+    let Some(base_url) = settings.base_url.value.clone() else {
+        return Err(RunError::Config(format!(
+            "provider `{name}` ({kind}) needs `base_url` for the key check: set it in \
+             `[providers.{name}]` of the user file, with --base-url, or with {}",
+            crate::config::ENV_BASE_URL
+        )));
+    };
+    Ok(Method::Instance {
+        name: name.to_string(),
+        base_url,
+        origin: settings.base_url.origin,
+    })
+}
+
+/// Run one login.
+pub async fn run(method: &Method, options: &Options) -> Result<(), RunError> {
+    match method {
+        Method::Codex => codex(options).await,
+        Method::Anthropic { base_url } => anthropic_login(options, base_url).await,
+        Method::Instance {
+            name,
+            base_url,
+            origin,
+        } => instance_login(options, name, base_url, *origin).await,
     }
 }
 
@@ -217,20 +293,73 @@ async fn codex(options: &Options) -> Result<(), RunError> {
     Ok(())
 }
 
-async fn anthropic_login(options: &Options) -> Result<(), RunError> {
+async fn anthropic_login(options: &Options, base_url: &str) -> Result<(), RunError> {
     let key = prompt_for_key("Anthropic API key: ").await?;
     if key.is_empty() {
         return Err(RunError::Auth(ProviderError::Auth(
             "the key is empty".to_string(),
         )));
     }
-    anthropic::verify_key(&http_client(), &options.anthropic_base_url, &key)
+    anthropic::verify_key(&http_client(), base_url, &key)
         .await
         .map_err(RunError::Auth)?;
     let mut store = AuthStore::open(options.store_path.clone(), None).map_err(RunError::Auth)?;
     store.set_anthropic_key(key).map_err(RunError::Auth)?;
     println!("Login complete. The key is in the dmz auth store.");
     Ok(())
+}
+
+async fn instance_login(
+    options: &Options,
+    name: &str,
+    base_url: &str,
+    origin: Origin,
+) -> Result<(), RunError> {
+    // The endpoint gets the key, now and in every session; name it and
+    // the layer that chose it before the user types.
+    println!(
+        "The key for `{name}` goes to {} (base_url from the {origin}).",
+        base_url.trim_end_matches('/')
+    );
+    let key = prompt_for_key(&format!("API key for `{name}`: ")).await?;
+    let check = store_instance_key(options, name, base_url, key).await?;
+    if let KeyCheck::Unconfirmed(reason) = check {
+        eprintln!(
+            "demerzel: warning: the key check did not confirm the key: {reason}. The key is \
+             stored anyway, because many compatible servers do not serve that route."
+        );
+    }
+    println!("Login complete. The key for `{name}` is in the dmz auth store.");
+    Ok(())
+}
+
+/// Check `key` at `GET {base_url}/models` and store it for instance
+/// `name`, bound to that endpoint. A 401, or a check that does not
+/// build, refuses the key and stores nothing. Any other failed check
+/// stores the key and returns [`KeyCheck::Unconfirmed`], so the caller
+/// can warn.
+async fn store_instance_key(
+    options: &Options,
+    name: &str,
+    base_url: &str,
+    key: String,
+) -> Result<KeyCheck, RunError> {
+    if key.is_empty() {
+        return Err(RunError::Auth(ProviderError::Auth(
+            "the key is empty".to_string(),
+        )));
+    }
+    let check = endpoint::verify_key(&http_client(), name, base_url, &key)
+        .await
+        .map_err(|error| match error {
+            ProviderError::Auth(message) => RunError::Auth(ProviderError::Auth(format!(
+                "{message}; the key is not stored"
+            ))),
+            other => RunError::Auth(other),
+        })?;
+    AuthStore::set_instance_key(&options.store_path, name, &key, base_url)
+        .map_err(RunError::Auth)?;
+    Ok(check)
 }
 
 /// Serve one connection. `Some` carries the flow's outcome; `None`
@@ -444,5 +573,118 @@ impl EchoGuard {
 
     fn active(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Flags, Layer, resolve};
+
+    /// The method for `name` under a user file, the way `main`
+    /// resolves it: the name becomes the provider for the run.
+    fn method_for(name: &str, user: &str, base_url: Option<&str>) -> Result<Method, RunError> {
+        let (user, _) = Layer::parse(user).unwrap();
+        let flags = Flags {
+            provider: Some(name.to_string()),
+            base_url: base_url.map(str::to_string),
+            ..Flags::default()
+        };
+        let (settings, _) = resolve(&flags, &|_| None, None, Some(&user));
+        method(&settings)
+    }
+
+    const USER: &str = "[providers.local]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:11434/v1\"\n\
+         model = \"qwen3\"\n\
+         [providers.api]\n\
+         kind = \"openai-responses\"\n\
+         base_url = \"https://api.example.test/v1\"\n\
+         model = \"m\"\n\
+         [providers.hosted]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://api.example.test/v1\"\n\
+         model = \"m\"\n\
+         api_key_env = \"HOSTED_KEY\"\n\
+         [providers.bare]\n\
+         kind = \"openai-compat\"\n\
+         model = \"m\"\n\
+         [providers.work]\n\
+         kind = \"anthropic\"\n\
+         [providers.anthropic]\n\
+         api_key_env = \"ANTHROPIC_WORK_KEY\"";
+
+    #[test]
+    fn each_compatible_adapter_takes_an_instance_login() {
+        assert_eq!(
+            method_for("local", USER, None).unwrap(),
+            Method::Instance {
+                name: "local".into(),
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                origin: Origin::User,
+            }
+        );
+        assert_eq!(
+            method_for("api", USER, None).unwrap(),
+            Method::Instance {
+                name: "api".into(),
+                base_url: "https://api.example.test/v1".into(),
+                origin: Origin::User,
+            }
+        );
+        // A flag supplies the endpoint the check uses, as it does for
+        // a session, and the prompt names it.
+        assert_eq!(
+            method_for("bare", USER, Some("http://127.0.0.1:9/v1")).unwrap(),
+            Method::Instance {
+                name: "bare".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                origin: Origin::Flag,
+            }
+        );
+    }
+
+    #[test]
+    fn the_adapters_keep_their_own_logins() {
+        assert_eq!(
+            method_for("openai-codex", USER, None).unwrap(),
+            Method::Codex
+        );
+        // The anthropic adapter's key serves its named instances, so
+        // its login stays open even when its own table names a key
+        // variable.
+        assert_eq!(
+            method_for("anthropic", USER, None).unwrap(),
+            Method::Anthropic {
+                base_url: anthropic::DEFAULT_BASE_URL.into(),
+            }
+        );
+        assert_eq!(
+            method_for("anthropic", USER, Some("http://127.0.0.1:9")).unwrap(),
+            Method::Anthropic {
+                base_url: "http://127.0.0.1:9".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_login_that_no_session_would_read_is_refused() {
+        let message = |name: &str| method_for(name, USER, None).unwrap_err().to_string();
+        // The variable wins over the store, so a stored key would
+        // never serve this instance.
+        let hosted = message("hosted");
+        assert!(
+            hosted.contains("HOSTED_KEY") && hosted.contains("api_key_env"),
+            "{hosted}"
+        );
+        // The adapter's own key serves its named instances.
+        let work = message("work");
+        assert!(work.contains("dmz login anthropic"), "{work}");
+        // No endpoint to check the key against.
+        let bare = message("bare");
+        assert!(bare.contains("base_url"), "{bare}");
+        let unknown = message("nowhere");
+        assert!(unknown.contains("unknown provider `nowhere`"), "{unknown}");
     }
 }

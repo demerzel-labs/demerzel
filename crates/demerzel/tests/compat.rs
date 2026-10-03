@@ -2,7 +2,7 @@
 //! runtime, the engine, the real tools, and the adapter against the
 //! mock Chat Completions route. No network, no model.
 
-use demerzel::{Resume, RunConfig, RunError, Runtime, SessionSettings};
+use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, SessionSettings};
 use demerzel_core::{ContentBlock, Effort, EngineEvent, NoPrompt, SessionStore, replay};
 use demerzel_mock::MockServer;
 use demerzel_mock::compat::{reasoning_tool_turn, text_turn};
@@ -54,6 +54,11 @@ impl Bed {
         config.base_url = Some(format!("{}/v1", self.mock.url()));
         config.approval = demerzel_core::ApprovalMode::Auto;
         config.data_root = Some(self.data.path().join("store"));
+        // The run reads its own store, never the developer's.
+        config.auth = Some(AuthPaths {
+            store: self.data.path().join("auth.json"),
+            codex_cli: None,
+        });
         config
     }
 

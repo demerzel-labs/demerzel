@@ -730,3 +730,74 @@ async fn a_reply_that_is_not_an_event_stream_fails_with_its_type() {
     // Only the head of the body reaches the message.
     assert!(message.len() < 1024, "{}", message.len());
 }
+
+#[tokio::test]
+async fn the_key_check_accepts_refuses_and_leaves_the_rest_unconfirmed() {
+    use demerzel_providers::endpoint::{KeyCheck, verify_key};
+
+    let mock = MockServer::start(
+        vec![
+            MockResponse::stream(Vec::new()),
+            MockResponse::error(401),
+            MockResponse::error(404),
+            MockResponse::error(500),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let http = reqwest::Client::new();
+    // A trailing slash on the base URL does not double the separator.
+    let base_url = format!("{}/v1/", mock.url());
+
+    let check = verify_key(&http, "local", &base_url, KEY).await.unwrap();
+    assert_eq!(check, KeyCheck::Accepted);
+    let error = verify_key(&http, "local", &base_url, KEY)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ProviderError::Auth(message) if message.contains("401") && message.contains("`local`")),
+        "{error:?}"
+    );
+    for status in ["404", "500"] {
+        let check = verify_key(&http, "local", &base_url, KEY).await.unwrap();
+        assert!(
+            matches!(&check, KeyCheck::Unconfirmed(reason) if reason.contains(status)),
+            "{check:?}"
+        );
+    }
+
+    let received = mock.received();
+    assert_eq!(received.len(), 4);
+    for request in &received {
+        assert_eq!(request.path, "/v1/models");
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(format!("Bearer {KEY}").as_str())
+        );
+    }
+
+    // A request that does not build is refused: no session could
+    // send it, and the error never carries the key.
+    for (base_url, key) in [("not a url", KEY), (base_url.as_str(), "bad\nkey")] {
+        let error = verify_key(&http, "local", base_url, key).await.unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::InvalidRequest(message) if !message.contains("bad\nkey")),
+            "{error:?}"
+        );
+    }
+
+    // An endpoint that does not answer leaves the key unconfirmed.
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let check = verify_key(
+        &http,
+        "local",
+        &format!("http://127.0.0.1:{closed}/v1"),
+        KEY,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(&check, KeyCheck::Unconfirmed(_)), "{check:?}");
+}
