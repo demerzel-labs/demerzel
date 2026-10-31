@@ -86,9 +86,9 @@ current.
 
 ## Direct commits to `main`
 
-The GitHub Actions budget ran out on 2026-09-22. Plan steps go to
-`main` without pull requests until Daniel restores them. These rules
-replace the pull-request rules above for that period:
+Plan steps go to `main` without pull requests until Daniel restores
+them. These rules replace the pull-request rules above for that
+period:
 
 - Commit each plan step to `main`. Use one commit, or a short series
   when the step splits cleanly. Push after the step's checks pass.
@@ -102,8 +102,6 @@ replace the pull-request rules above for that period:
 - The body of the step's last commit keeps the pull request layout: a
   summary, then `Decisions`, `Verify`, `Review`, and `Contract growth`.
 - Stop after you push the step. Daniel reviews on `main`.
-- A CI run on a push fails while the budget is out. That failure is not
-  evidence about the change.
 
 ## Milestone close-out
 
@@ -154,12 +152,10 @@ milestone plan lands:
 
 ## Repository history
 
-The active repository uses the sanitized history from 2026-09-04.
-Start new work from its `main` branch.
-Do not merge or push original archive commits into the active repository.
-Do not fetch archive refs into its checkouts.
-Use [`docs/history.md`](docs/history.md) for the archive and commit map.
-Pull request numbers recorded before the migration refer to the original archive.
+Start new work from `main`.
+Do not merge, push, or fetch commits or refs from the pre-publication repository.
+Use [`docs/history.md`](docs/history.md) for the commit map.
+Pull request numbers recorded before 2026-09-04 belong to that repository.
 
 ## Documentation placement
 

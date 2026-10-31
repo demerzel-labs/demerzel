@@ -1,7 +1,7 @@
 # Demerzel: Terminal Coding Agent — Product Plan
 
-Pull request numbers recorded before the 2026-09-04 migration refer to the
-[original private archive](history.md#historical-pull-requests).
+Pull request numbers recorded before 2026-09-04 belong to the
+[pre-publication repository](history.md#pull-request-numbers).
 
 Demerzel is an open-source terminal coding agent written in Rust. One lightweight
 binary runs an interactive agent loop in your terminal against any model provider
@@ -24,8 +24,8 @@ probabilities. Code applies the thresholds and picks the action. See
 
 License: MIT. Plan adopted 2026-07-31.
 
-**Implementation status (2026-09-06):** M0 through M2 are complete.
-M2.5 meets its exit criteria, and the milestone close-out is complete.
+**Implementation status (2026-10-31):** M0 through M2.5 are complete.
+M3 is in progress, and steps 1 to 4 are on `main`.
 The M3 implementation plan is [`m3-plan.md`](m3-plan.md).
 See its [next-session handoff](m3-plan.md#next-session-handoff) for the next step.
 M3 and later milestones describe planned work. See the
@@ -35,9 +35,9 @@ M3 and later milestones describe planned work. See the
 
 ## Lineage and boundaries
 
-The earlier Python review prototype remains in this repository's sanitized history.
+The earlier Python review prototype remains in this repository's history.
 Its design does not constrain this plan.
-See [Repository history](history.md) for the commit map and original archive.
+See [Repository history](history.md) for the commit map.
 Concepts carried forward: append-only traces and sessions, cost awareness,
 and the bash-tool safety posture. The bash tool uses a constructed
 environment that omits credential variables by default. Credential files
@@ -651,8 +651,8 @@ claim.
 
 ## Non-goals
 
-- Governance, organization policy, audit surfaces, budget refusal — gone with
-  the archive, not deferred.
+- Governance, organization policy, audit surfaces, budget refusal — dropped,
+  not deferred.
 - Hosted anything: no gateway, no relay, no telemetry endpoint. Network egress
   is model providers, the judge instance, and MCP servers the user
   configured, nothing else.

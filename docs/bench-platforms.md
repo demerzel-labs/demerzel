@@ -1,7 +1,7 @@
 # Benchmark Platforms Plan — Linux and macOS
 
-Pull request numbers recorded before the 2026-09-04 migration refer to the
-[original private archive](history.md#historical-pull-requests).
+Pull request numbers recorded before 2026-09-04 belong to the
+[pre-publication repository](history.md#pull-request-numbers).
 
 This plan extends the benchmark suite to Linux and macOS.
 Warm boot and Layer-2 benchmarks produce receipts on both platforms.

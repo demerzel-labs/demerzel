@@ -1,7 +1,7 @@
 # M1 Implementation Plan — Dogfoodable Core
 
-Pull request numbers recorded before the 2026-09-04 migration refer to the
-[original private archive](history.md#historical-pull-requests).
+Pull request numbers recorded before 2026-09-04 belong to the
+[pre-publication repository](history.md#pull-request-numbers).
 
 Historical plan. M1 is complete. See [`README.md`](../README.md)
 and [`config.md`](config.md) for the current user-facing behavior.

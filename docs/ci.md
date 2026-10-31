@@ -146,14 +146,13 @@ The link command checks tracked files.
 Stage new documentation files before you run it.
 See [contributing.md](contributing.md#local-checks) for the other Rust checks.
 
-## Before public release
+## Branch protection
 
-Required-check protection is a release prerequisite.
+`main` has no required-check protection yet.
 Passing workflow runs alone do not prevent a merge.
-Repository plan and visibility can limit access to branch protection.
 `PR metadata` is a separate workflow check.
 
-Before public release:
+Before the first packaged release:
 
 1. Enable branch protection or a ruleset for `main`.
 2. Require pull requests and all six check names in the table above.

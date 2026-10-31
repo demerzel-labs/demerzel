@@ -1,7 +1,7 @@
 # M3 Implementation Plan — Ecosystem
 
-Pull request numbers recorded before the 2026-09-04 migration refer to the
-[original private archive](history.md#historical-pull-requests).
+Pull request numbers recorded before 2026-09-04 belong to the
+[pre-publication repository](history.md#pull-request-numbers).
 
 This plan turns the M3 milestone of [`plan.md`](plan.md#m3--ecosystem) into
 ordered, verifiable steps. It follows the shape of
@@ -24,7 +24,7 @@ Start the next work in this order:
    build notes list the three runs that it covers. Exit criterion 1
    needs this receipt, so it must land before the M3 close-out.
 3. Follow the remaining steps in order. Each step names its dependencies.
-   Until Daniel restores pull requests, commit each step to `main` under
+   Until pull requests return, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
 
 The Linux reference machine runs a local Ollama server. It serves both
@@ -1641,7 +1641,7 @@ for judgments. Letters keep the later step numbers stable.
     cached.
   - Four choices go beyond the plan text: the endpoint binding, the
     `thinking` trust rule, the stop on a store that is not JSON, and
-    `meta.effort` under `off`. Daniel left the call to the build on
+    `meta.effort` under `off`. The maintainer left the call to the build on
     2026-10-02. All four stand, because each one fails closed or keeps
     a rule that the plan already states.
   - Local receipt: Ollama 0.34.4 on the Linux reference machine.
@@ -2338,8 +2338,8 @@ step:
   exceptions, CI enforces 25,000,000 bytes. The M2.5 handoff left the
   gate unchanged. Step 13's receipt is the next data point, not the
   decision.
-- [Required-check protection](ci.md#before-public-release) before a
-  public release.
+- [Required-check protection](ci.md#branch-protection) before the
+  first packaged release.
 - The two M4 follow-ups: bounded layout retention and bulk card
   expansion, after the public benchmark baseline.
 - Mac system-cold timing, deferred by decision.
@@ -2437,9 +2437,8 @@ Run these at the end of the milestone, before the M4 plan lands:
 1. Remove each capability flag without a consumer, in one pull request.
 2. The alignment review over the whole repository, two lenses:
    architecture against [`plan.md`](plan.md), and simplification. Fold
-   the findings into the plan docs and the vault notes, not a standalone
-   review file. `m3-closeout.md` records the evidence and the contract
-   inventory, as [`m2.5-closeout.md`](m2.5-closeout.md) does.
+   the findings into the plan docs, not a standalone review file.
+   `m3-closeout.md` records the evidence and the contract inventory, as [`m2.5-closeout.md`](m2.5-closeout.md) does.
 3. The metrics receipts, one per reference machine, compared with the
    M2.5 receipts from the same machine. The Linux and Mac warm-boot and
    idle receipts, within 10% of M2.5, under the configuration exit
