@@ -5,6 +5,7 @@
 //! table beside this constant one; dispatch stays the join point.
 
 use demerzel_core::{ApprovalMode, Effort};
+use demerzel_providers::EffortWire;
 
 use crate::SessionSettings;
 
@@ -68,11 +69,11 @@ pub(crate) fn model_note(model: &str) -> String {
 
 /// The effort on the full-screen status: the level the requests
 /// carry, never a level they do not send.
-pub(crate) fn effort_status(settings: &SessionSettings) -> String {
-    match settings.request_effort() {
-        _ if settings.effort_omitted => "not sent".to_string(),
-        Some(effort) => effort.to_string(),
-        None => "default".to_string(),
+pub(crate) fn effort_status(wire: EffortWire) -> String {
+    match wire {
+        EffortWire::Sent(effort) => effort.to_string(),
+        EffortWire::Omitted(_) => "not sent".to_string(),
+        EffortWire::Default => "default".to_string(),
     }
 }
 
@@ -80,17 +81,14 @@ pub(crate) fn effort_status(settings: &SessionSettings) -> String {
 /// level the requests carry, the default an endpoint does not
 /// receive, or the session's level that an instance with thinking off
 /// omits.
-pub(crate) fn effort_note(settings: &SessionSettings) -> String {
-    if settings.effort_omitted {
-        return format!(
-            "effort: {} — not sent: this instance turns thinking off and omits the effort; \
-             the session keeps the level",
-            settings.effort
-        );
-    }
-    match settings.request_effort() {
-        Some(effort) => format!("effort: {effort}"),
-        None => {
+pub(crate) fn effort_note(wire: EffortWire) -> String {
+    match wire {
+        EffortWire::Sent(effort) => format!("effort: {effort}"),
+        EffortWire::Omitted(effort) => format!(
+            "effort: {effort} — not sent: this instance turns thinking off and omits the \
+             effort; the session keeps the level"
+        ),
+        EffortWire::Default => {
             "effort: default — this endpoint receives no effort until /effort sets one".to_string()
         }
     }
@@ -155,8 +153,13 @@ pub(crate) fn slash_command(line: &str) -> Option<(&str, &str)> {
 
 /// Turn one command line into its effect. `None` means the line is
 /// not a command and goes to the model. `current` fills the bare
-/// `/model`, `/effort`, and `/approval` replies.
-pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> {
+/// `/model` and `/approval` replies, and `effort` — what the head
+/// target receives — the bare `/effort` one.
+pub(crate) fn dispatch(
+    line: &str,
+    current: &SessionSettings,
+    effort: EffortWire,
+) -> Option<Effect> {
     let (name, args) = slash_command(line)?;
     let effect = match name {
         "exit" | "quit" => Effect::Exit,
@@ -168,7 +171,7 @@ pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> 
             // must not build a vector of itself.
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(model_note(&current.model)),
+                (None, _) => Effect::Note(model_note(&current.route.head.model)),
                 (Some(model), None) => Effect::SetModel(model.to_string()),
                 _ => Effect::Note("usage: /model [name]".to_string()),
             }
@@ -176,7 +179,7 @@ pub(crate) fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> 
         "effort" => {
             let mut tokens = args.split_whitespace();
             match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(effort_note(current)),
+                (None, _) => Effect::Note(effort_note(effort)),
                 (Some(level), None) => match level.parse() {
                     Ok(effort) => Effect::SetEffort(effort),
                     Err(_) => Effect::Note(format!("usage: /effort [{}]", Effort::NAMES)),
@@ -228,16 +231,22 @@ fn unknown_command(name: &str) -> String {
 mod tests {
     fn settings(model: &str, effort: Effort, approval: ApprovalMode) -> SessionSettings {
         SessionSettings {
-            model: model.to_string(),
+            route: Route::new(Target::new("openai-codex", model)),
+            route_origin: Origin::Default,
             effort,
-            effort_set: false,
-            implicit_effort: true,
-            effort_omitted: false,
+            effort_origin: Origin::Default,
             approval,
         }
     }
 
+    /// Dispatch with the head target receiving the session's level.
+    fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> {
+        super::dispatch(line, current, EffortWire::Sent(current.effort))
+    }
+
     use super::*;
+    use crate::config::Origin;
+    use demerzel_core::{Route, Target};
 
     #[test]
     fn slash_commands_require_a_bare_word() {
@@ -318,18 +327,16 @@ mod tests {
         assert!(note.starts_with("usage: /effort"));
         // An instance with thinking off keeps the level and says it
         // does not send it.
-        let mut omitted = settings("m", Effort::Low, ApprovalMode::Ask);
-        omitted.effort_omitted = true;
-        let Some(Effect::Note(note)) = dispatch("/effort", &omitted) else {
+        let omitted = EffortWire::Omitted(Effort::Low);
+        let current = settings("m", Effort::Low, ApprovalMode::Ask);
+        let Some(Effect::Note(note)) = super::dispatch("/effort", &current, omitted) else {
             panic!("expected the current effort");
         };
         assert!(note.contains("low") && note.contains("not sent"), "{note}");
         // The status names no level that the requests do not carry.
-        assert_eq!(
-            effort_status(&settings("m", Effort::Low, ApprovalMode::Ask)),
-            "low"
-        );
-        assert!(!effort_status(&omitted).contains("low"));
+        assert_eq!(effort_status(EffortWire::Sent(Effort::Low)), "low");
+        assert!(!effort_status(omitted).contains("low"));
+        assert_eq!(effort_status(EffortWire::Default), "default");
         let Some(Effect::Note(note)) = dispatch(
             "/model",
             &settings("current-model", Effort::Medium, ApprovalMode::Ask),

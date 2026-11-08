@@ -2270,6 +2270,45 @@ async fn a_resumed_file_over_the_cap_names_the_messages_it_leaves_out() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_session_continues_on_its_recorded_model() {
+    let mock = MockServer::start(vec![text_turn("on the recorded model")], Vec::new()).await;
+    let mut pty = Pty::spawn(&mock.url(), &["-c"]);
+    // A session that ran on another model of the same instance. No
+    // flag names a model, so the resume continues on the recorded one.
+    let store = SessionStore::at(pty.data_dir());
+    let mut session = store
+        .create(&SessionOpen::new(
+            &pty.project(),
+            "openai-codex",
+            "openai-codex",
+            "recorded-model",
+        ))
+        .unwrap();
+    for (role, text) in [(Role::User, "earlier"), (Role::Assistant, "earlier reply")] {
+        session
+            .append_message(&Message {
+                role,
+                content: vec![ContentBlock::Text { text: text.into() }],
+            })
+            .unwrap();
+    }
+    drop(session);
+
+    pty.wait_for(PROMPT);
+    pty.send(b"more\r");
+    pty.wait_for("continuing session");
+    pty.wait_for("on the recorded model");
+    pty.send(CTRL_D);
+    let (status, raw) = pty.wait_end();
+    assert!(status.success(), "exit status: {status:?}");
+    // The status names the session's model. The patch races the
+    // replay, so the check reads the whole stream.
+    let text = String::from_utf8_lossy(&strip_escapes(&raw)).replace(' ', "");
+    assert!(text.contains("recorded-model"), "{text}");
+    assert_eq!(mock.received()[0].body["model"], "recorded-model");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_plain_interface_prints_the_resume_notice_alone() {
     let mock = MockServer::start(
         vec![text_turn("plain reply"), text_turn("plain again")],

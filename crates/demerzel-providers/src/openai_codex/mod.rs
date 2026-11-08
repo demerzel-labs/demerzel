@@ -38,6 +38,8 @@ pub(crate) const CONTEXT_WINDOWS: &[(&str, u64)] = &[("gpt-5.6-sol", 272_000)];
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
+    /// The instance name. Sealed payloads carry it.
+    pub instance: String,
     pub base_url: String,
     /// `originator` header value. The backend expects a known client
     /// name; the Codex CLI default keeps requests accepted.
@@ -54,6 +56,7 @@ pub struct CodexConfig {
 impl Default for CodexConfig {
     fn default() -> Self {
         Self {
+            instance: PROVIDER_ID.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             originator: "codex_cli_rs".to_string(),
             max_attempts: 4,
@@ -101,8 +104,13 @@ impl Provider for OpenAiCodex {
         // history lives across the round trip, plus the bytes the
         // client holds for the attempt in flight. The trace reads the
         // size and the body from the same bytes.
-        let body = serde_json::to_vec(&build_body(&request, self.config.reasoning.as_ref()))
-            .expect("a JSON value serializes");
+        let body = serde_json::to_vec(&build_body(
+            &request,
+            &self.config.instance,
+            self.config.reasoning.as_ref(),
+        ))
+        .expect("a JSON value serializes");
+        let model = request.model.clone();
         drop(request);
         Box::pin(async move {
             let url = format!("{}{ROUTE}", self.config.base_url);
@@ -206,6 +214,8 @@ impl Provider for OpenAiCodex {
             };
             let state = StreamState {
                 secret: token,
+                instance: self.config.instance.clone(),
+                model,
                 ..StreamState::default()
             };
             Ok(spawn_event_stream(response, state))
@@ -214,7 +224,9 @@ impl Provider for OpenAiCodex {
 }
 
 /// Build the Responses API request body from the neutral request.
-fn build_body(request: &Request, reasoning: Option<&Value>) -> Value {
+/// A sealed payload goes back only to the adapter, the instance, and
+/// the model that produced it.
+fn build_body(request: &Request, instance: &str, reasoning: Option<&Value>) -> Value {
     let mut input = Vec::new();
     for message in &request.messages {
         let (role, text_type) = match message.role {
@@ -247,12 +259,14 @@ fn build_body(request: &Request, reasoning: Option<&Value>) -> Value {
                     "call_id": tool_use_id,
                     "output": content,
                 })),
-                // Same-provider sealed payloads round-trip verbatim.
-                // Foreign or missing payloads are dropped: the readable
-                // summary is for humans, not for the wire.
+                // A payload bound to this adapter, instance, and model
+                // round-trips verbatim. A foreign or missing payload is
+                // dropped: the readable summary is for humans, not for
+                // the wire, and encrypted reasoning from another model
+                // fails the request.
                 ContentBlock::Reasoning { sealed, .. } => {
                     if let Some(sealed) = sealed
-                        && sealed.provider == PROVIDER_ID
+                        && sealed.replays_to(PROVIDER_ID, instance, &request.model)
                     {
                         input.push(sealed.data.clone());
                     }
@@ -317,6 +331,10 @@ struct StreamState {
     /// The request's bearer token, so a failure message that echoes
     /// it is redacted before it becomes an error.
     secret: String,
+    /// The instance and the model of the request: sealed payloads
+    /// carry them.
+    instance: String,
+    model: String,
 }
 
 impl PayloadMapper for StreamState {
@@ -432,7 +450,10 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                         .unwrap_or_default();
                     vec![Ok(StreamEvent::ReasoningDone {
                         summary,
-                        sealed: Some(SealedPayload::new(PROVIDER_ID, item.clone())),
+                        sealed: Some(
+                            SealedPayload::new(PROVIDER_ID, item.clone())
+                                .with_identity(&*state.instance, &*state.model),
+                        ),
                     })]
                 }
                 _ => Vec::new(),

@@ -35,7 +35,8 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{Capabilities, Effort, Provider, ProviderError, Request, StreamEvent};
+use crate::provider::{Effort, Provider, ProviderError, Request, StreamEvent};
+use crate::route::{ProviderHost, Route};
 use crate::session::{Session, SessionMeta, SessionOpen, Timing};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
@@ -50,11 +51,10 @@ Read a file before you edit it. Keep changes small and report what you did.";
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineConfig {
-    /// The provider instance name the session file records. `None`
-    /// names the adapter id, the implicit instance of a shipped
-    /// adapter.
-    pub instance: Option<String>,
-    pub model: String,
+    /// The targets of the model calls. The head target names the
+    /// instance and the model that every call goes to, and the meta
+    /// records name them.
+    pub route: Route,
     pub system_prompt: String,
     /// Model calls allowed for one user turn before the loop stops.
     pub max_model_calls: u32,
@@ -70,10 +70,9 @@ pub struct EngineConfig {
 pub const DEFAULT_MAX_MODEL_CALLS: u32 = 128;
 
 impl EngineConfig {
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(route: Route) -> Self {
         Self {
-            instance: None,
-            model: model.into(),
+            route,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             max_model_calls: DEFAULT_MAX_MODEL_CALLS,
             max_output_tokens: None,
@@ -226,9 +225,45 @@ pub enum EngineError {
     Session(#[from] io::Error),
 }
 
+/// The parts of one engine. Non-exhaustive: build one with
+/// [`EngineParts::new`] and set the optional fields, so a later seam
+/// adds a field, not a parameter.
+#[non_exhaustive]
+pub struct EngineParts<'a> {
+    /// Maps each target's instance to its provider.
+    pub providers: &'a dyn ProviderHost,
+    pub tools: &'a dyn ToolHost,
+    pub policy: ApprovalPolicy,
+    pub config: EngineConfig,
+    pub session: Session,
+    /// The history the session continues: a resumed session's
+    /// replayed messages. Empty for a fresh session.
+    pub history: Vec<Message>,
+}
+
+impl<'a> EngineParts<'a> {
+    /// The parts of an engine over a fresh session.
+    pub fn new(
+        providers: &'a dyn ProviderHost,
+        tools: &'a dyn ToolHost,
+        policy: ApprovalPolicy,
+        config: EngineConfig,
+        session: Session,
+    ) -> Self {
+        Self {
+            providers,
+            tools,
+            policy,
+            config,
+            session,
+            history: Vec::new(),
+        }
+    }
+}
+
 /// The turn engine for one session.
 pub struct Engine<'a> {
-    provider: &'a dyn Provider,
+    providers: &'a dyn ProviderHost,
     tools: &'a dyn ToolHost,
     policy: ApprovalPolicy,
     config: EngineConfig,
@@ -238,40 +273,26 @@ pub struct Engine<'a> {
     /// the tool set holds between switches, and the snapshot keeps
     /// the request tools block byte-identical across model calls.
     tool_definitions: Vec<ToolDefinition>,
-    capabilities: Capabilities,
 }
 
 impl<'a> Engine<'a> {
-    /// An engine over a fresh session.
-    pub fn new(
-        provider: &'a dyn Provider,
-        tools: &'a dyn ToolHost,
-        policy: ApprovalPolicy,
-        config: EngineConfig,
-        session: Session,
-    ) -> Self {
-        Self::with_history(provider, tools, policy, config, session, Vec::new())
+    /// An engine over its parts: a fresh session, or a resumed one
+    /// with its replayed history.
+    pub fn new(parts: EngineParts<'a>) -> Self {
+        Self {
+            tool_definitions: parts.tools.definitions(),
+            providers: parts.providers,
+            tools: parts.tools,
+            policy: parts.policy,
+            config: parts.config,
+            session: parts.session,
+            history: parts.history,
+        }
     }
 
-    /// An engine over a resumed session with its replayed history.
-    pub fn with_history(
-        provider: &'a dyn Provider,
-        tools: &'a dyn ToolHost,
-        policy: ApprovalPolicy,
-        config: EngineConfig,
-        session: Session,
-        history: Vec<Message>,
-    ) -> Self {
-        Self {
-            tool_definitions: tools.definitions(),
-            capabilities: provider.capabilities(),
-            provider,
-            tools,
-            policy,
-            config,
-            session,
-            history,
-        }
+    /// The route the model calls follow.
+    pub fn route(&self) -> &Route {
+        &self.config.route
     }
 
     pub fn history(&self) -> &[Message] {
@@ -282,26 +303,29 @@ impl<'a> Engine<'a> {
         &self.session
     }
 
-    /// Switch the model for the turns that follow. The switch appends
-    /// a meta record, so the session file names the model that
-    /// continues it — an audit trail; resume still takes its model
-    /// from config. A real switch also drops the sealed reasoning
-    /// payloads from the in-memory history: a sealed payload is bound
-    /// to the model that produced it, and resending it to another
-    /// model fails every later turn. The readable summaries stay.
+    /// Switch the head target's model for the turns that follow. The
+    /// switch appends a meta record, so the session file names the
+    /// model that continues it, and a resume continues on it. The
+    /// history keeps its sealed reasoning: a payload goes only to the
+    /// instance and the model that produced it, so a switch back
+    /// restores the continuity. A payload without a model binds to
+    /// no model: it comes from a file written before the identity
+    /// fields, and a real switch drops it, as before.
     pub fn set_model(&mut self, model: &str) -> Result<(), EngineError> {
         let meta = self.meta(model, self.config.effort, self.policy.mode);
         self.session.append_meta(&meta)?;
-        if model != self.config.model {
+        if model != self.config.route.head.model {
             for message in &mut self.history {
                 for block in &mut message.content {
-                    if let ContentBlock::Reasoning { sealed, .. } = block {
+                    if let ContentBlock::Reasoning { sealed, .. } = block
+                        && sealed.as_ref().is_some_and(|sealed| sealed.model.is_none())
+                    {
                         *sealed = None;
                     }
                 }
             }
         }
-        self.config.model = model.to_string();
+        self.config.route.head.model = model.to_string();
         Ok(())
     }
 
@@ -392,13 +416,17 @@ impl<'a> Engine<'a> {
             }
             calls += 1;
 
-            let request = self.assemble();
+            // The provider comes from the target this call goes to,
+            // and so do its capabilities.
+            let providers = self.providers;
+            let provider = providers.provider(&self.config.route.head.instance)?;
+            let request = self.assemble(provider);
             // The call's clock runs from the send to the terminal
             // event, retries included: the wall time the user waited.
             let at = SystemTime::now();
             let started = Instant::now();
             let response = async {
-                let stream = self.provider.stream(request).await?;
+                let stream = provider.stream(request).await?;
                 collect_response(stream, sink).await
             }
             .await;
@@ -414,8 +442,8 @@ impl<'a> Engine<'a> {
                     log::warn!(
                         "model call {calls} failed: provider={} model={} effort={effort} \
                          duration_ms={} error={}",
-                        self.instance(),
-                        self.config.model,
+                        self.config.route.head.instance,
+                        self.config.route.head.model,
                         timing.duration_ms(),
                         capped(&error.to_string(), MAX_TURN_ERROR_BYTES)
                     );
@@ -437,8 +465,8 @@ impl<'a> Engine<'a> {
                 log::info!(
                     "model call {calls}: provider={} model={} effort={effort} stop={} \
                      duration_ms={} {tokens}",
-                    self.instance(),
-                    self.config.model,
+                    self.config.route.head.instance,
+                    self.config.route.head.model,
                     stop.as_str(),
                     timing.duration_ms()
                 );
@@ -489,12 +517,38 @@ impl<'a> Engine<'a> {
 
     /// Fixed prompt assembly: system prompt, then history. Nothing
     /// volatile enters the request. Tools go along only when the
-    /// provider declares the capability.
-    fn assemble(&self) -> Request {
-        let mut request = Request::new(self.config.model.clone());
+    /// target's provider declares the capability. A sealed payload
+    /// that the target may not receive stays out of the copy: the
+    /// history keeps it for a switch back, and the request does not
+    /// carry it to an adapter that drops it.
+    fn assemble(&self, provider: &dyn Provider) -> Request {
+        let head = &self.config.route.head;
+        let mut request = Request::new(head.model.clone());
         request.system_prompt = self.config.system_prompt.clone();
-        request.messages = self.history.clone();
-        if self.capabilities.tool_calls {
+        request.messages = self
+            .history
+            .iter()
+            .map(|message| Message {
+                role: message.role,
+                content: message
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Reasoning {
+                            summary,
+                            sealed: Some(sealed),
+                        } if !sealed.replays_to(provider.id(), &head.instance, &head.model) => {
+                            ContentBlock::Reasoning {
+                                summary: summary.clone(),
+                                sealed: None,
+                            }
+                        }
+                        other => other.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        if provider.capabilities().tool_calls {
             request.tools = self.tool_definitions.clone();
         }
         request.max_output_tokens = self.config.max_output_tokens;
@@ -507,7 +561,11 @@ impl<'a> Engine<'a> {
     pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
         // The record first, the switch second: a failed write leaves
         // the engine where the interface still believes it is.
-        let meta = self.meta(&self.config.model, Some(effort), self.policy.mode);
+        let meta = self.meta(
+            &self.config.route.head.model,
+            Some(effort),
+            self.policy.mode,
+        );
         self.session.append_meta(&meta)?;
         self.config.effort = Some(effort);
         Ok(())
@@ -526,7 +584,7 @@ impl<'a> Engine<'a> {
         mode: ApprovalMode,
         tools: &'a dyn ToolHost,
     ) -> Result<(), EngineError> {
-        let meta = self.meta(&self.config.model, self.config.effort, mode);
+        let meta = self.meta(&self.config.route.head.model, self.config.effort, mode);
         self.session.append_meta(&meta)?;
         self.policy.mode = mode;
         self.tools = tools;
@@ -539,26 +597,15 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    /// The provider instance name the session file and the trace
-    /// record.
-    fn instance(&self) -> &str {
-        self.config
-            .instance
-            .as_deref()
-            .unwrap_or_else(|| self.provider.id())
-    }
-
-    /// A meta record for the current instance with these settings.
-    /// It starts from the session's last record and changes only what
-    /// a switch changes, so a field the opening record carries stays
-    /// on every later one.
+    /// A meta record for the head target's instance with these
+    /// settings. It starts from the session's last record and changes
+    /// only what a switch changes, so a field the opening record
+    /// carries stays on every later one. The adapter id comes from the
+    /// host, with no provider build.
     fn meta(&self, model: &str, effort: Option<Effort>, approval: ApprovalMode) -> SessionMeta {
-        let mut open = SessionOpen::new(
-            self.session.cwd(),
-            self.instance(),
-            self.provider.id(),
-            model,
-        );
+        let instance = &self.config.route.head.instance;
+        let kind = self.providers.kind(instance).unwrap_or(instance);
+        let mut open = SessionOpen::new(self.session.cwd(), instance, kind, model);
         open.effort = effort;
         open.approval = approval;
         let fresh = SessionMeta::now(&open);
@@ -904,7 +951,9 @@ mod tests {
     use super::*;
     use crate::approval::{ApprovalMode, ToolAccess};
     use crate::message::SealedPayload;
-    use crate::provider::EventStream;
+    use crate::provider::{Capabilities, EventStream};
+    use crate::route::ProviderHost;
+    use crate::route::Target;
     use crate::session::{SessionStore, replay};
     use futures_core::Stream;
     use serde_json::json;
@@ -1000,6 +1049,17 @@ mod tests {
         }
     }
 
+    /// The engine tests run one provider, which serves every instance.
+    impl ProviderHost for ScriptedProvider {
+        fn provider(&self, _instance: &str) -> Result<&dyn Provider, ProviderError> {
+            Ok(self)
+        }
+
+        fn kind(&self, _instance: &str) -> Option<&str> {
+            Some(self.id())
+        }
+    }
+
     /// Three tools: `note` is read-only, `write` writes, `exec`
     /// executes. Any other name is unknown.
     struct FakeTools;
@@ -1068,6 +1128,34 @@ mod tests {
         }
     }
 
+    /// The route of a test engine: the scripted instance and `model`.
+    fn route(model: &str) -> Route {
+        Route::new(Target::new("scripted", model))
+    }
+
+    fn new_engine<'a>(
+        provider: &'a ScriptedProvider,
+        tools: &'a FakeTools,
+        policy: ApprovalPolicy,
+        config: EngineConfig,
+        session: Session,
+    ) -> Engine<'a> {
+        Engine::new(EngineParts::new(provider, tools, policy, config, session))
+    }
+
+    fn engine_with_history<'a>(
+        provider: &'a ScriptedProvider,
+        tools: &'a FakeTools,
+        policy: ApprovalPolicy,
+        config: EngineConfig,
+        session: Session,
+        history: Vec<Message>,
+    ) -> Engine<'a> {
+        let mut parts = EngineParts::new(provider, tools, policy, config, session);
+        parts.history = history;
+        Engine::new(parts)
+    }
+
     fn session_in(dir: &tempfile::TempDir) -> Session {
         SessionStore::at(dir.path())
             .create(&SessionOpen::new(
@@ -1085,11 +1173,11 @@ mod tests {
         mode: ApprovalMode,
         session: Session,
     ) -> Engine<'a> {
-        Engine::new(
+        new_engine(
             provider,
             tools,
             ApprovalPolicy::new(mode),
-            EngineConfig::new("test-model"),
+            EngineConfig::new(route("test-model")),
             session,
         )
     }
@@ -1602,9 +1690,9 @@ mod tests {
         let provider = ScriptedProvider::new(scripts);
         let tools = FakeTools;
         let session = session_in(&dir);
-        let mut config = EngineConfig::new("test-model");
+        let mut config = EngineConfig::new(route("test-model"));
         config.max_model_calls = 2;
-        let mut engine = Engine::new(
+        let mut engine = new_engine(
             &provider,
             &tools,
             ApprovalPolicy::new(ApprovalMode::Auto),
@@ -1638,11 +1726,11 @@ mod tests {
                 }],
             },
         ];
-        let mut engine = Engine::with_history(
+        let mut engine = engine_with_history(
             &provider,
             &tools,
             ApprovalPolicy::new(ApprovalMode::Auto),
-            EngineConfig::new("test-model"),
+            EngineConfig::new(route("test-model")),
             session_in(&dir),
             history,
         );
@@ -1711,11 +1799,11 @@ mod tests {
                 }],
             },
         ];
-        let mut engine = Engine::with_history(
+        let mut engine = engine_with_history(
             &provider,
             &tools,
             ApprovalPolicy::new(ApprovalMode::Auto),
-            EngineConfig::new("test-model"),
+            EngineConfig::new(route("test-model")),
             session_in(&dir),
             history,
         );
@@ -1835,9 +1923,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(vec![text_done("one")]);
         let tools = FakeTools;
-        let mut config = EngineConfig::new("test-model");
-        config.instance = Some("local".to_string());
-        let mut engine = Engine::new(
+        let mut config = EngineConfig::new(route("test-model"));
+        config.route.head.instance = "local".to_string();
+        let mut engine = new_engine(
             &provider,
             &tools,
             ApprovalPolicy::new(ApprovalMode::Auto),
@@ -1968,10 +2056,16 @@ mod tests {
     }
 
     #[test]
-    fn a_model_switch_drops_sealed_reasoning_from_the_history() {
+    fn a_model_switch_keeps_sealed_reasoning_in_the_history() {
         let dir = tempfile::tempdir().unwrap();
-        let provider = ScriptedProvider::new(vec![text_done("later")]);
+        let provider = ScriptedProvider::new(vec![text_done("later"), text_done("back")]);
         let tools = FakeTools;
+        let sealed = SealedPayload::new("scripted", json!({"sig": "model-a-only"}))
+            .with_identity("scripted", "model-a");
+        let reasoning = ContentBlock::Reasoning {
+            summary: "thought".into(),
+            sealed: Some(sealed),
+        };
         let history = vec![
             Message {
                 role: Role::User,
@@ -1979,44 +2073,84 @@ mod tests {
             },
             Message {
                 role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Reasoning {
-                        summary: "thought".into(),
-                        sealed: Some(SealedPayload::new(
-                            "scripted",
-                            json!({"sig": "model-a-only"}),
-                        )),
-                    },
-                    ContentBlock::Text { text: "hey".into() },
-                ],
+                content: vec![reasoning.clone(), ContentBlock::Text { text: "hey".into() }],
             },
         ];
-        let mut engine = Engine::with_history(
+        let mut engine = engine_with_history(
             &provider,
             &tools,
             ApprovalPolicy::new(ApprovalMode::Auto),
-            EngineConfig::new("model-a"),
+            EngineConfig::new(route("model-a")),
             session_in(&dir),
             history,
         );
 
-        // A switch to the same name keeps the payloads.
-        engine.set_model("model-a").unwrap();
-        assert!(matches!(
-            &engine.history()[1].content[0],
-            ContentBlock::Reasoning {
-                sealed: Some(_),
-                ..
-            }
-        ));
-
-        // A real switch drops them; the summary stays readable.
+        // The switch keeps the payload; the adapter, not the engine,
+        // keeps it off another model's wire.
         engine.set_model("model-b").unwrap();
-        let ContentBlock::Reasoning { summary, sealed } = &engine.history()[1].content[0] else {
-            panic!("expected the reasoning block");
+        assert_eq!(engine.route().head.model, "model-b");
+        let sink = noop_sink();
+        block_on(engine.user_turn("next".into(), &sink, &mut ApproveAll)).unwrap();
+        // A switch back finds the payload where it was.
+        engine.set_model("model-a").unwrap();
+        block_on(engine.user_turn("again".into(), &sink, &mut ApproveAll)).unwrap();
+
+        // The request to the other model leaves the payload out; the
+        // request after the switch back carries it again.
+        let requests = provider.requests();
+        assert_eq!(requests[0].model, "model-b");
+        assert_eq!(
+            requests[0].messages[1].content[0],
+            ContentBlock::Reasoning {
+                summary: "thought".into(),
+                sealed: None,
+            }
+        );
+        assert_eq!(requests[1].model, "model-a");
+        assert_eq!(requests[1].messages[1].content[0], reasoning);
+        assert_eq!(engine.history()[1].content[0], reasoning);
+    }
+
+    #[test]
+    fn a_model_switch_drops_payloads_without_a_model_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ScriptedProvider::new(Vec::new());
+        let tools = FakeTools;
+        // A payload from a file written before the identity fields.
+        let legacy = ContentBlock::Reasoning {
+            summary: "thought".into(),
+            sealed: Some(SealedPayload::new("scripted", json!({"sig": "old"}))),
         };
-        assert_eq!(summary, "thought");
-        assert!(sealed.is_none(), "a sealed payload crossed a model switch");
+        let history = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![legacy.clone()],
+            },
+        ];
+        let mut engine = engine_with_history(
+            &provider,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            EngineConfig::new(route("model-a")),
+            session_in(&dir),
+            history,
+        );
+        // The same name is no switch: the payload stays.
+        engine.set_model("model-a").unwrap();
+        assert_eq!(engine.history()[1].content[0], legacy);
+        // A real switch drops it; the summary stays readable.
+        engine.set_model("model-b").unwrap();
+        assert_eq!(
+            engine.history()[1].content[0],
+            ContentBlock::Reasoning {
+                summary: "thought".into(),
+                sealed: None,
+            }
+        );
     }
 
     #[test]

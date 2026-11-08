@@ -9,18 +9,20 @@ mod engine;
 mod message;
 pub mod paths;
 mod provider;
+mod route;
 mod session;
 mod tool;
 
 pub use approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, ToolAccess};
 pub use engine::{
     ApprovalAnswer, Approver, DEFAULT_MAX_MODEL_CALLS, DEFAULT_SYSTEM_PROMPT, Engine, EngineConfig,
-    EngineError, EngineEvent, EventSink, NoPrompt, TurnOutcome,
+    EngineError, EngineEvent, EngineParts, EventSink, NoPrompt, TurnOutcome,
 };
 pub use message::{ContentBlock, Message, Role, SealedPayload, StopReason, Usage};
 pub use provider::{
     Capabilities, Effort, EventStream, Provider, ProviderError, Request, StreamEvent,
 };
+pub use route::{ProviderHost, Route, SingleProvider, Target};
 pub use session::{
     Replay, ReplayToolClock, ReplayUsage, SCHEMA_VERSION, Session, SessionMeta, SessionOpen,
     SessionRecord, SessionStore, Timing, replay,

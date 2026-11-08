@@ -16,7 +16,7 @@ mod retry;
 mod sse;
 
 pub use demerzel_core::{
-    BoxFuture, Capabilities, EventStream, Provider, ProviderError, Request, StreamEvent,
+    BoxFuture, Capabilities, Effort, EventStream, Provider, ProviderError, Request, StreamEvent,
     ToolDefinition,
 };
 
@@ -133,6 +133,55 @@ pub fn adapter_rules(kind: &str) -> Option<AdapterRules> {
     Some(rules)
 }
 
+/// What the requests to an instance carry for the session's effort:
+/// one answer for the request, the status, the `/effort` note, and
+/// `doctor`. Exhaustive: each reader states each case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortWire {
+    /// The requests carry this level.
+    Sent(Effort),
+    /// The requests carry no level, and the server's default applies:
+    /// an adapter without implicit effort before a level is set.
+    Default,
+    /// The instance keeps the level off the wire: an instance with
+    /// thinking off. The session keeps the level for other targets.
+    Omitted(Effort),
+}
+
+impl EffortWire {
+    /// The level the request carries. The adapter of an instance with
+    /// thinking off drops it from the wire.
+    pub fn request(self) -> Option<Effort> {
+        match self {
+            EffortWire::Sent(effort) | EffortWire::Omitted(effort) => Some(effort),
+            EffortWire::Default => None,
+        }
+    }
+}
+
+/// What the requests to an instance of adapter `kind` carry, for the
+/// session's level `effort`. `set` says whether a flag, a variable,
+/// a config file, or `/effort` named the level. An adapter with
+/// implicit effort, or an unknown one, receives the level either way;
+/// another receives it only when set. An instance with thinking off
+/// omits it.
+pub fn effort_wire(
+    kind: &str,
+    thinking: Option<ThinkingMode>,
+    effort: Effort,
+    set: bool,
+) -> EffortWire {
+    if thinking.is_some_and(|mode| !mode.sends_effort()) {
+        return EffortWire::Omitted(effort);
+    }
+    let implicit = adapter_rules(kind).is_none_or(|rules| rules.implicit_effort);
+    if set || implicit {
+        EffortWire::Sent(effort)
+    } else {
+        EffortWire::Default
+    }
+}
+
 /// The default model of an adapter; `None` for an unknown id and for
 /// an adapter without a default, such as `openai-compat` or
 /// `openai-responses`, whose instance must name its model.
@@ -175,6 +224,32 @@ mod tests {
             assert_eq!(default_model(id), None);
             assert!(adapter_rules(id).unwrap().needs_endpoint);
         }
+    }
+
+    #[test]
+    fn the_effort_wire_follows_the_target() {
+        let high = Effort::High;
+        // A shipped adapter receives the default level.
+        for kind in [openai_codex::PROVIDER_ID, anthropic::PROVIDER_ID] {
+            assert_eq!(effort_wire(kind, None, high, false), EffortWire::Sent(high));
+        }
+        // A compatible endpoint receives a level only when one is set.
+        for kind in [openai_compat::PROVIDER_ID, openai_responses::PROVIDER_ID] {
+            assert_eq!(effort_wire(kind, None, high, false), EffortWire::Default);
+            assert_eq!(effort_wire(kind, None, high, true), EffortWire::Sent(high));
+        }
+        // Thinking off omits the level, set or not; the request still
+        // carries it, and the adapter drops it.
+        let off = Some(ThinkingMode::Off);
+        let omitted = effort_wire(anthropic::PROVIDER_ID, off, Effort::Low, true);
+        assert_eq!(omitted, EffortWire::Omitted(Effort::Low));
+        assert_eq!(omitted.request(), Some(Effort::Low));
+        assert_eq!(EffortWire::Default.request(), None);
+        let adaptive = Some(ThinkingMode::Adaptive);
+        assert_eq!(
+            effort_wire(anthropic::PROVIDER_ID, adaptive, high, false),
+            EffortWire::Sent(high)
+        );
     }
 
     #[test]

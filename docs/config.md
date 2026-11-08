@@ -425,6 +425,33 @@ Two flags resume a session. Both look in the current project only:
 The two flags exclude each other. `/session` shows the open
 session's id and file.
 
+A resumed session continues on its own provider instance and model.
+The last `meta` record of the session file names them. A change to a
+config file does not replace them. These do:
+
+- The `--provider` or `--model` flag, or its variable, replaces both.
+- `/model` before the first prompt replaces the model.
+
+The session continues on the configured instance in these cases:
+
+- The config no longer defines the recorded instance.
+- The recorded instance now names another adapter.
+- The config cannot run the recorded instance.
+
+A notice names both instances. A resume onto another instance takes
+the effort that the config sets for that instance, unless `/effort`
+set a level before the first prompt. A missing login on the recorded
+instance stops the run before the session file changes. The error
+names the instance. Use `--provider` to continue on another one.
+`--base-url` and
+`DEMERZEL_BASE_URL` apply to the configured instance only. A key
+never follows them to another instance's requests. `/new` keeps the
+instance and the model of the session before it.
+
+`/model` keeps the reasoning in the history. Each adapter sends
+reasoning only to the instance and the model that wrote it. After a
+switch back, the model receives its own reasoning again.
+
 The full-screen interface shows a resumed session's past turns. At
 the first prompt, the transcript shows the session file as blocks:
 

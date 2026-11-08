@@ -90,7 +90,7 @@ impl Bed {
         config.model = "bench-model".into();
         config.approval = ApprovalMode::Auto;
         config.data_root = Some(data.path().join("sessions"));
-        config.base_url = Some(mock.url());
+        config.instance.base_url = Some(mock.url());
         config.auth = Some(AuthPaths {
             store: auth_path,
             codex_cli: None,
@@ -112,14 +112,7 @@ impl Bed {
     async fn timed_turn(&self, expected_history: usize) -> Duration {
         let config = self.runtime.config();
         let settings = demerzel::SessionSettings::from_config(config);
-        let (session, replay) = self
-            .runtime
-            .open_session(&config.resume, &settings)
-            .unwrap();
-        let mut engine = self
-            .runtime
-            .engine(session, replay.messages, &settings)
-            .unwrap();
+        let mut engine = self.runtime.open(&config.resume, &settings).unwrap().engine;
         let start = Instant::now();
         let outcome = engine
             .user_turn("bench".into(), &noop, &mut NoPrompt)
@@ -211,9 +204,13 @@ fn bench_turns(c: &mut Criterion) {
     // `turn_text` through a named compatible instance: the same turn
     // on the Chat Completions route, with no credential.
     let bed = Bed::start_with(vec![compat::text_turn("done")], |config| {
-        config.provider = "bench-compat".into();
-        config.kind = Some("openai-compat".into());
-        config.base_url = config.base_url.take().map(|url| format!("{url}/v1"));
+        config.instance.name = "bench-compat".into();
+        config.instance.kind = "openai-compat".into();
+        config.instance.base_url = config
+            .instance
+            .base_url
+            .take()
+            .map(|url| format!("{url}/v1"));
     });
     c.bench_function("turn_text_compat", |b| {
         b.to_async(&bench_rt).iter_custom(|iters| {
@@ -232,9 +229,13 @@ fn bench_turns(c: &mut Criterion) {
     // `turn_text` through a named Responses instance: the same turn on
     // the Responses API route, with no credential.
     let bed = Bed::start_with(vec![responses::text_turn("done")], |config| {
-        config.provider = "bench-responses".into();
-        config.kind = Some("openai-responses".into());
-        config.base_url = config.base_url.take().map(|url| format!("{url}/v1"));
+        config.instance.name = "bench-responses".into();
+        config.instance.kind = "openai-responses".into();
+        config.instance.base_url = config
+            .instance
+            .base_url
+            .take()
+            .map(|url| format!("{url}/v1"));
     });
     c.bench_function("turn_text_responses", |b| {
         b.to_async(&bench_rt).iter_custom(|iters| {

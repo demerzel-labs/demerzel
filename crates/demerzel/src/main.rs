@@ -335,26 +335,39 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     let interactive = cli.prompt.is_none();
     let mut config = RunConfig::new(cwd);
     config.approval = settings.approval_mode(interactive);
-    config.provider = settings.provider.value;
+    config.instance = settings.instance();
     // `problems` came back empty, so the instance and its model
     // resolved.
-    config.kind = settings.kind.value;
     config.model = settings
         .model
         .value
+        .clone()
         .expect("problems reports a missing model");
-    config.api_key_env = settings.api_key_env.value;
-    config.base_url = settings.base_url.value;
+    config.route_origin = settings.route_origin();
     config.effort = settings.effort.value;
-    config.effort_set = settings.effort_set;
+    config.effort_origin = settings.effort.origin;
     config.max_model_calls = settings.max_model_calls.value;
-    config.context_window = settings.context_window.value;
-    config.thinking_mode = settings.thinking_mode.value;
     config.resume = match &cli.session {
         Some(id) => Resume::Id(id.clone()),
         None if cli.continue_last => Resume::Latest,
         None => Resume::Fresh,
     };
+    // A resume continues on the session's own target; config
+    // resolves the instances it can name. A fresh run, or one whose
+    // flags name the target, needs none.
+    let flagged = matches!(
+        config.route_origin,
+        config::Origin::Flag | config::Origin::Env
+    );
+    if config.resume != Resume::Fresh && !flagged {
+        config.resumable = config::resumable(
+            &settings.provider.value,
+            &cli.flags(),
+            &|name| std::env::var(name).ok(),
+            project.as_ref(),
+            user.as_ref(),
+        );
+    }
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;
     config.thinking = settings.tui.thinking.value;

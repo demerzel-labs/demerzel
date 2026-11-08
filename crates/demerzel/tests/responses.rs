@@ -62,10 +62,10 @@ impl Bed {
     /// mode, at the mock's `/v1` root.
     fn config(&self) -> RunConfig {
         let mut config = RunConfig::new(self.project.path().to_path_buf());
-        config.provider = "hosted".into();
-        config.kind = Some("openai-responses".into());
+        config.instance.name = "hosted".into();
+        config.instance.kind = "openai-responses".into();
         config.model = "m1".into();
-        config.base_url = Some(format!("{}/v1", self.mock.url()));
+        config.instance.base_url = Some(format!("{}/v1", self.mock.url()));
         config.approval = demerzel_core::ApprovalMode::Auto;
         config.data_root = Some(self.data.path().join("store"));
         // The run reads its own store, never the developer's.
@@ -161,7 +161,9 @@ async fn resume_keeps_the_reasoning_for_the_same_model_only() {
         .unwrap();
     assert_eq!(bed.mock.received()[2].body["input"][1], own_item());
 
+    // A flag names the model: it wins over the session's own.
     config.model = "m2".into();
+    config.route_origin = demerzel::config::Origin::Flag;
     Runtime::new(config)
         .unwrap()
         .one_shot("switch".into(), &noop)
@@ -185,8 +187,7 @@ async fn effort_reaches_the_endpoint_only_when_set() {
     let bed = Bed::start(vec![text_turn("one"), text_turn("two"), text_turn("three")]).await;
     let runtime = Runtime::new(bed.config()).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let (session, replay) = runtime.open_session(&Resume::Fresh, &settings).unwrap();
-    let mut engine = runtime.engine(session, replay.messages, &settings).unwrap();
+    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
     engine
         .user_turn("first".into(), &noop, &mut NoPrompt)
         .await
@@ -203,7 +204,7 @@ async fn effort_reaches_the_endpoint_only_when_set() {
     // A level the config sets goes out from the first call.
     let mut config = bed.config();
     config.effort = Effort::Medium;
-    config.effort_set = true;
+    config.effort_origin = demerzel::config::Origin::Flag;
     let runtime = Runtime::new(config).unwrap();
     runtime.one_shot("third".into(), &noop).await.unwrap();
     assert_eq!(
@@ -310,7 +311,7 @@ async fn an_instance_reads_only_its_own_key_from_the_store() {
     // A key variable decides before the store: an unset one names the
     // variable, not the store. The real binary covers a set one in
     // tests/doctor.rs.
-    config.api_key_env = Some("DMZ_TEST_RESPONSES_KEY_NEVER_SET".into());
+    config.instance.api_key_env = Some("DMZ_TEST_RESPONSES_KEY_NEVER_SET".into());
     let error = Runtime::new(config)
         .unwrap()
         .one_shot("hi".into(), &noop)
@@ -331,7 +332,7 @@ async fn an_unset_key_variable_stops_the_turn_with_its_name() {
     let bed = Bed::start(vec![text_turn("never")]).await;
     let mut config = bed.config();
     // A name no test and no machine sets.
-    config.api_key_env = Some("DMZ_TEST_RESPONSES_KEY_NEVER_SET".into());
+    config.instance.api_key_env = Some("DMZ_TEST_RESPONSES_KEY_NEVER_SET".into());
     let error = Runtime::new(config)
         .unwrap()
         .one_shot("hi".into(), &noop)
@@ -350,8 +351,8 @@ fn a_run_config_without_an_endpoint_or_model_stops_at_boot() {
     let project = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     let mut config = RunConfig::new(project.path().to_path_buf());
-    config.provider = "hosted".into();
-    config.kind = Some("openai-responses".into());
+    config.instance.name = "hosted".into();
+    config.instance.kind = "openai-responses".into();
     config.model = "m1".into();
     config.data_root = Some(data.path().to_path_buf());
     // The error names the missing key.
@@ -361,7 +362,7 @@ fn a_run_config_without_an_endpoint_or_model_stops_at_boot() {
         "{error}"
     );
 
-    config.base_url = Some("http://127.0.0.1:9/v1".into());
+    config.instance.base_url = Some("http://127.0.0.1:9/v1".into());
     config.model = String::new();
     let error = Runtime::new(config).err().unwrap();
     assert!(

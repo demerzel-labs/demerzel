@@ -42,11 +42,12 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     ));
     options.model = config.model.clone();
     options.mode = mode;
+    let settings = SessionSettings::from_config(config);
     // A compatible endpoint receives no effort until one is set, and
     // an instance with thinking off receives none; the status says so
     // rather than naming a level it does not send.
-    options.effort = effort_status(&SessionSettings::from_config(config));
-    options.context_window = runtime.context_window(&config.model);
+    options.effort = effort_status(runtime.effort_wire(&settings));
+    options.context_window = runtime.context_window(&settings.route.head);
     // The config takes any path; the name and the branch need a
     // real one, so `.` and `..` name their directory and the walk
     // up visits true ancestors only. The session record's `cwd`
@@ -74,7 +75,7 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let mut driver = TuiDriver {
         runtime: &runtime,
         engine: None,
-        settings: SessionSettings::from_config(config),
+        settings,
         resume: config.resume.clone(),
         opened: None,
         project_dir,
@@ -149,6 +150,20 @@ impl Approver for TuiApprover {
     }
 }
 
+impl TuiDriver<'_> {
+    /// Show the head target on the status: the model, its context
+    /// window, and the effort its requests carry. An unknown window
+    /// takes the share away.
+    fn show_target(&self, events: &EventSender) {
+        let head = &self.settings.route.head;
+        let mut patch = StatusPatch::default();
+        patch.context_window = Some(self.runtime.context_window(head));
+        patch.model = Some(head.model.clone());
+        patch.effort = Some(effort_status(self.runtime.effort_wire(&self.settings)));
+        events.status(patch);
+    }
+}
+
 impl Driver for TuiDriver<'_> {
     fn submit(
         &mut self,
@@ -156,7 +171,11 @@ impl Driver for TuiDriver<'_> {
         events: EventSender,
         approvals: ApprovalChannel,
     ) -> Submission<'_> {
-        match dispatch(&line, &self.settings) {
+        match dispatch(
+            &line,
+            &self.settings,
+            self.runtime.effort_wire(&self.settings),
+        ) {
             Some(Effect::Exit) => return Submission::Exit,
             Some(Effect::Note(note)) => return Submission::Note(note),
             Some(Effect::NewSession) => {
@@ -178,14 +197,9 @@ impl Driver for TuiDriver<'_> {
                 {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
-                self.settings.model = name.clone();
-                let mut patch = StatusPatch::default();
-                // The window follows the model; an unknown window
-                // takes the share away.
-                patch.context_window = Some(self.runtime.context_window(&name));
-                patch.model = Some(name);
-                events.status(patch);
-                return Submission::Note(model_note(&self.settings.model));
+                self.settings.set_model(name);
+                self.show_target(&events);
+                return Submission::Note(model_note(&self.settings.route.head.model));
             }
             Some(Effect::SetEffort(effort)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -193,12 +207,12 @@ impl Driver for TuiDriver<'_> {
                 {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
-                self.settings.effort = effort;
-                self.settings.effort_set = true;
+                self.settings.set_effort(effort);
+                let wire = self.runtime.effort_wire(&self.settings);
                 let mut patch = StatusPatch::default();
-                patch.effort = Some(effort_status(&self.settings));
+                patch.effort = Some(effort_status(wire));
                 events.status(patch);
-                return Submission::Note(effort_note(&self.settings));
+                return Submission::Note(effort_note(wire));
             }
             Some(Effect::SetApproval(mode)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -220,34 +234,38 @@ impl Driver for TuiDriver<'_> {
         // under them, and the new prompt under the notice — the
         // screen shows what the model receives.
         if self.engine.is_none() {
-            let (session, replay) = match self.runtime.open_session(&self.resume, &self.settings) {
+            // The open adopts a resumed session's head target into
+            // its own settings: a failure leaves these and the screen
+            // as they were.
+            let opened = match self.runtime.open(&self.resume, &self.settings) {
                 Ok(opened) => opened,
                 Err(error) => return Submission::Error(format!("demerzel: {error}")),
             };
-            let id = session.id().to_string();
-            let history = (!replay.messages.is_empty()).then(|| {
+            let engine = opened.engine;
+            let id = engine.session().id().to_string();
+            let messages = engine.history();
+            let history = (!messages.is_empty()).then(|| {
                 (
-                    crate::replay::entries(&replay),
-                    format!(
-                        "continuing session {id} ({} messages)",
-                        replay.messages.len()
-                    ),
+                    crate::replay::entries(messages, &opened.usage, &opened.tools),
+                    format!("continuing session {id} ({} messages)", messages.len()),
                 )
             });
-            // The state changes after the engine builds: a failure
-            // leaves no opened session behind it.
-            let engine = match self
-                .runtime
-                .engine(session, replay.messages, &self.settings)
-            {
-                Ok(engine) => engine,
-                Err(error) => return Submission::Error(format!("demerzel: {error}")),
-            };
+            let settings = opened.settings;
+            let adopted = settings.route.head != self.settings.route.head
+                || settings.effort != self.settings.effort
+                || settings.effort_origin != self.settings.effort_origin;
+            self.settings = settings;
             self.engine = Some(engine);
             self.opened = Some(id);
             events.session_changed();
+            if adopted {
+                self.show_target(&events);
+            }
             if let Some((entries, notice)) = history {
                 events.replay(entries);
+                events.notice(notice);
+            }
+            if let Some(notice) = opened.notice {
                 events.notice(notice);
             }
         }

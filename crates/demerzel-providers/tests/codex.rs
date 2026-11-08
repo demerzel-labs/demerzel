@@ -300,6 +300,8 @@ async fn assembles_the_stream_into_neutral_events() {
             assert_eq!(summary, "thinking");
             let sealed = sealed.as_ref().unwrap();
             assert_eq!(sealed.provider, "openai-codex");
+            assert!(sealed.replays_to("openai-codex", "openai-codex", "gpt-test"));
+            assert!(!sealed.replays_to("openai-codex", "openai-codex", "gpt-other"));
             assert_eq!(sealed.data["encrypted_content"], "enc");
             assert_eq!(t1, "Hello ");
             assert_eq!(t2, "world");
@@ -524,4 +526,101 @@ async fn an_incomplete_response_reports_its_usage_before_the_stop() {
         }
         other => panic!("unexpected events: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn sealed_reasoning_replays_only_to_its_instance_and_model() {
+    let mock = MockServer::start(
+        vec![MockResponse::stream(vec![completed(json!({}))])],
+        vec![],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(write_store(dir.path(), "tok"), None).unwrap();
+    let config = CodexConfig {
+        instance: "work".into(),
+        base_url: mock.url(),
+        max_attempts: 1,
+        ..CodexConfig::default()
+    };
+    let provider = OpenAiCodex::new(config, auth);
+
+    let item = |id: &str| json!({"type": "reasoning", "id": id, "encrypted_content": id});
+    let reasoning = |sealed: SealedPayload| ContentBlock::Reasoning {
+        summary: "r".into(),
+        sealed: Some(sealed),
+    };
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                reasoning(
+                    SealedPayload::new("openai-codex", item("same"))
+                        .with_identity("work", "gpt-test"),
+                ),
+                reasoning(
+                    SealedPayload::new("openai-codex", item("other-model"))
+                        .with_identity("work", "gpt-other"),
+                ),
+                reasoning(
+                    SealedPayload::new("openai-codex", item("other-instance"))
+                        .with_identity("openai-codex", "gpt-test"),
+                ),
+                reasoning(SealedPayload::new("openai-codex", item("legacy"))),
+                // The general Responses adapter shares the item shape,
+                // not the payload: it stays off.
+                reasoning(
+                    SealedPayload::new("openai-responses", item("responses"))
+                        .with_identity("work", "gpt-test"),
+                ),
+                ContentBlock::Text { text: "ok".into() },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "read".into(),
+                    input: json!({"path": "a"}),
+                },
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "a".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let stream = provider
+        .stream(request(messages, Vec::new()))
+        .await
+        .unwrap();
+    collect(stream).await;
+
+    let body = &mock.received()[0].body;
+    let input = body["input"].as_array().unwrap();
+    let reasoning_ids: Vec<&str> = input
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(reasoning_ids, ["same", "legacy"]);
+    let kinds: Vec<&str> = input
+        .iter()
+        .map(|item| item["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "message",
+            "reasoning",
+            "reasoning",
+            "message",
+            "function_call",
+            "function_call_output"
+        ]
+    );
 }

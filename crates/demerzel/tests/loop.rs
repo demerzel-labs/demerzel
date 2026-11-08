@@ -6,14 +6,20 @@ use std::sync::Mutex;
 
 use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, run_one_shot};
 use demerzel_core::{
-    ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, NoPrompt, Role,
-    Session, SessionOpen, SessionStore, TurnOutcome, replay,
+    ApprovalMode, ApprovalPolicy, ContentBlock, Engine, EngineConfig, EngineEvent, EngineParts,
+    NoPrompt, Role, Route, Session, SessionOpen, SessionStore, SingleProvider, Target, TurnOutcome,
+    replay,
 };
 use demerzel_mock::{MockResponse, MockServer};
 use demerzel_providers::auth::AuthStore;
 use demerzel_providers::openai_codex::{CodexConfig, OpenAiCodex};
 use demerzel_tools::{Registry, file_tag};
 use serde_json::{Value, json};
+
+/// The route of a test engine: the Codex adapter's implicit instance.
+fn route() -> Route {
+    Route::new(Target::new("openai-codex", "test-model"))
+}
 
 fn text_delta(text: &str) -> Value {
     json!({"type": "response.output_text.delta", "delta": text})
@@ -68,7 +74,9 @@ struct Bed {
     mock: MockServer,
     project: tempfile::TempDir,
     data: tempfile::TempDir,
-    provider: OpenAiCodex,
+    /// The adapter as the engine's host. Leaked: the engines borrow
+    /// it, and a test process ends soon.
+    host: SingleProvider<'static>,
     registry: Registry,
 }
 
@@ -90,7 +98,7 @@ impl Bed {
             mock,
             project,
             data,
-            provider,
+            host: SingleProvider(Box::leak(Box::new(provider))),
             registry,
         }
     }
@@ -108,13 +116,13 @@ impl Bed {
                 open
             })
             .unwrap();
-        Engine::new(
-            &self.provider,
+        Engine::new(EngineParts::new(
+            &self.host,
             &self.registry,
             ApprovalPolicy::new(mode),
-            EngineConfig::new("test-model"),
+            EngineConfig::new(route()),
             session,
-        )
+        ))
     }
 
     fn write_file(&self, name: &str, content: &str) {
@@ -147,7 +155,7 @@ async fn the_configured_call_limit_reaches_the_engine() {
     let mut config = RunConfig::new(bed.project.path().to_path_buf());
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().to_path_buf());
-    config.base_url = Some(bed.mock.url());
+    config.instance.base_url = Some(bed.mock.url());
     config.auth = Some(AuthPaths {
         store: auth_path(bed.data.path()),
         codex_cli: None,
@@ -357,14 +365,15 @@ async fn an_aborted_turn_leaves_a_valid_resumable_session() {
         let (session, replayed) = Session::resume(&session_path).unwrap();
         (session, replayed.messages)
     };
-    let mut resumed = Engine::with_history(
-        &bed.provider,
+    let mut parts = EngineParts::new(
+        &bed.host,
         &bed.registry,
         ApprovalPolicy::new(ApprovalMode::Auto),
-        EngineConfig::new("test-model"),
+        EngineConfig::new(route()),
         session,
-        history,
     );
+    parts.history = history;
+    let mut resumed = Engine::new(parts);
     let outcome = resumed
         .user_turn("again".into(), &noop, &mut NoPrompt)
         .await
@@ -381,7 +390,7 @@ async fn one_shot_read_only_drops_write_tools_and_streams_text() {
     let mut config = RunConfig::new(bed.project.path().to_path_buf());
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().join("store"));
-    config.base_url = Some(bed.mock.url());
+    config.instance.base_url = Some(bed.mock.url());
     config.auth = Some(AuthPaths {
         store: auth_path(bed.data.path()),
         codex_cli: None,
@@ -429,10 +438,10 @@ async fn one_shot_dispatches_to_the_anthropic_provider() {
     .unwrap();
 
     let mut config = RunConfig::new(project.path().to_path_buf());
-    config.provider = "anthropic".into();
+    config.instance = demerzel::config::Instance::new("anthropic", "anthropic");
     config.model = "claude-test".into();
     config.data_root = Some(data.path().join("store"));
-    config.base_url = Some(mock.url());
+    config.instance.base_url = Some(mock.url());
     config.auth = Some(AuthPaths {
         store: store_path,
         codex_cli: None,
@@ -469,7 +478,7 @@ async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_c
     use demerzel::SessionSettings;
     use demerzel_core::Effort;
     use demerzel_mock::anthropic::{refuses_thinking, text_turn, tool_turn};
-    use demerzel_providers::ThinkingMode;
+    use demerzel_providers::{EffortWire, ThinkingMode};
 
     // A strict server whose model takes neither adaptive thinking nor
     // effort: every request must pass its check.
@@ -492,12 +501,12 @@ async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_c
     )
     .unwrap();
     let mut config = RunConfig::new(project.path().to_path_buf());
-    config.provider = "anthropic".into();
+    config.instance = demerzel::config::Instance::new("anthropic", "anthropic");
     config.model = "claude-test".into();
     config.approval = ApprovalMode::Auto;
     config.data_root = Some(data.path().join("store"));
-    config.base_url = Some(mock.url());
-    config.thinking_mode = Some(ThinkingMode::Off);
+    config.instance.base_url = Some(mock.url());
+    config.instance.thinking_mode = Some(ThinkingMode::Off);
     config.auth = Some(AuthPaths {
         store: store_path,
         codex_cli: None,
@@ -505,9 +514,11 @@ async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_c
 
     let runtime = Runtime::new(config).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    assert!(settings.effort_omitted);
-    let (session, replay) = runtime.open_session(&Resume::Fresh, &settings).unwrap();
-    let mut engine = runtime.engine(session, replay.messages, &settings).unwrap();
+    assert_eq!(
+        runtime.effort_wire(&settings),
+        EffortWire::Omitted(settings.effort)
+    );
+    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
     let noop = |_: EngineEvent<'_>| {};
     let outcome = engine
         .user_turn("read f.txt".into(), &noop, &mut NoPrompt)
@@ -542,7 +553,7 @@ async fn one_shot_continue_resumes_the_latest_session() {
     let mut config = RunConfig::new(bed.project.path().to_path_buf());
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().join("store"));
-    config.base_url = Some(bed.mock.url());
+    config.instance.base_url = Some(bed.mock.url());
     config.auth = Some(AuthPaths {
         store: auth_path(bed.data.path()),
         codex_cli: None,
@@ -581,7 +592,7 @@ async fn one_shot_session_resumes_by_id_and_a_missing_id_stops_the_run() {
     let mut config = RunConfig::new(bed.project.path().to_path_buf());
     config.model = "test-model".into();
     config.data_root = Some(bed.data.path().join("store"));
-    config.base_url = Some(bed.mock.url());
+    config.instance.base_url = Some(bed.mock.url());
     config.auth = Some(AuthPaths {
         store: auth_path(bed.data.path()),
         codex_cli: None,

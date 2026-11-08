@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use demerzel_core::{ApprovalMode, SessionStore};
 use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP};
-use demerzel_providers::{AdapterRules, anthropic, openai_codex};
+use demerzel_providers::{AdapterRules, EffortWire, anthropic, openai_codex};
 
 use crate::config::{self, Flags, Layer, Locations, Origin};
 
@@ -77,16 +77,18 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
     // only a set level, and an instance with thinking off receives
     // none.
     let thinking = settings.thinking_mode.value;
-    let effort_sent = settings.effort_set || rules.is_none_or(|rules| rules.implicit_effort);
-    let effort = if thinking.is_some_and(|mode| !mode.sends_effort()) {
-        format!(
-            "{} — not sent: this instance turns thinking off",
-            settings.effort.value
-        )
-    } else if effort_sent {
-        settings.effort.value.as_str().to_string()
-    } else {
-        "default — not sent to this adapter".to_string()
+    let wire = demerzel_providers::effort_wire(
+        settings.kind.value.as_deref().unwrap_or(""),
+        thinking,
+        settings.effort.value,
+        settings.effort_set,
+    );
+    let effort = match wire {
+        EffortWire::Sent(effort) => effort.as_str().to_string(),
+        EffortWire::Omitted(effort) => {
+            format!("{effort} — not sent: this instance turns thinking off")
+        }
+        EffortWire::Default => "default — not sent to this adapter".to_string(),
     };
     print_setting(out, "effort", &effort, settings.effort.origin)?;
     if thinking.is_some() || rules.is_some_and(|rules| rules.thinking_switch) {

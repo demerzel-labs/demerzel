@@ -367,8 +367,11 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
     // The credentials resolve at boot: a missing login stops the
-    // plain interface before its prompt.
-    runtime.provider()?;
+    // plain interface before its prompt. A resume can continue on the
+    // session's own instance, so its credentials resolve at the open.
+    if config.resume == Resume::Fresh {
+        runtime.provider()?;
+    }
     repl(&runtime).await
 }
 
@@ -409,7 +412,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                 if line.is_empty() {
                     continue;
                 }
-                match dispatch(line, &settings) {
+                match dispatch(line, &settings, runtime.effort_wire(&settings)) {
                     Some(Effect::Exit) => break,
                     Some(Effect::Note(note)) => {
                         eprintln!("{note}");
@@ -435,8 +438,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             eprintln!("demerzel: {error}");
                             continue;
                         }
-                        settings.model = name;
-                        eprintln!("{}", model_note(&settings.model));
+                        settings.set_model(name);
+                        eprintln!("{}", model_note(&settings.route.head.model));
                         continue;
                     }
                     Some(Effect::SetEffort(level)) => {
@@ -446,9 +449,8 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             eprintln!("demerzel: {error}");
                             continue;
                         }
-                        settings.effort = level;
-                        settings.effort_set = true;
-                        eprintln!("{}", effort_note(&settings));
+                        settings.set_effort(level);
+                        eprintln!("{}", effort_note(runtime.effort_wire(&settings)));
                         continue;
                     }
                     Some(Effect::SetApproval(mode)) => {
@@ -465,30 +467,29 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let (session, replay) = match runtime.open_session(&resume, &settings) {
-                        Ok(opened) => opened,
+                    let open = match runtime.open(&resume, &settings) {
+                        Ok(open) => open,
                         Err(error) => {
                             result = Err(error);
                             break;
                         }
                     };
-                    let id = session.id().to_string();
-                    let messages = replay.messages.len();
-                    // The state changes after the engine builds, as
-                    // the full-screen driver does it.
-                    engine = match runtime.engine(session, replay.messages, &settings) {
-                        Ok(engine) => Some(engine),
-                        Err(error) => {
-                            result = Err(error);
-                            break;
-                        }
-                    };
+                    let id = open.engine.session().id().to_string();
+                    let messages = open.engine.history().len();
                     opened = Some(id.clone());
                     // The notice alone: the plain interface shows no
-                    // history.
+                    // history. A resume onto another model names it.
                     if messages > 0 {
                         eprintln!("continuing session {id} ({messages} messages)");
                     }
+                    if open.settings.route.head != settings.route.head {
+                        eprintln!("{}", model_note(&open.settings.route.head.model));
+                    }
+                    settings = open.settings;
+                    if let Some(notice) = &open.notice {
+                        eprintln!("demerzel: {notice}");
+                    }
+                    engine = Some(open.engine);
                 }
                 let engine = engine.as_mut().expect("engine opened above");
                 run_turn(

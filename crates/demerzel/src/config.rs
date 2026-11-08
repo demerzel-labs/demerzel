@@ -54,6 +54,8 @@ pub enum Origin {
     Project,
     User,
     Default,
+    /// A command in the session: `/model` or `/effort`.
+    Command,
 }
 
 impl fmt::Display for Origin {
@@ -64,6 +66,7 @@ impl fmt::Display for Origin {
             Origin::Project => "project file",
             Origin::User => "user file",
             Origin::Default => "default",
+            Origin::Command => "command",
         })
     }
 }
@@ -143,14 +146,41 @@ impl Settings {
     /// and a key variable on an adapter that takes none. `doctor`
     /// reports each one; a session stops at the first.
     pub fn problems(&self) -> Vec<String> {
-        instance_problems(&Instance {
+        instance_problems(&self.instance())
+    }
+
+    /// The active instance with its resolved keys. An unknown instance
+    /// has an empty `kind`; [`Settings::problems`] names it.
+    pub fn instance(&self) -> Instance {
+        Instance {
             name: self.provider.value.clone(),
             kind: self.kind.value.clone().unwrap_or_default(),
             base_url: self.base_url.value.clone(),
             model: self.model.value.clone(),
             api_key_env: self.api_key_env.value.clone(),
             thinking_mode: self.thinking_mode.value,
-        })
+            context_window: self.context_window.value,
+        }
+    }
+
+    /// The active instance and the session effort config gives it.
+    pub fn resolved(&self) -> Resolved {
+        Resolved {
+            instance: self.instance(),
+            effort: self.effort.value,
+            effort_origin: self.effort.origin,
+        }
+    }
+
+    /// Which layer named the head target: a flag or a variable when
+    /// either names the provider or the model, else the provider's
+    /// origin. A flag or a variable wins over a resumed session's own
+    /// target.
+    pub fn route_origin(&self) -> Origin {
+        [self.provider.origin, self.model.origin]
+            .into_iter()
+            .find(|origin| matches!(origin, Origin::Flag | Origin::Env))
+            .unwrap_or(self.provider.origin)
     }
 
     /// The approval mode for one run: the configured mode when one is
@@ -166,7 +196,7 @@ impl Settings {
 }
 
 /// Values from command-line flags. `main` fills it from clap.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Flags {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -928,6 +958,65 @@ pub struct Instance {
     pub api_key_env: Option<String>,
     /// The `thinking` key; `None` when unset.
     pub thinking_mode: Option<ThinkingMode>,
+    /// The `context_window` key; `None` leaves the adapter catalog in
+    /// charge.
+    pub context_window: Option<u64>,
+}
+
+/// One instance as config resolves it when the instance is the head
+/// target: its keys, the model in `instance.model`, and the session
+/// effort. A resume that adopts the instance takes these values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Resolved {
+    pub instance: Instance,
+    pub effort: Effort,
+    /// The layer that set `effort`; `Default` when none did. See
+    /// [`Settings::effort_set`] for the adapter rule.
+    pub effort_origin: Origin,
+}
+
+/// Each instance that config can resolve as the head target, other
+/// than `head`: the shipped adapters' implicit instances, then the
+/// user file's named instances. Each resolves under the rules of
+/// [`resolve`], as if a `--provider` flag named it. The flags and
+/// variables for the provider and the model take no part, because a
+/// resume adopts these only when none is set. The endpoint flag and
+/// variable take no part either: they point the configured head
+/// elsewhere, and an adopted instance's credential must not follow
+/// them to an endpoint the user named for another instance. A resume
+/// checks an adopted instance with [`instance_problems`].
+pub fn resumable(
+    head: &str,
+    flags: &Flags,
+    env: &dyn Fn(&str) -> Option<String>,
+    project: Option<&Layer>,
+    user: Option<&Layer>,
+) -> Vec<Resolved> {
+    let named = instances(user).into_iter().map(|instance| instance.name);
+    let names = demerzel_providers::PROVIDER_IDS
+        .iter()
+        .map(|id| id.to_string())
+        .chain(named)
+        .filter(|name| name != head);
+    let env = |name: &str| match name {
+        ENV_PROVIDER | ENV_MODEL | ENV_BASE_URL => None,
+        other => env(other),
+    };
+    let mut out: Vec<Resolved> = Vec::new();
+    for name in names {
+        // A user table can name a shipped adapter's id.
+        if out.iter().any(|resolved| resolved.instance.name == name) {
+            continue;
+        }
+        let mut flags = flags.clone();
+        flags.provider = Some(name);
+        flags.model = None;
+        flags.base_url = None;
+        let (settings, _) = resolve(&flags, &env, project, user);
+        out.push(settings.resolved());
+    }
+    out
 }
 
 impl Instance {
@@ -940,6 +1029,7 @@ impl Instance {
             model: None,
             api_key_env: None,
             thinking_mode: None,
+            context_window: None,
         }
     }
 
@@ -1028,6 +1118,7 @@ pub fn instances(user: Option<&Layer>) -> Vec<Instance> {
                 model: keys.model.clone(),
                 api_key_env: keys.api_key_env.clone(),
                 thinking_mode: keys.thinking,
+                context_window: keys.context_window,
             })
         })
         .collect()
@@ -1525,6 +1616,7 @@ mod tests {
                 model: Some("qwen3".into()),
                 api_key_env: Some("LOCAL_KEY".into()),
                 thinking_mode: None,
+                context_window: Some(32000),
             }]
         );
         assert!(instances(None).is_empty());
@@ -2192,5 +2284,58 @@ mod tests {
         std::fs::write(&path, "model = \"m\"").unwrap();
         let (layer, _) = load(&path).unwrap().unwrap();
         assert_eq!(layer.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn resumable_instances_keep_their_own_endpoint_under_a_base_url_override() {
+        let user = layer(&format!(
+            "{LOCAL}\n[providers.hosted]\nkind = \"openai-responses\"\nbase_url = \"https://hosted.example/v1\"\nmodel = \"r1\"\napi_key_env = \"HOSTED_KEY\""
+        ));
+        let flags = Flags {
+            base_url: Some("http://flag.example/v1".into()),
+            ..Flags::default()
+        };
+        let env = |name: &str| (name == ENV_BASE_URL).then(|| "http://env.example/v1".to_string());
+        let resolved = resumable("local", &flags, &env, None, Some(&user));
+        // The head is not listed; the shipped adapters and the other
+        // named instance are, once each.
+        let names: Vec<&str> = resolved.iter().map(|r| r.instance.name.as_str()).collect();
+        assert!(!names.contains(&"local"), "{names:?}");
+        assert_eq!(names.iter().filter(|name| **name == "hosted").count(), 1);
+        for id in demerzel_providers::PROVIDER_IDS {
+            assert!(names.contains(id), "{names:?}");
+        }
+        let hosted = resolved
+            .iter()
+            .find(|r| r.instance.name == "hosted")
+            .unwrap();
+        assert_eq!(
+            hosted.instance.base_url.as_deref(),
+            Some("https://hosted.example/v1")
+        );
+        // A shipped adapter keeps its default endpoint.
+        let anthropic = resolved
+            .iter()
+            .find(|r| r.instance.name == "anthropic")
+            .unwrap();
+        assert_eq!(anthropic.instance.base_url, None);
+    }
+
+    #[test]
+    fn the_route_origin_names_a_flag_or_a_variable_first() {
+        let (settings, _) = resolve(&Flags::default(), &|_| None, None, None);
+        assert_eq!(settings.route_origin(), Origin::Default);
+        let env = |name: &str| (name == ENV_MODEL).then(|| "m".to_string());
+        let (settings, _) = resolve(&Flags::default(), &env, None, None);
+        assert_eq!(settings.route_origin(), Origin::Env);
+        let flags = Flags {
+            provider: Some("anthropic".into()),
+            ..Flags::default()
+        };
+        let (settings, _) = resolve(&flags, &|_| None, None, None);
+        assert_eq!(settings.route_origin(), Origin::Flag);
+        let user = layer("provider = \"anthropic\"");
+        let (settings, _) = resolve(&Flags::default(), &|_| None, None, Some(&user));
+        assert_eq!(settings.route_origin(), Origin::User);
     }
 }

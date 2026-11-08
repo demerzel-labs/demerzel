@@ -56,6 +56,8 @@ const ROUTE: &str = "/v1/messages";
 
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
+    /// The instance name. Sealed payloads carry it.
+    pub instance: String,
     pub base_url: String,
     /// Total attempts for retryable failures (429, 5xx, network).
     pub max_attempts: u32,
@@ -70,6 +72,7 @@ pub struct AnthropicConfig {
 impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
+            instance: PROVIDER_ID.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_attempts: 4,
             base_delay: Duration::from_millis(500),
@@ -152,6 +155,7 @@ impl Provider for Anthropic {
         // size and the body from the same bytes.
         let body = serde_json::to_vec(&build_body(&request, &self.config))
             .expect("a JSON value serializes");
+        let model = request.model.clone();
         drop(request);
         Box::pin(async move {
             let url = format!("{}{ROUTE}", self.config.base_url);
@@ -244,6 +248,8 @@ impl Provider for Anthropic {
             };
             let state = StreamState {
                 secret: self.api_key.clone(),
+                instance: self.config.instance.clone(),
+                model,
                 ..StreamState::default()
             };
             Ok(spawn_event_stream(response, state))
@@ -265,7 +271,7 @@ fn build_body(request: &Request, config: &AnthropicConfig) -> Value {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        let blocks = wire_blocks(&message.content);
+        let blocks = wire_blocks(&message.content, &config.instance, &request.model);
         if blocks.is_empty() {
             // A message can lose all content (foreign reasoning only);
             // the API rejects an empty content array.
@@ -366,7 +372,9 @@ fn cacheable(block: &Value) -> bool {
     )
 }
 
-fn wire_blocks(content: &[ContentBlock]) -> Vec<Value> {
+/// The wire blocks of one neutral message. A sealed payload goes back
+/// only to the adapter, the instance, and the model that produced it.
+fn wire_blocks(content: &[ContentBlock], instance: &str, model: &str) -> Vec<Value> {
     let mut blocks = Vec::with_capacity(content.len());
     for block in content {
         match block {
@@ -387,13 +395,15 @@ fn wire_blocks(content: &[ContentBlock]) -> Vec<Value> {
                 "content": content,
                 "is_error": is_error,
             })),
-            // Same-provider sealed payloads round-trip verbatim — the
-            // payload is the complete wire block, signature included.
-            // Foreign or missing payloads are dropped: the readable
-            // summary is for humans, not for the wire.
+            // A payload bound to this adapter, instance, and model
+            // round-trips verbatim — the payload is the complete wire
+            // block, signature included. A foreign or missing payload
+            // is dropped: the readable summary is for humans, not for
+            // the wire, and a signature from another model fails the
+            // request.
             ContentBlock::Reasoning { sealed, .. } => {
                 if let Some(sealed) = sealed
-                    && sealed.provider == PROVIDER_ID
+                    && sealed.replays_to(PROVIDER_ID, instance, model)
                 {
                     blocks.push(sealed.data.clone());
                 }
@@ -422,6 +432,17 @@ struct StreamState {
     /// The request's API key, so a failure message that echoes it is
     /// redacted before it becomes an error.
     secret: String,
+    /// The instance and the model of the request: sealed payloads
+    /// carry them.
+    instance: String,
+    model: String,
+}
+
+impl StreamState {
+    /// A payload bound to this stream's instance and model.
+    fn seal(&self, data: Value) -> SealedPayload {
+        SealedPayload::new(PROVIDER_ID, data).with_identity(&*self.instance, &*self.model)
+    }
 }
 
 impl PayloadMapper for StreamState {
@@ -591,14 +612,11 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                     // the session file and fail every later turn. The
                     // summary still reaches the user.
                     let sealed = (!signature.is_empty()).then(|| {
-                        SealedPayload::new(
-                            PROVIDER_ID,
-                            json!({
-                                "type": "thinking",
-                                "thinking": thinking,
-                                "signature": signature,
-                            }),
-                        )
+                        state.seal(json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        }))
                     });
                     vec![Ok(StreamEvent::ReasoningDone {
                         summary: thinking,
@@ -607,7 +625,7 @@ fn map_payload(payload: &str, state: &mut StreamState) -> Vec<Result<StreamEvent
                 }
                 Some(Block::Redacted { data }) => vec![Ok(StreamEvent::ReasoningDone {
                     summary: String::new(),
-                    sealed: Some(SealedPayload::new(PROVIDER_ID, data)),
+                    sealed: Some(state.seal(data)),
                 })],
                 Some(Block::Text) | None => Vec::new(),
             }

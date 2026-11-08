@@ -9,17 +9,18 @@ ordered, verifiable steps. It follows the shape of
 
 ## Next-session handoff
 
-**Checked 2026-10-02:** M0 through M2.5 are complete, with both close-outs.
-M3 steps 1 to 4 are on `main`: this plan, `openai-compat` with named
-instances (`f4b7900`), `openai-responses` (`d9e51e8`), and instance
-login with the thinking key. Step 3's hosted receipt is pending,
+**Checked 2026-11-08:** M0 through M2.5 are complete, with both close-outs.
+M3 steps 1 to 5 are on `main`: this plan, `openai-compat` with named
+instances (`f4b7900`), `openai-responses` (`d9e51e8`), instance
+login with the thinking key (`3e6a935`), and one runtime call with
+model identity. Step 3's hosted receipt is pending,
 because no OpenAI or xAI API key is available. See the step's build
 notes.
 
 Start the next work in this order:
 
-1. Build one runtime call and model identity as step 5. Read the
-   **From step 4** notes in its block first.
+1. Build roles and fallback chains as step 6. Read the
+   **From step 5** notes in its block first.
 2. Record the step 3 hosted receipt when a key is available. The step's
    build notes list the three runs that it covers. Exit criterion 1
    needs this receipt, so it must land before the M3 close-out.
@@ -50,7 +51,7 @@ A step's block holds the notes that earlier steps left for it, under
 The [tracked items](#tracked-separately) are not prerequisites for any
 step. Do not fold them into a step without a decision in this document.
 
-## Status (2026-10-02)
+## Status (2026-11-08)
 
 | Step | State |
 |---|---|
@@ -58,8 +59,9 @@ step. Do not fold them into a step without a decision in this document.
 | 2. `openai-compat` and named provider instances | Done: `f4b7900`, with the dogfood receipt `9ca5fe1` |
 | 3. General Responses API adapter | Built: `d9e51e8`. The hosted receipt is pending. |
 | 4. Instance login and the thinking key | Done on 2026-10-02, with a local login receipt |
-| 5. One runtime call and model identity | Next |
-| 6 to 19, with 8a to 8c | Not started |
+| 5. One runtime call and model identity | Done on 2026-11-08, with a local dogfood receipt |
+| 6. Roles and fallback chains | Next |
+| 7 to 19, with 8a to 8c | Not started |
 
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
@@ -1706,6 +1708,64 @@ for judgments. Letters keep the later step numbers stable.
 - **Done when:** the tests pass and the dogfood resumes on the session's
   model.
 - **Measure:** the turn bench stays flat.
+- **Build notes (2026-11-08):**
+  - Payload identity stays the adapter, the instance, and the model.
+    It does not take the endpoint. The model identity already
+    separates vendors in nearly every case. A key change at one
+    endpoint needs a new session anyway, so one rule in
+    [`config.md`](config.md) covers both changes.
+  - The adapters filter, and the engine filters too. `assemble` leaves
+    a rejected payload out of the request copy. The history keeps it
+    for a switch back, and a long session does not copy foreign
+    payloads into each request. A payload without a model identity
+    comes from an older file. A real `/model` switch drops it, as
+    before this step.
+  - Resume rule:
+    - A flag or a variable keeps the whole head target.
+    - `/model` before the first prompt keeps the model and adopts the
+      recorded instance.
+    - Otherwise the open adopts the instance and the model of the
+      last `meta` record.
+  - The open falls back to the run's head with a notice when config
+    no longer defines the recorded instance, when the recorded `kind`
+    differs, or when the boot check refuses it.
+  - A resume onto another instance takes the effort that config sets
+    for that instance, unless `/effort` set one. Config resolves each
+    instance that a resume can adopt with the rules of `resolve`. The
+    endpoint flag and variable stay off those instances: the review
+    found that `-c --base-url` sent an adopted instance's key to the
+    named endpoint.
+  - A missing login on an adopted instance stops the open before any
+    record. The error names the session's instance. The plain
+    interface checks the credentials at boot only for a fresh session.
+  - `SessionSettings` and `RunConfig` record the origin of the head
+    target and of the effort, with `config::Origin::Command` for
+    `/model` and `/effort`. `Runtime::open` takes the settings by
+    reference and returns the adopted settings in `Opened`.
+  - `Runtime::open` takes no first prompt; step 7 adds it.
+  - `ProviderHost::kind` names an instance's adapter without a build.
+    `SingleProvider` is the host of a one-provider run.
+  - Dogfood: Ollama 0.34.4 on the Linux reference machine, with
+    `qwen3-8b-16k` and `qwen3:8b`. The test ran a tool turn, switched
+    to the other model and back, and then resumed after a config
+    change. The trace showed no foreign reasoning on either model.
+    After the switch back, the model got its own reasoning again. A
+    resume with another configured head adopted the recorded
+    instance. With that instance removed, the run fell back with a
+    notice across protocols.
+  - Measure: the turn bench against `main` on the same machine moved
+    the turns by 0% to -6%. The bench has no case with a long
+    reasoning history.
+  - Crate API: `demerzel_core::{Route, Target, ProviderHost,
+    SingleProvider, EngineParts}`; `Engine::new(EngineParts)` replaces
+    `Engine::new` and `Engine::with_history`; `EngineConfig::new(Route)`;
+    `demerzel_providers::{EffortWire, effort_wire}`;
+    `AnthropicConfig.instance` and `CodexConfig.instance`;
+    `Runtime::open`, `Opened`, and `Runtime::effort_wire` replace
+    `open_session` and `engine`; `RunConfig.instance`,
+    `route_origin`, `effort_origin`, and `resumable` replace the
+    per-key fields; `config::{Resolved, resumable}`;
+    `Settings::{instance, resolved, route_origin}`.
 
 ### 6. Roles and fallback chains
 
@@ -1727,6 +1787,21 @@ for judgments. Letters keep the later step numbers stable.
   serve `doctor` and the boot check. Resolve every chain target under
   the same trust rules: add one `resolve_instance`, and let `Settings`
   hold the head's result.
+- **From step 5:**
+  - `config::resumable` resolves each instance through `resolve` and
+    fills only on a resume without a flag. Chains and two-token
+    `/model` need every configured instance in the host. Build the
+    list on `resolve_instance` for every run.
+  - The engine looks the provider up before the attempt. Move the
+    lookup into the attempt, so a failed build advances the chain and
+    logs as a failed call.
+  - The host maps an unknown instance to `InvalidRequest`. Refuse an
+    unknown instance at boot instead, so it never reads as an endpoint
+    error.
+  - The request effort is one value per engine. Each attempt needs
+    `effort_wire` for its own target.
+  - `first_run()` checks the configured head, not the target that a
+    resume adopts.
 - **Verify:** tests: the chain falls to the second target on an
   authentication, network, or invalid-request failure before the first
   event; no fallback after a text delta; a `usage` record names the

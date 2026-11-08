@@ -326,6 +326,8 @@ async fn assembles_the_stream_into_neutral_events() {
             assert_eq!(summary, "thinking");
             let sealed = sealed.as_ref().unwrap();
             assert_eq!(sealed.provider, "anthropic");
+            assert!(sealed.replays_to("anthropic", "anthropic", "claude-test"));
+            assert!(!sealed.replays_to("anthropic", "anthropic", "claude-other"));
             assert_eq!(sealed.data["type"], "thinking");
             assert_eq!(sealed.data["thinking"], "thinking");
             assert_eq!(sealed.data["signature"], "sig-1");
@@ -735,4 +737,90 @@ async fn verify_key_maps_the_status_to_the_outcome() {
     assert_eq!(received[0].path, "/v1/models");
     assert_eq!(received[0].api_key.as_deref(), Some("sk-good"));
     assert_eq!(received[0].anthropic_version.as_deref(), Some("2023-06-01"));
+}
+
+#[tokio::test]
+async fn sealed_thinking_replays_only_to_its_instance_and_model() {
+    let mock = MockServer::start(vec![fixtures::text_turn("ok")], vec![]).await;
+    let config = AnthropicConfig {
+        instance: "claude-work".into(),
+        base_url: mock.url(),
+        max_attempts: 1,
+        ..AnthropicConfig::default()
+    };
+    let provider = Anthropic::new(config, "sk-test-key".to_string());
+
+    let block =
+        |signature: &str| json!({"type": "thinking", "thinking": "t", "signature": signature});
+    let reasoning = |sealed: SealedPayload| ContentBlock::Reasoning {
+        summary: "t".into(),
+        sealed: Some(sealed),
+    };
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                // This instance and model: replays.
+                reasoning(
+                    SealedPayload::new("anthropic", block("same"))
+                        .with_identity("claude-work", "claude-test"),
+                ),
+                // Another model of the same instance: stays off.
+                reasoning(
+                    SealedPayload::new("anthropic", block("other-model"))
+                        .with_identity("claude-work", "claude-other"),
+                ),
+                // Another instance of the same adapter: stays off.
+                reasoning(
+                    SealedPayload::new("anthropic", block("other-instance"))
+                        .with_identity("anthropic", "claude-test"),
+                ),
+                // A payload from before the identity fields: replays.
+                reasoning(SealedPayload::new("anthropic", block("legacy"))),
+                // Another protocol's reasoning: stays off; its text and
+                // tool call go out.
+                reasoning(
+                    SealedPayload::new("openai-compat", json!({"reasoning_content": "r"}))
+                        .with_identity("local", "claude-test"),
+                ),
+                ContentBlock::Text { text: "ok".into() },
+                ContentBlock::ToolUse {
+                    id: "call_7".into(),
+                    name: "read".into(),
+                    input: json!({"path": "a"}),
+                },
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_7".into(),
+                content: "a".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let stream = provider
+        .stream(request(messages, Vec::new()))
+        .await
+        .unwrap();
+    collect(stream).await;
+
+    let body = &mock.received()[0].body;
+    let assistant = body["messages"][1]["content"].as_array().unwrap();
+    let signatures: Vec<&str> = assistant
+        .iter()
+        .filter_map(|block| block["signature"].as_str())
+        .collect();
+    assert_eq!(signatures, ["same", "legacy"]);
+    let kinds: Vec<&str> = assistant
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["thinking", "thinking", "text", "tool_use"]);
+    assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call_7");
 }

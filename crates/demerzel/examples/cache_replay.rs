@@ -77,7 +77,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let data = tempfile::tempdir()?;
     let mut config = RunConfig::new(std::env::current_dir()?);
-    config.provider = args.provider.clone();
+    config.instance = demerzel::config::Instance::new(args.provider.clone(), args.provider.clone());
     config.model = model.clone();
     config.approval = ApprovalMode::Ask;
     config.data_root = Some(data.path().to_path_buf());
@@ -86,9 +86,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut sessions = Vec::new();
     for run in 1..=args.runs {
         let settings = demerzel::SessionSettings::from_config(runtime.config());
-        let (session, replay) = runtime.open_session(&demerzel::Resume::Fresh, &settings)?;
-        let session_id = session.id().to_string();
-        let mut engine = runtime.engine(session, replay.messages, &settings)?;
+        let mut engine = runtime.open(&demerzel::Resume::Fresh, &settings)?.engine;
+        let session_id = engine.session().id().to_string();
         let mut turns: Vec<Value> = Vec::with_capacity(args.prompts.len());
         for (index, prompt) in args.prompts.iter().enumerate() {
             let trace = Trace::default();

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
-use demerzel_core::{ContentBlock, Message, Replay as SessionReplay, Role};
+use demerzel_core::{ContentBlock, Message, ReplayToolClock, ReplayUsage, Role};
 use demerzel_tui::{OUTPUT_TAIL_BYTES, Replay, ReplayEntry, ReplayResult};
 use serde_json::Value;
 
@@ -37,21 +37,23 @@ pub(crate) const MAX_BYTES: usize = 256 * 1024;
 /// messages inside the caps, in order, with each call's card paired
 /// to its result and each usage line placed after the message its
 /// call produced.
-pub(crate) fn entries(replay: &SessionReplay) -> Replay {
-    let first = cut(&replay.messages);
-    let clocks: HashMap<&str, Duration> = replay
-        .tools
+pub(crate) fn entries(
+    messages: &[Message],
+    usage: &[ReplayUsage],
+    tools: &[ReplayToolClock],
+) -> Replay {
+    let first = cut(messages);
+    let clocks: HashMap<&str, Duration> = tools
         .iter()
         .map(|tool| (tool.call_id.as_str(), tool.duration))
         .collect();
     let mut out = Replay::default();
     out.left_out = first;
-    out.entries = Vec::with_capacity(replay.messages.len() - first);
+    out.entries = Vec::with_capacity(messages.len() - first);
     // The usage records before the cut report calls the replay
     // leaves out; the one that follows the last left-out message
     // does too.
-    let mut usage = replay
-        .usage
+    let mut usage = usage
         .iter()
         .filter(|record| record.messages_before > first)
         .peekable();
@@ -61,7 +63,7 @@ pub(crate) fn entries(replay: &SessionReplay) -> Replay {
     // time since the turn started, and the first request follows the
     // start at once.
     let mut turn_start: Option<SystemTime> = None;
-    for (index, message) in replay.messages.iter().enumerate().skip(first) {
+    for (index, message) in messages.iter().enumerate().skip(first) {
         for block in &message.content {
             match (message.role, block) {
                 (Role::User, ContentBlock::Text { text }) => {
@@ -183,6 +185,12 @@ fn string_bytes(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use demerzel_core::Replay as SessionReplay;
+
+    /// The replay of a whole session file: its own messages.
+    fn entries(replay: &SessionReplay) -> Replay {
+        super::entries(&replay.messages, &replay.usage, &replay.tools)
+    }
     use demerzel_core::{ReplayToolClock, ReplayUsage, Timing, Usage};
     use serde_json::json;
 
