@@ -56,7 +56,7 @@ step. Do not fold them into a step without a decision in this document.
 
 | Step | State |
 |---|---|
-| 1. M3 plan | Done: [PR #18](https://github.com/demerzel-labs/demerzel/pull/18), [PR #19](https://github.com/demerzel-labs/demerzel/pull/19), and the judgments revision `9646b1d` |
+| 1. M3 plan | Done: [PR #18](https://github.com/runlevellabs/demerzel/pull/18), [PR #19](https://github.com/runlevellabs/demerzel/pull/19), and the judgments revision `9646b1d` |
 | 2. `openai-compat` and named provider instances | Done: `f4b7900`, with the dogfood receipt `9ca5fe1` |
 | 3. General Responses API adapter | Built: `d9e51e8`. The hosted receipt is pending. |
 | 4. Instance login and the thinking key | Done on 2026-10-02, with a local login receipt |

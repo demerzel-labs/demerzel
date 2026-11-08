@@ -2,7 +2,7 @@
 
 ![Demerzel: a geometric archive with cyan and gold linework.](docs/assets/readme-header.png)
 
-[![CI on main](https://github.com/demerzel-labs/demerzel/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/demerzel-labs/demerzel/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI on main](https://github.com/runlevellabs/demerzel/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/runlevellabs/demerzel/actions/workflows/ci.yml?query=branch%3Amain)
 
 Demerzel is an open-source terminal coding agent written in Rust. One
 small binary runs an agent loop in your terminal. It connects to the
@@ -27,7 +27,7 @@ the required components.
 ## Build
 
 ```bash
-git clone https://github.com/demerzel-labs/demerzel.git
+git clone https://github.com/runlevellabs/demerzel.git
 cd demerzel
 cargo build --release --locked
 ./target/release/demerzel --version
