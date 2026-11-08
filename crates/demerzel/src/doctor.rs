@@ -166,6 +166,29 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         problems += 1;
         writeln!(out, "  problem: {problem}")?;
     }
+    // Each role's chain, with the model each target resolves to. A
+    // target on an instance that config does not define stops a run.
+    if !settings.roles.is_empty() {
+        let env = |name: &str| std::env::var(name).ok();
+        let instances = config::run_instances(flags, &env, project.as_ref(), user.as_ref());
+        let (chains, role_problems) = config::chains(&settings, &instances);
+        for (role, targets) in &chains {
+            let chain: Vec<String> = targets
+                .iter()
+                .map(|target| format!("{} {}", target.instance, target.model))
+                .collect();
+            print_setting(
+                out,
+                &format!("roles.{role}"),
+                &chain.join(" → "),
+                settings.roles[role].origin,
+            )?;
+        }
+        for problem in role_problems {
+            problems += 1;
+            writeln!(out, "  problem: {problem}")?;
+        }
+    }
 
     // The instance keys read the store's path, the way a session does,
     // so a run without HOME still finds them.

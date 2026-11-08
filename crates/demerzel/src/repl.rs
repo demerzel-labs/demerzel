@@ -26,8 +26,8 @@ use tokio::signal::unix::{Signal, SignalKind};
 use tokio::sync::oneshot;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line, model_note,
-    session_note,
+    Effect, FallbackWatch, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, exit_line,
+    model_note, session_note,
 };
 use crate::preview::{ask_preview, run_preview};
 use crate::{READY_MARKER, Resume, RunConfig, RunError, Runtime, SessionSettings};
@@ -184,6 +184,8 @@ pub struct Renderer {
     pending_calls: std::sync::Mutex<Vec<(String, String)>>,
     /// When the turn started, for the time on the usage line.
     started: std::time::Instant,
+    /// Names the turn's first fallback on stderr.
+    fallback: FallbackWatch,
 }
 
 impl Renderer {
@@ -199,6 +201,7 @@ impl Renderer {
             line_open: AtomicU8::new(LINE_NONE),
             pending_calls: std::sync::Mutex::new(Vec::new()),
             started: std::time::Instant::now(),
+            fallback: FallbackWatch::default(),
         }
     }
 
@@ -247,6 +250,12 @@ impl Renderer {
 
 impl EventSink for Renderer {
     fn event(&self, event: EngineEvent<'_>) {
+        // A fallback shows in every mode: the turn runs on a target
+        // the user did not pick first.
+        if let Some(note) = self.fallback.note(&event) {
+            let line = self.dimmed(&note);
+            self.status_line(&line);
+        }
         match event {
             EngineEvent::TextDelta(delta) => {
                 if delta.is_empty() {
@@ -366,11 +375,12 @@ fn parse_answer(line: &str) -> ApprovalAnswer {
 /// runtime.
 pub async fn run(config: &RunConfig) -> Result<(), RunError> {
     let runtime = Runtime::new(config.clone())?;
-    // The credentials resolve at boot: a missing login stops the
-    // plain interface before its prompt. A resume can continue on the
-    // session's own instance, so its credentials resolve at the open.
+    // The credentials resolve at boot: a missing login on every
+    // target of the route stops the plain interface before its
+    // prompt. A resume can continue on the session's own instance, so
+    // its credentials resolve at the open.
     if config.resume == Resume::Fresh {
-        runtime.provider()?;
+        runtime.check_credentials(&SessionSettings::from_config(config).route)?;
     }
     repl(&runtime).await
 }
@@ -439,7 +449,25 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                             continue;
                         }
                         settings.set_model(name);
-                        eprintln!("{}", model_note(&settings.route.head.model));
+                        eprintln!("{}", model_note(&settings.route));
+                        continue;
+                    }
+                    Some(Effect::SetHead { provider, model }) => {
+                        let next = match runtime.switch_head(&settings, &provider, &model) {
+                            Ok(next) => next,
+                            Err(error) => {
+                                eprintln!("demerzel: {error}");
+                                continue;
+                            }
+                        };
+                        if let Some(engine) = engine.as_mut()
+                            && let Err(error) = engine.set_head(next.route.head.clone())
+                        {
+                            eprintln!("demerzel: {error}");
+                            continue;
+                        }
+                        settings = next;
+                        eprintln!("{}", model_note(&settings.route));
                         continue;
                     }
                     Some(Effect::SetEffort(level)) => {
@@ -483,7 +511,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         eprintln!("continuing session {id} ({messages} messages)");
                     }
                     if open.settings.route.head != settings.route.head {
-                        eprintln!("{}", model_note(&open.settings.route.head.model));
+                        eprintln!("{}", model_note(&open.settings.route));
                     }
                     settings = open.settings;
                     if let Some(notice) = &open.notice {

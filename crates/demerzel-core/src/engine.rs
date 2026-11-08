@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::approval::{ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest};
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{Effort, Provider, ProviderError, Request, StreamEvent};
-use crate::route::{ProviderHost, Route};
+use crate::route::{ProviderHost, Route, Target};
 use crate::session::{Session, SessionMeta, SessionOpen, Timing};
 use crate::tool::{BoxFuture, ToolDefinition, ToolHost, ToolOutput};
 
@@ -51,16 +51,17 @@ Read a file before you edit it. Keep changes small and report what you did.";
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineConfig {
-    /// The targets of the model calls. The head target names the
-    /// instance and the model that every call goes to, and the meta
-    /// records name them.
+    /// The targets of the model calls. A turn's first call tries the
+    /// head target first and falls back along the tail; see
+    /// [`Route`]. The meta records name the head.
     pub route: Route,
     pub system_prompt: String,
     /// Model calls allowed for one user turn before the loop stops.
     pub max_model_calls: u32,
     pub max_output_tokens: Option<u64>,
-    /// The reasoning effort every request carries; `None` leaves the
-    /// provider's default.
+    /// The session's own reasoning effort, which every target's
+    /// requests carry. `None`: each request carries the level that
+    /// [`ProviderHost::effort`] gives its target's instance.
     pub effort: Option<Effort>,
 }
 
@@ -86,6 +87,17 @@ impl EngineConfig {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum EngineEvent<'a> {
+    /// A model call attempt starts on this target: the instance and
+    /// the model. Each attempt of a fallback chain sends one, before
+    /// its provider builds, so the interface names the target in use.
+    /// `attempt` counts the call's attempts from 0: a value above 0
+    /// follows a failed attempt, a fallback.
+    #[non_exhaustive]
+    ModelStart {
+        provider: &'a str,
+        model: &'a str,
+        attempt: u32,
+    },
     TextDelta(&'a str),
     ReasoningDelta(&'a str),
     /// One reasoning segment ended: the deltas since the last end, or
@@ -303,18 +315,33 @@ impl<'a> Engine<'a> {
         &self.session
     }
 
-    /// Switch the head target's model for the turns that follow. The
-    /// switch appends a meta record, so the session file names the
-    /// model that continues it, and a resume continues on it. The
-    /// history keeps its sealed reasoning: a payload goes only to the
-    /// instance and the model that produced it, so a switch back
-    /// restores the continuity. A payload without a model binds to
-    /// no model: it comes from a file written before the identity
-    /// fields, and a real switch drops it, as before.
+    /// Switch the head target's model for the turns that follow. See
+    /// [`Engine::set_head`].
     pub fn set_model(&mut self, model: &str) -> Result<(), EngineError> {
-        let meta = self.meta(model, self.config.effort, self.policy.mode);
+        let instance = self.config.route.head.instance.clone();
+        self.set_head(Target::new(instance, model))
+    }
+
+    /// Switch the head target, the instance and the model, for the
+    /// turns that follow; the tail stays. An instance the host does
+    /// not know is an error, and nothing changes. The switch appends a meta record, so
+    /// the session file names the target that continues it, and a
+    /// resume continues on it. The history keeps its sealed
+    /// reasoning: a payload goes only to the instance and the model
+    /// that produced it, so a switch back restores the continuity. A
+    /// payload without a model binds to no model: it comes from a
+    /// file written before the identity fields, and a real switch
+    /// drops it, as before.
+    pub fn set_head(&mut self, head: Target) -> Result<(), EngineError> {
+        if self.providers.kind(&head.instance).is_none() {
+            return Err(EngineError::Provider(ProviderError::InvalidRequest(
+                format!("no provider instance `{}` in this run", head.instance),
+            )));
+        }
+        let effort = self.effort_for(&head.instance);
+        let meta = self.meta(&head, effort, self.policy.mode);
         self.session.append_meta(&meta)?;
-        if model != self.config.route.head.model {
+        if head != self.config.route.head {
             for message in &mut self.history {
                 for block in &mut message.content {
                     if let ContentBlock::Reasoning { sealed, .. } = block
@@ -325,8 +352,16 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        self.config.route.head.model = model.to_string();
+        self.config.route.head = head;
         Ok(())
+    }
+
+    /// The effort that requests to `instance` carry: the session's
+    /// own level, else the level the host gives the instance.
+    fn effort_for(&self, instance: &str) -> Option<Effort> {
+        self.config
+            .effort
+            .or_else(|| self.providers.effort(instance))
     }
 
     /// Run one user turn: repair the history if the last turn was cut,
@@ -410,73 +445,42 @@ impl<'a> Engine<'a> {
         })?;
 
         let mut calls = 0u32;
+        // The target the turn's next call starts at. After a fallback,
+        // the turn's later calls start at the target that answered, so
+        // a failing head costs its retries once per turn, not once per
+        // tool round; the next turn tries the head again.
+        let mut start = 0usize;
         loop {
             if calls >= self.config.max_model_calls {
                 return Ok(TurnOutcome::CallLimit);
             }
             calls += 1;
 
-            // The provider comes from the target this call goes to,
-            // and so do its capabilities.
-            let providers = self.providers;
-            let provider = providers.provider(&self.config.route.head.instance)?;
-            let request = self.assemble(provider);
-            // The call's clock runs from the send to the terminal
-            // event, retries included: the wall time the user waited.
+            // The call's clock runs from the first send to the
+            // terminal event, retries and failed targets included: the
+            // wall time the user waited.
             let at = SystemTime::now();
             let started = Instant::now();
-            let response = async {
-                let stream = provider.stream(request).await?;
-                collect_response(stream, sink).await
-            }
-            .await;
+            let (response, answered) = self.call_model(calls, start, sink).await?;
+            start = answered;
             let timing = Timing::new(at, started.elapsed());
-            let effort = self.config.effort.map_or("default", Effort::as_str);
             let ModelResponse {
                 message,
                 stop,
                 usage,
-            } = match response {
-                Ok(response) => response,
-                Err(error) => {
-                    log::warn!(
-                        "model call {calls} failed: provider={} model={} effort={effort} \
-                         duration_ms={} error={}",
-                        self.config.route.head.instance,
-                        self.config.route.head.model,
-                        timing.duration_ms(),
-                        capped(&error.to_string(), MAX_TURN_ERROR_BYTES)
-                    );
-                    return Err(error);
-                }
-            };
-            if log::log_enabled!(log::Level::Info) {
-                let tokens = match usage {
-                    Some(usage) => format!(
-                        "input_tokens={} output_tokens={} cache_read_tokens={} \
-                         cache_creation_tokens={}",
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_read_tokens,
-                        usage.cache_creation_tokens
-                    ),
-                    None => "usage=none".to_string(),
-                };
-                log::info!(
-                    "model call {calls}: provider={} model={} effort={effort} stop={} \
-                     duration_ms={} {tokens}",
-                    self.config.route.head.instance,
-                    self.config.route.head.model,
-                    stop.as_str(),
-                    timing.duration_ms()
-                );
-            }
+            } = response;
 
             if !message.content.is_empty() {
                 self.push(message.clone())?;
             }
             if let Some(usage) = usage {
-                self.session.append_usage(&usage, timing)?;
+                let target = self
+                    .config
+                    .route
+                    .targets()
+                    .nth(answered)
+                    .expect("the answering target is on the route");
+                self.session.append_usage(&usage, target, timing)?;
                 sink.event(EngineEvent::ModelUsage(usage));
             }
 
@@ -515,15 +519,128 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Fixed prompt assembly: system prompt, then history. Nothing
-    /// volatile enters the request. Tools go along only when the
-    /// target's provider declares the capability. A sealed payload
-    /// that the target may not receive stays out of the copy: the
-    /// history keeps it for a switch back, and the request does not
-    /// carry it to an adapter that drops it.
-    fn assemble(&self, provider: &dyn Provider) -> Request {
-        let head = &self.config.route.head;
-        let mut request = Request::new(head.model.clone());
+    /// One model call: the targets of the route in order, from
+    /// target `start`, until one answers. After the last target the
+    /// call tries the ones before `start`. A target equal to one the
+    /// call already tried is skipped. An attempt fails over to the
+    /// next target only when nothing reached the sink yet and the
+    /// failure is one that another endpoint can avoid; see
+    /// [`falls_back`]. Returns the response and the index of the
+    /// target that answered it.
+    async fn call_model(
+        &self,
+        call: u32,
+        start: usize,
+        sink: &dyn EventSink,
+    ) -> Result<(ModelResponse, usize), EngineError> {
+        let route = &self.config.route;
+        let targets = 1 + route.tail.len();
+        let order = (start..targets).chain(0..start.min(targets));
+        let mut tried: Vec<usize> = Vec::new();
+        let mut last_error = None;
+        for index in order {
+            let target = route.targets().nth(index).expect("index on the route");
+            if tried
+                .iter()
+                .any(|&earlier| route.targets().nth(earlier) == Some(target))
+            {
+                continue;
+            }
+            let attempt = u32::try_from(tried.len()).unwrap_or(u32::MAX);
+            tried.push(index);
+            sink.event(EngineEvent::ModelStart {
+                provider: &target.instance,
+                model: &target.model,
+                attempt,
+            });
+            let effort = self.effort_for(&target.instance);
+            let effort_name = effort.map_or("default", Effort::as_str);
+            let started = Instant::now();
+            let mut emitted = false;
+            let result = self.attempt(target, effort, sink, &mut emitted).await;
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            match result {
+                Ok(response) => {
+                    if log::log_enabled!(log::Level::Info) {
+                        let tokens = match response.usage {
+                            Some(usage) => format!(
+                                "input_tokens={} output_tokens={} cache_read_tokens={} \
+                                 cache_creation_tokens={}",
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                usage.cache_read_tokens,
+                                usage.cache_creation_tokens
+                            ),
+                            None => "usage=none".to_string(),
+                        };
+                        log::info!(
+                            "model call {call}: provider={} model={} effort={effort_name} \
+                             stop={} duration_ms={duration_ms} {tokens}",
+                            target.instance,
+                            target.model,
+                            response.stop.as_str(),
+                        );
+                    }
+                    return Ok((response, index));
+                }
+                Err(error) => {
+                    let fallback = !emitted && falls_back(&error);
+                    log::warn!(
+                        "model call {call} failed: provider={} model={} effort={effort_name} \
+                         attempt={} duration_ms={duration_ms} fallback={fallback} error={}",
+                        target.instance,
+                        target.model,
+                        attempt + 1,
+                        capped(&error.to_string(), MAX_TURN_ERROR_BYTES)
+                    );
+                    if !fallback {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+        // Every target failed before an event reached the sink: the
+        // call fails with the last error.
+        Err(last_error.expect("a route has at least one target"))
+    }
+
+    /// One attempt of a model call on `target`: build its provider,
+    /// send the request, and collect the response. `emitted` turns
+    /// true once a stream event reaches the sink.
+    async fn attempt(
+        &self,
+        target: &Target,
+        effort: Option<Effort>,
+        sink: &dyn EventSink,
+        emitted: &mut bool,
+    ) -> Result<ModelResponse, EngineError> {
+        // The provider comes from the target this attempt goes to,
+        // and so do its capabilities. A failed build is a failed
+        // attempt.
+        let provider = self.providers.provider(&target.instance)?;
+        let request = self.assemble(provider, target, effort);
+        let stream = provider.stream(request).await?;
+        collect_response(stream, sink, emitted).await
+    }
+
+    /// Fixed prompt assembly for `target`: system prompt, then
+    /// history. Nothing volatile enters the request. Tools go along
+    /// only when the target's provider declares the capability. A
+    /// sealed payload that the target may not receive stays out of
+    /// the copy: the history keeps it for a switch back, and the
+    /// request does not carry it to an adapter that drops it. A
+    /// payload without a model identity, from an older file, goes to
+    /// the head target alone: a fallback target on the same adapter
+    /// can hold another key or another model.
+    fn assemble(
+        &self,
+        provider: &dyn Provider,
+        target: &Target,
+        effort: Option<Effort>,
+    ) -> Request {
+        let is_tail = *target != self.config.route.head;
+        let mut request = Request::new(target.model.clone());
         request.system_prompt = self.config.system_prompt.clone();
         request.messages = self
             .history
@@ -537,7 +654,9 @@ impl<'a> Engine<'a> {
                         ContentBlock::Reasoning {
                             summary,
                             sealed: Some(sealed),
-                        } if !sealed.replays_to(provider.id(), &head.instance, &head.model) => {
+                        } if !sealed.replays_to(provider.id(), &target.instance, &target.model)
+                            || (sealed.model.is_none() && is_tail) =>
+                        {
                             ContentBlock::Reasoning {
                                 summary: summary.clone(),
                                 sealed: None,
@@ -552,7 +671,7 @@ impl<'a> Engine<'a> {
             request.tools = self.tool_definitions.clone();
         }
         request.max_output_tokens = self.config.max_output_tokens;
-        request.effort = self.config.effort;
+        request.effort = effort;
         request
     }
 
@@ -561,11 +680,7 @@ impl<'a> Engine<'a> {
     pub fn set_effort(&mut self, effort: Effort) -> Result<(), EngineError> {
         // The record first, the switch second: a failed write leaves
         // the engine where the interface still believes it is.
-        let meta = self.meta(
-            &self.config.route.head.model,
-            Some(effort),
-            self.policy.mode,
-        );
+        let meta = self.meta(&self.config.route.head, Some(effort), self.policy.mode);
         self.session.append_meta(&meta)?;
         self.config.effort = Some(effort);
         Ok(())
@@ -584,7 +699,8 @@ impl<'a> Engine<'a> {
         mode: ApprovalMode,
         tools: &'a dyn ToolHost,
     ) -> Result<(), EngineError> {
-        let meta = self.meta(&self.config.route.head.model, self.config.effort, mode);
+        let head = &self.config.route.head;
+        let meta = self.meta(head, self.effort_for(&head.instance), mode);
         self.session.append_meta(&meta)?;
         self.policy.mode = mode;
         self.tools = tools;
@@ -597,15 +713,15 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    /// A meta record for the head target's instance with these
-    /// settings. It starts from the session's last record and changes
-    /// only what a switch changes, so a field the opening record
-    /// carries stays on every later one. The adapter id comes from the
-    /// host, with no provider build.
-    fn meta(&self, model: &str, effort: Option<Effort>, approval: ApprovalMode) -> SessionMeta {
-        let instance = &self.config.route.head.instance;
+    /// A meta record for head target `head` with these settings. It
+    /// starts from the session's last record and changes only what a
+    /// switch changes, so a field the opening record carries stays on
+    /// every later one. The adapter id comes from the host, with no
+    /// provider build.
+    fn meta(&self, head: &Target, effort: Option<Effort>, approval: ApprovalMode) -> SessionMeta {
+        let instance = &head.instance;
         let kind = self.providers.kind(instance).unwrap_or(instance);
-        let mut open = SessionOpen::new(self.session.cwd(), instance, kind, model);
+        let mut open = SessionOpen::new(self.session.cwd(), instance, kind, &head.model);
         open.effort = effort;
         open.approval = approval;
         let fresh = SessionMeta::now(&open);
@@ -883,11 +999,31 @@ struct ModelResponse {
     usage: Option<Usage>,
 }
 
+/// Whether a failed attempt moves the call to the next target of the
+/// route: a failure that another endpoint or credential can avoid,
+/// after the adapter's own retries. A protocol error, a stream the
+/// adapter could not read, and a session failure end the call.
+fn falls_back(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::Provider(
+            ProviderError::Auth(_)
+                | ProviderError::Network(_)
+                | ProviderError::Server(_)
+                | ProviderError::RateLimited { .. }
+                | ProviderError::InvalidRequest(_)
+        )
+    )
+}
+
 /// Drain one response stream into an assistant message, preserving the
-/// block order the model produced.
+/// block order the model produced. `emitted` turns true at the first
+/// event that reaches the sink: from then on, a failure cannot fall
+/// back without repeating what the screen shows.
 async fn collect_response(
     mut stream: crate::provider::EventStream,
     sink: &dyn EventSink,
+    emitted: &mut bool,
 ) -> Result<ModelResponse, EngineError> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut call_names: HashMap<String, String> = HashMap::new();
@@ -901,6 +1037,7 @@ async fn collect_response(
         };
         match item? {
             StreamEvent::TextDelta(delta) => {
+                *emitted = true;
                 sink.event(EngineEvent::TextDelta(&delta));
                 if let Some(ContentBlock::Text { text }) = blocks.last_mut() {
                     text.push_str(&delta);
@@ -909,13 +1046,16 @@ async fn collect_response(
                 }
             }
             StreamEvent::ReasoningDelta(delta) => {
+                *emitted = true;
                 sink.event(EngineEvent::ReasoningDelta(&delta));
             }
             StreamEvent::ReasoningDone { summary, sealed } => {
+                *emitted = true;
                 sink.event(EngineEvent::ReasoningEnd {});
                 blocks.push(ContentBlock::Reasoning { summary, sealed });
             }
             StreamEvent::ToolCallStart { id, name } => {
+                *emitted = true;
                 sink.event(EngineEvent::ToolStart {
                     id: &id,
                     name: &name,
@@ -1941,6 +2081,389 @@ mod tests {
         assert_eq!(meta.kind.as_deref(), Some("scripted"));
         assert_eq!(meta.model, "other-model");
         assert_eq!(meta.effort.as_deref(), Some("low"));
+    }
+
+    /// A provider whose every call fails: after `events` stream, or
+    /// before the stream opens when `events` is empty.
+    struct Failing {
+        events: Vec<StreamEvent>,
+        error: fn() -> ProviderError,
+        requests: Mutex<Vec<Request>>,
+    }
+
+    impl Failing {
+        fn new(error: fn() -> ProviderError) -> Self {
+            Self {
+                events: Vec::new(),
+                error,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn after(events: Vec<StreamEvent>, error: fn() -> ProviderError) -> Self {
+            Self {
+                events,
+                ..Self::new(error)
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+
+        fn requests(&self) -> Vec<Request> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    /// The scripted adapter's id: a failing instance and a working
+    /// one share an adapter, as two keys of one vendor do.
+    impl Provider for Failing {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                streaming: true,
+                tool_calls: true,
+                ..Capabilities::default()
+            }
+        }
+
+        fn stream(&self, request: Request) -> BoxFuture<'_, Result<EventStream, ProviderError>> {
+            self.requests.lock().unwrap().push(request);
+            if self.events.is_empty() {
+                return Box::pin(std::future::ready(Err((self.error)())));
+            }
+            let items: VecDeque<_> = self
+                .events
+                .iter()
+                .cloned()
+                .map(Ok)
+                .chain(std::iter::once(Err((self.error)())))
+                .collect();
+            Box::pin(std::future::ready(Ok(
+                Box::pin(VecStream(items)) as EventStream
+            )))
+        }
+    }
+
+    /// A host over named slots. A slot without a provider fails its
+    /// build with an authentication error, as a missing key does.
+    struct Chain<'p> {
+        slots: Vec<(&'static str, Option<&'p dyn Provider>, Option<Effort>)>,
+    }
+
+    impl ProviderHost for Chain<'_> {
+        fn provider(&self, instance: &str) -> Result<&dyn Provider, ProviderError> {
+            match self.slots.iter().find(|slot| slot.0 == instance) {
+                Some((_, Some(provider), _)) => Ok(*provider),
+                Some((_, None, _)) => Err(ProviderError::Auth(format!("no key for {instance}"))),
+                None => panic!("unknown instance {instance}"),
+            }
+        }
+
+        fn kind(&self, instance: &str) -> Option<&str> {
+            self.slots
+                .iter()
+                .find(|slot| slot.0 == instance)
+                .map(|slot| slot.1.map_or("none", |provider| provider.id()))
+        }
+
+        fn effort(&self, instance: &str) -> Option<Effort> {
+            self.slots
+                .iter()
+                .find(|slot| slot.0 == instance)
+                .and_then(|slot| slot.2)
+        }
+    }
+
+    /// The route `a` → `b`, with models `ma` and `mb`.
+    fn chain_route() -> Route {
+        let mut route = Route::new(Target::new("a", "ma"));
+        route.tail.push(Target::new("b", "mb"));
+        route
+    }
+
+    /// An engine over `host` in `auto` mode on the route `a` → `b`.
+    fn chain_engine<'a>(host: &'a Chain<'a>, tools: &'a FakeTools, session: Session) -> Engine<'a> {
+        Engine::new(EngineParts::new(
+            host,
+            tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            EngineConfig::new(chain_route()),
+            session,
+        ))
+    }
+
+    /// The targets of the `ModelStart` events a sink saw, as
+    /// `instance/model`.
+    fn model_starts(events: &Mutex<Vec<String>>) -> Vec<String> {
+        events.lock().unwrap().clone()
+    }
+
+    fn start_recorder(events: &Mutex<Vec<String>>) -> impl EventSink + '_ {
+        move |event: EngineEvent<'_>| match event {
+            EngineEvent::ModelStart {
+                provider,
+                model,
+                attempt,
+            } => {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{provider}/{model}#{attempt}"));
+            }
+            EngineEvent::TextDelta(_) => events.lock().unwrap().push("text".to_string()),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn a_failure_before_the_first_event_falls_back_to_the_next_target() {
+        let failures: [fn() -> ProviderError; 5] = [
+            || ProviderError::Auth("bad key".into()),
+            || ProviderError::Network("refused".into()),
+            || ProviderError::Server("overloaded".into()),
+            || ProviderError::RateLimited { retry_after: None },
+            || ProviderError::InvalidRequest("unknown model".into()),
+        ];
+        for failure in failures {
+            let dir = tempfile::tempdir().unwrap();
+            let head = Failing::new(failure);
+            let tail = ScriptedProvider::new(vec![text_done("from b")]);
+            let host = Chain {
+                slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+            };
+            let tools = FakeTools;
+            let mut engine = chain_engine(&host, &tools, session_in(&dir));
+            let events = Mutex::new(Vec::new());
+            let outcome =
+                block_on(engine.user_turn("hi".into(), &start_recorder(&events), &mut ApproveAll))
+                    .unwrap();
+            assert_eq!(outcome, TurnOutcome::Completed, "{}", failure());
+            assert_eq!(model_starts(&events), ["a/ma#0", "b/mb#1", "text"]);
+            assert_eq!(tail.requests()[0].model, "mb");
+            // The usage record names the target that answered.
+            let usage = records(&engine)
+                .into_iter()
+                .find(|record| record["type"] == "usage")
+                .unwrap();
+            assert_eq!(usage["provider"], "b");
+            assert_eq!(usage["model"], "mb");
+        }
+    }
+
+    #[test]
+    fn a_failed_build_falls_back_and_the_turn_stays_on_the_answering_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let tail = ScriptedProvider::new(vec![
+            tool_call("call_1", "note", json!({})),
+            text_done("done"),
+        ]);
+        let host = Chain {
+            slots: vec![("a", None, None), ("b", Some(&tail), None)],
+        };
+        let tools = FakeTools;
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        let events = Mutex::new(Vec::new());
+        let outcome =
+            block_on(engine.user_turn("hi".into(), &start_recorder(&events), &mut ApproveAll))
+                .unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
+        // The turn's second call starts at `b`, the target that
+        // answered; the next turn tries the head again.
+        assert_eq!(
+            model_starts(&events),
+            ["a/ma#0", "b/mb#1", "b/mb#0", "text"]
+        );
+        let events = Mutex::new(Vec::new());
+        let tail_again = ScriptedProvider::new(vec![text_done("again")]);
+        let host = Chain {
+            slots: vec![("a", None, None), ("b", Some(&tail_again), None)],
+        };
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        block_on(engine.user_turn("next".into(), &start_recorder(&events), &mut ApproveAll))
+            .unwrap();
+        assert_eq!(model_starts(&events), ["a/ma#0", "b/mb#1", "text"]);
+    }
+
+    #[test]
+    fn a_target_the_call_already_tried_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Server("down".into()));
+        let tail = ScriptedProvider::new(vec![text_done("from b")]);
+        let host = Chain {
+            slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+        };
+        let tools = FakeTools;
+        let mut config = EngineConfig::new(chain_route());
+        config.route.tail.insert(0, Target::new("a", "ma"));
+        let mut engine = Engine::new(EngineParts::new(
+            &host,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            config,
+            session_in(&dir),
+        ));
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+        assert_eq!(head.calls(), 1);
+    }
+
+    #[test]
+    fn a_payload_without_a_model_goes_to_the_head_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Auth("bad key".into()));
+        let tail = ScriptedProvider::new(vec![text_done("from b")]);
+        let host = Chain {
+            slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+        };
+        let tools = FakeTools;
+        // A payload from a file written before the identity fields.
+        let legacy = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                summary: "old".into(),
+                sealed: Some(SealedPayload::new("scripted", json!({"blob": 1}))),
+            }],
+        };
+        let history = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "q".into() }],
+            },
+            legacy,
+        ];
+        let mut parts = EngineParts::new(
+            &host,
+            &tools,
+            ApprovalPolicy::new(ApprovalMode::Auto),
+            EngineConfig::new(chain_route()),
+            session_in(&dir),
+        );
+        parts.history = history;
+        let mut engine = Engine::new(parts);
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+        let sealed = |request: &Request| {
+            request.messages[1].content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Reasoning {
+                        sealed: Some(_),
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(sealed(&head.requests()[0]));
+        assert!(!sealed(&tail.requests()[0]));
+    }
+
+    #[test]
+    fn no_fallback_after_an_event_reached_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::after(vec![StreamEvent::TextDelta("partial".into())], || {
+            ProviderError::Network("reset".into())
+        });
+        let tail = ScriptedProvider::new(vec![text_done("never")]);
+        let host = Chain {
+            slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+        };
+        let tools = FakeTools;
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        let events = Mutex::new(Vec::new());
+        let error =
+            block_on(engine.user_turn("hi".into(), &start_recorder(&events), &mut ApproveAll))
+                .unwrap_err();
+        assert!(error.to_string().contains("reset"), "{error}");
+        assert_eq!(model_starts(&events), ["a/ma#0", "text"]);
+        assert!(tail.requests().is_empty());
+    }
+
+    #[test]
+    fn a_protocol_error_and_the_last_target_end_the_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Protocol("bad frame".into()));
+        let tail = ScriptedProvider::new(vec![text_done("never")]);
+        let host = Chain {
+            slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+        };
+        let tools = FakeTools;
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        let error =
+            block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap_err();
+        assert!(error.to_string().contains("bad frame"), "{error}");
+        assert!(tail.requests().is_empty());
+
+        // Both targets fail: the call returns the last one's error.
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Auth("bad key".into()));
+        let tail = Failing::new(|| ProviderError::Server("down".into()));
+        let host = Chain {
+            slots: vec![("a", Some(&head), None), ("b", Some(&tail), None)],
+        };
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        let error =
+            block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap_err();
+        assert!(error.to_string().contains("down"), "{error}");
+        assert_eq!((head.calls(), tail.calls()), (1, 1));
+    }
+
+    #[test]
+    fn each_attempt_carries_the_effort_of_its_own_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Auth("bad key".into()));
+        let tail = ScriptedProvider::new(vec![text_done("one"), text_done("two")]);
+        let host = Chain {
+            slots: vec![
+                ("a", Some(&head), Some(Effort::High)),
+                ("b", Some(&tail), Some(Effort::Medium)),
+            ],
+        };
+        let tools = FakeTools;
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+        // The session sets no level: each target gets what the host
+        // gives its instance.
+        assert_eq!(head.requests()[0].effort, Some(Effort::High));
+        assert_eq!(tail.requests()[0].effort, Some(Effort::Medium));
+        // A session level reaches every target.
+        engine.set_effort(Effort::Low).unwrap();
+        block_on(engine.user_turn("again".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+        assert_eq!(tail.requests()[1].effort, Some(Effort::Low));
+        assert_eq!(head.requests()[1].effort, Some(Effort::Low));
+        // The second turn of the same engine tried the head again.
+        assert_eq!(head.calls(), 2);
+    }
+
+    #[test]
+    fn set_head_switches_the_instance_and_keeps_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Failing::new(|| ProviderError::Auth("bad key".into()));
+        let tail = ScriptedProvider::new(vec![text_done("one")]);
+        let host = Chain {
+            slots: vec![
+                ("a", Some(&head), None),
+                ("b", Some(&tail), Some(Effort::Medium)),
+            ],
+        };
+        let tools = FakeTools;
+        let mut engine = chain_engine(&host, &tools, session_in(&dir));
+        let before = records(&engine).len();
+        assert!(engine.set_head(Target::new("ghost", "m")).is_err());
+        assert_eq!(records(&engine).len(), before);
+        engine.set_head(Target::new("b", "mb2")).unwrap();
+        assert_eq!(engine.route().head, Target::new("b", "mb2"));
+        assert_eq!(engine.route().tail, [Target::new("b", "mb")]);
+        let meta = replay(engine.session().path()).unwrap().meta.unwrap();
+        assert_eq!(meta.provider, "b");
+        assert_eq!(meta.kind.as_deref(), Some("scripted"));
+        assert_eq!(meta.model, "mb2");
+        assert_eq!(meta.effort.as_deref(), Some("medium"));
+        block_on(engine.user_turn("hi".into(), &noop_sink(), &mut ApproveAll)).unwrap();
+        assert_eq!(tail.requests()[0].model, "mb2");
+        assert_eq!(head.calls(), 0);
     }
 
     #[test]

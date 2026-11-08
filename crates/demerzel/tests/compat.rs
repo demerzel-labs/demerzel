@@ -3,7 +3,7 @@
 //! mock Chat Completions route. No network, no model.
 
 use demerzel::{AuthPaths, Resume, RunConfig, RunError, Runtime, SessionSettings};
-use demerzel_core::{ContentBlock, Effort, EngineEvent, NoPrompt, SessionStore, replay};
+use demerzel_core::{ContentBlock, Effort, EngineEvent, NoPrompt, SessionStore, Target, replay};
 use demerzel_mock::MockServer;
 use demerzel_mock::compat::{reasoning_tool_turn, text_turn};
 use demerzel_providers::{EffortWire, ProviderError};
@@ -265,6 +265,20 @@ async fn a_level_set_before_the_first_prompt_reaches_the_first_request() {
     assert_eq!(meta.effort.as_deref(), Some("low"));
 }
 
+/// Every instance of `user` except the run's head `head`, as `main`
+/// resolves them.
+fn others(head: &str, user: &demerzel::config::Layer) -> Vec<demerzel::config::Resolved> {
+    demerzel::config::run_instances(
+        &demerzel::config::Flags::default(),
+        &|_| None,
+        None,
+        Some(user),
+    )
+    .into_iter()
+    .filter(|resolved| resolved.instance.name != head)
+    .collect()
+}
+
 fn replay_meta(bed: &Bed) -> demerzel_core::SessionMeta {
     replay(&bed.latest_session()).unwrap().meta.unwrap()
 }
@@ -354,13 +368,7 @@ async fn a_resume_adopts_the_sessions_instance_and_its_effort() {
     let user = two_instances(&bed);
     let mut config = head(&bed, "beta", "m2");
     config.resume = Resume::Latest;
-    config.resumable = demerzel::config::resumable(
-        "beta",
-        &demerzel::config::Flags::default(),
-        &|_| None,
-        None,
-        Some(&user),
-    );
+    config.other_instances = others("beta", &user);
     let runtime = Runtime::new(config).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
     assert_eq!(runtime.effort_wire(&settings), EffortWire::Default);
@@ -491,13 +499,7 @@ async fn a_model_switch_keeps_reasoning_off_the_other_model_and_back_on_return()
 fn resume_on_beta(bed: &Bed, user: &demerzel::config::Layer) -> Runtime {
     let mut config = head(bed, "beta", "m2");
     config.resume = Resume::Latest;
-    config.resumable = demerzel::config::resumable(
-        "beta",
-        &demerzel::config::Flags::default(),
-        &|_| None,
-        None,
-        Some(user),
-    );
+    config.other_instances = others("beta", user);
     Runtime::new(config).unwrap()
 }
 
@@ -573,4 +575,205 @@ async fn a_missing_login_on_the_adopted_instance_fails_before_a_record() {
         "{error}"
     );
     assert_eq!(meta_records(&bed), before);
+}
+
+/// The user file of the chain tests: `alpha` speaks Chat Completions
+/// and sets its effort; `beta` speaks the Responses API and sets none.
+fn cross_protocol(bed: &Bed) -> demerzel::config::Layer {
+    let url = format!("{}/v1", bed.mock.url());
+    let text = format!(
+        "[providers.alpha]\nkind = \"openai-compat\"\nbase_url = \"{url}\"\nmodel = \"m1\"\n\
+         effort = \"low\"\n\n\
+         [providers.beta]\nkind = \"openai-responses\"\nbase_url = \"{url}\"\nmodel = \"r1\"\n"
+    );
+    demerzel::config::Layer::parse(&text).unwrap().0
+}
+
+/// A run with head `alpha`, model `m1`, the chain's tail, and every
+/// instance of `user`.
+fn chain_run(bed: &Bed, user: &demerzel::config::Layer, tail: Vec<Target>) -> RunConfig {
+    let mut config = head(bed, "alpha", "m1");
+    config.effort = Effort::Low;
+    config.effort_origin = demerzel::config::Origin::User;
+    config.tail = tail;
+    config.other_instances = others("alpha", user);
+    config
+}
+
+/// The `usage` records of the latest session, as JSON.
+fn usage_records(bed: &Bed) -> Vec<Value> {
+    std::fs::read_to_string(bed.latest_session())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["type"] == "usage")
+        .collect()
+}
+
+#[tokio::test]
+async fn a_chain_falls_back_across_protocols_and_records_the_answering_target() {
+    let bed = Bed::start(vec![
+        demerzel_mock::MockResponse::error(401),
+        demerzel_mock::responses::tool_turn("call_1", "read", json!({"path": "f.txt"})),
+        demerzel_mock::responses::text_turn("the file holds alpha and beta"),
+    ])
+    .await;
+    let user = cross_protocol(&bed);
+    let config = chain_run(&bed, &user, vec![Target::new("beta", "r1")]);
+    let starts = std::sync::Mutex::new(Vec::new());
+    let sink = |event: EngineEvent<'_>| {
+        if let EngineEvent::ModelStart {
+            provider,
+            model,
+            attempt,
+            ..
+        } = event
+        {
+            starts
+                .lock()
+                .unwrap()
+                .push(format!("{provider}/{model}#{attempt}"));
+        }
+    };
+    let outcome = Runtime::new(config)
+        .unwrap()
+        .one_shot("read f.txt".into(), &sink)
+        .await
+        .unwrap();
+    assert_eq!(outcome, demerzel_core::TurnOutcome::Completed);
+    // The first call falls back; the turn's next call starts at the
+    // target that answered.
+    assert_eq!(
+        *starts.lock().unwrap(),
+        ["alpha/m1#0", "beta/r1#1", "beta/r1#0"]
+    );
+    let received = bed.mock.received();
+    let paths: Vec<&str> = received.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/v1/chat/completions", "/v1/responses", "/v1/responses"]
+    );
+    // Each attempt carries the effort of its own target: `alpha` sets
+    // a level, and `beta` sets none.
+    assert_eq!(received[0].body["reasoning_effort"], "low");
+    assert!(
+        received[1].body.get("reasoning").is_none(),
+        "{}",
+        received[1].body
+    );
+    // The tool ran through the same tools: its output reached `beta`.
+    assert!(received[2].body.to_string().contains("alpha"));
+    // Each usage record names the target that answered; the meta
+    // record keeps the head.
+    let usage = usage_records(&bed);
+    assert_eq!(usage.len(), 2);
+    for record in &usage {
+        assert_eq!(record["provider"], "beta");
+        assert_eq!(record["model"], "r1");
+    }
+    assert_eq!(replay_meta(&bed).provider, "alpha");
+}
+
+#[tokio::test]
+async fn a_head_without_its_key_falls_back_at_the_open_and_the_turn() {
+    let bed = Bed::start(vec![text_turn("from beta")]).await;
+    let url = format!("{}/v1", bed.mock.url());
+    let text = format!(
+        "[providers.alpha]\nkind = \"openai-compat\"\nbase_url = \"{url}\"\nmodel = \"m1\"\n\
+         api_key_env = \"DMZ_TEST_ALPHA_KEY_NEVER_SET\"\n\n\
+         [providers.beta]\nkind = \"openai-compat\"\nbase_url = \"{url}\"\nmodel = \"m2\"\n"
+    );
+    let user = demerzel::config::Layer::parse(&text).unwrap().0;
+    let mut config = chain_run(&bed, &user, vec![Target::new("beta", "m2")]);
+    config.instance.api_key_env = Some("DMZ_TEST_ALPHA_KEY_NEVER_SET".into());
+    Runtime::new(config)
+        .unwrap()
+        .one_shot("hi".into(), &noop)
+        .await
+        .unwrap();
+    let received = bed.mock.received();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body["model"], "m2");
+    assert_eq!(usage_records(&bed)[0]["provider"], "beta");
+}
+
+#[tokio::test]
+async fn model_with_two_tokens_moves_the_head_to_another_instance() {
+    let bed = Bed::start(vec![text_turn("on beta")]).await;
+    let user = two_instances(&bed);
+    let runtime = Runtime::new(chain_run(&bed, &user, Vec::new())).unwrap();
+    let settings = SessionSettings::from_config(runtime.config());
+    let mut opened = runtime.open(&Resume::Fresh, &settings).unwrap();
+
+    let error = runtime
+        .switch_head(&opened.settings, "ghost", "m9")
+        .unwrap_err();
+    assert!(error.contains("ghost") && error.contains("beta"), "{error}");
+
+    let next = runtime.switch_head(&opened.settings, "beta", "m9").unwrap();
+    // `beta` sets no effort: the switch takes its own.
+    assert_eq!(runtime.effort_wire(&next), EffortWire::Default);
+    opened.engine.set_head(next.route.head.clone()).unwrap();
+    opened
+        .engine
+        .user_turn("go".into(), &noop, &mut NoPrompt)
+        .await
+        .unwrap();
+    let body = &bed.mock.received()[0].body;
+    assert_eq!(body["model"], "m9");
+    assert!(body.get("reasoning_effort").is_none(), "{body}");
+    let meta = replay_meta(&bed);
+    assert_eq!(
+        (meta.provider.as_str(), meta.model.as_str()),
+        ("beta", "m9")
+    );
+    assert_eq!(usage_records(&bed)[0]["provider"], "beta");
+}
+
+#[tokio::test]
+async fn a_two_token_switch_before_the_first_prompt_keeps_the_whole_head_on_resume() {
+    let bed = Bed::start(vec![reasoning_turn(), text_turn("done"), text_turn("m7")]).await;
+    alpha_session(&bed).await;
+    let runtime = resume_on_beta(&bed, &two_instances(&bed));
+    let settings = SessionSettings::from_config(runtime.config());
+    let settings = runtime.switch_head(&settings, "beta", "m7").unwrap();
+    let opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    assert_eq!(opened.settings.route.head, Target::new("beta", "m7"));
+}
+
+#[test]
+fn a_tail_on_an_undefined_instance_stops_the_run_at_boot() {
+    let project = tempfile::tempdir().unwrap();
+    let mut config = RunConfig::new(project.path().to_path_buf());
+    config.tail = vec![Target::new("ghost", "m")];
+    let Err(RunError::Config(error)) = Runtime::new(config) else {
+        panic!("an undefined fallback instance must stop the run");
+    };
+    assert!(error.contains("ghost"), "{error}");
+}
+
+#[tokio::test]
+async fn the_first_run_screen_shows_only_when_no_target_of_the_route_can_run() {
+    let bed = Bed::start(Vec::new()).await;
+    let url = format!("{}/v1", bed.mock.url());
+    let text = format!(
+        "[providers.keyed]\nkind = \"openai-compat\"\nbase_url = \"{url}\"\nmodel = \"m1\"\n\
+         api_key_env = \"DMZ_TEST_KEYED_KEY_NEVER_SET\"\n\n\
+         [providers.open]\nkind = \"openai-compat\"\nbase_url = \"{url}\"\nmodel = \"m2\"\n"
+    );
+    let user = demerzel::config::Layer::parse(&text).unwrap().0;
+    // A Codex head without a login: the store is empty and no import
+    // file exists.
+    let run = |tail: Vec<Target>| {
+        let mut config = bed.config();
+        config.instance = demerzel::config::Instance::new("openai-codex", "openai-codex");
+        config.model = "gpt-test".into();
+        config.tail = tail;
+        config.other_instances = others("openai-codex", &user);
+        Runtime::new(config).unwrap()
+    };
+    // A tail whose key variable is unset cannot run either.
+    assert!(run(vec![Target::new("keyed", "m1")]).first_run().is_some());
+    // A keyless tail can run: no screen.
+    assert!(run(vec![Target::new("open", "m2")]).first_run().is_none());
 }

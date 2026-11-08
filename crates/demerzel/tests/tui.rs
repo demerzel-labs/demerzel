@@ -1015,7 +1015,7 @@ async fn slash_commands_switch_the_model_and_start_a_fresh_session() {
 
     pty.wait_for(PROMPT);
     pty.send(b"/help\r");
-    pty.wait_for("/model [name]");
+    pty.wait_for("/model [[provider] model]");
     pty.send(b"/model gpt-test\r");
     pty.wait_for("model: gpt-test");
     // A resize makes a later draw repaint the whole screen, so the
@@ -1318,7 +1318,7 @@ async fn the_plain_interface_shares_the_command_registry() {
 
     pty.wait_for(PROMPT);
     pty.send(b"/help\r");
-    pty.wait_for("/model [name]");
+    pty.wait_for("/model [[provider] model]");
     pty.wait_for(PROMPT);
     pty.send(b"/model gpt-test\r");
     pty.wait_for("model: gpt-test");

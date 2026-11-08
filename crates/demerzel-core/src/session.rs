@@ -39,6 +39,7 @@ use crate::approval::{ApprovalDecision, ApprovalMode};
 use crate::message::{Message, Usage};
 use crate::paths;
 use crate::provider::Effort;
+use crate::route::Target;
 
 /// Version of the session-file schema, written into every meta record.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -193,14 +194,21 @@ pub enum SessionRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer: Option<String>,
     },
-    /// The token counts of one model call, with the call's clock:
-    /// `at` is when the request went out, and `duration_ms` is the
-    /// wall time from the send to the stream's terminal event. Both
-    /// are absent in a file from before the fields, and readers keep
-    /// such a file.
+    /// The token counts of one model call, with the target that
+    /// answered it and the call's clock. `provider` names the
+    /// instance and `model` the model: with a fallback chain, the
+    /// target can differ from the meta record's head. `at` is when
+    /// the request went out, and `duration_ms` is the wall time from
+    /// the send to the stream's terminal event, the failed attempts
+    /// before the answer included. Each field is absent in a file
+    /// from before it, and readers keep such a file.
     Usage {
         #[serde(flatten)]
         usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +274,10 @@ enum RecordRef<'a> {
     Usage {
         #[serde(flatten)]
         usage: &'a Usage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         at: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -509,10 +521,14 @@ impl Session {
             },
             SessionRecord::Usage {
                 usage,
+                provider,
+                model,
                 at,
                 duration_ms,
             } => RecordRef::Usage {
                 usage,
+                provider: provider.as_deref(),
+                model: model.as_deref(),
                 at: at.as_deref(),
                 duration_ms: *duration_ms,
             },
@@ -583,12 +599,19 @@ impl Session {
         })
     }
 
-    /// Record one model call's token counts with its clock. See
-    /// [`SessionRecord::Usage`].
-    pub fn append_usage(&mut self, usage: &Usage, timing: Timing) -> io::Result<()> {
+    /// Record one model call's token counts, the target that
+    /// answered it, and its clock. See [`SessionRecord::Usage`].
+    pub fn append_usage(
+        &mut self,
+        usage: &Usage,
+        target: &Target,
+        timing: Timing,
+    ) -> io::Result<()> {
         let at = timestamp(timing.at);
         self.append_ref(&RecordRef::Usage {
             usage,
+            provider: Some(&target.instance),
+            model: Some(&target.model),
             at: Some(&at),
             duration_ms: Some(timing.duration_ms()),
         })
@@ -771,6 +794,7 @@ pub fn replay(path: &Path) -> io::Result<Replay> {
                 usage,
                 at,
                 duration_ms,
+                ..
             } => {
                 // A clock needs both halves; a file from before the
                 // fields has neither, and a record with one alone
@@ -929,6 +953,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
                 },
+                &Target::new("openai-codex", "gpt-test"),
                 Timing::new(SystemTime::now(), Duration::from_millis(5)),
             )
             .unwrap();
@@ -997,7 +1022,9 @@ mod tests {
         session
             .append_message(&text_message(Role::Assistant, "calling"))
             .unwrap();
-        session.append_usage(&usage, clock).unwrap();
+        session
+            .append_usage(&usage, &Target::new("p", "m"), clock)
+            .unwrap();
         session
             .append_message(&text_message(Role::User, "result"))
             .unwrap();
@@ -1007,7 +1034,9 @@ mod tests {
         session
             .append_message(&text_message(Role::Assistant, "done"))
             .unwrap();
-        session.append_usage(&usage, clock).unwrap();
+        session
+            .append_usage(&usage, &Target::new("p", "m"), clock)
+            .unwrap();
 
         let replay = replay(session.path()).unwrap();
         assert_eq!(replay.messages.len(), 4);
@@ -1053,13 +1082,18 @@ mod tests {
 
         let usage = SessionRecord::Usage {
             usage: Usage::default(),
+            provider: Some("local".into()),
+            model: Some("m1".into()),
             at: Some("2026-09-01T10:00:00.123Z".into()),
             duration_ms: Some(1500),
         };
         let value = serde_json::to_value(&usage).unwrap();
         assert_eq!(value["type"], "usage");
-        // The token counts sit flat on the record, beside the clock.
+        // The token counts sit flat on the record, beside the target
+        // and the clock.
         assert_eq!(value["input_tokens"], 0);
+        assert_eq!(value["provider"], "local");
+        assert_eq!(value["model"], "m1");
         assert_eq!(value["at"], "2026-09-01T10:00:00.123Z");
         assert_eq!(value["duration_ms"], 1500);
 
@@ -1242,6 +1276,8 @@ mod tests {
                     cache_read_tokens: 3,
                     cache_creation_tokens: 4,
                 },
+                provider: None,
+                model: None,
                 at: Some("2026-09-01T10:00:00.123Z".into()),
                 duration_ms: Some(7),
             },
@@ -1270,6 +1306,8 @@ mod tests {
             // same way, or an old-shape record would not round-trip.
             SessionRecord::Usage {
                 usage: Usage::default(),
+                provider: None,
+                model: None,
                 at: None,
                 duration_ms: None,
             },
@@ -1354,6 +1392,8 @@ mod tests {
                     cache_read_tokens: 1,
                     cache_creation_tokens: 0,
                 },
+                provider: None,
+                model: None,
                 at: None,
                 duration_ms: None,
             }
@@ -1381,6 +1421,8 @@ mod tests {
                     cache_creation_tokens: 0,
                     ..
                 },
+                provider: None,
+                model: None,
                 at: None,
                 duration_ms: None,
             }
@@ -1399,7 +1441,9 @@ mod tests {
         let mut session = store
             .create(&SessionOpen::new(dir.path(), "p", "p", "m"))
             .unwrap();
-        session.append_usage(&Usage::default(), timing).unwrap();
+        session
+            .append_usage(&Usage::default(), &Target::new("p", "m"), timing)
+            .unwrap();
         session
             .append_tool("call_1", "read", timing, false, 12, false)
             .unwrap();
@@ -1415,6 +1459,8 @@ mod tests {
             [
                 SessionRecord::Usage {
                     usage: Usage::default(),
+                    provider: Some("p".into()),
+                    model: Some("m".into()),
                     at: Some("2026-09-01T10:00:00.123Z".into()),
                     duration_ms: Some(1500),
                 },

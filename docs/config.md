@@ -51,6 +51,12 @@ base_url = "https://api.example.com/v1"
 model = "vendor-model"
 api_key_env = "API_KEY"
 
+[roles.default]                  # the head target and its fallbacks, see Roles
+chain = [
+  { provider = "anthropic", model = "claude-sonnet-5" },
+  { provider = "local" },
+]
+
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
 markdown = true                  # render model replies as markdown
@@ -74,6 +80,7 @@ error = "bright-red"
 | `providers.<name>.kind` | — | — | the table name, when it is an adapter id |
 | `providers.<name>.api_key_env` | — | — | unset: the adapter's own credentials |
 | `providers.<name>.thinking` | — | — | `adaptive` |
+| `roles.<name>.chain` | — | — | unset: `provider` and `model` name the head |
 | `history_file` | — | — | `true` |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
@@ -172,10 +179,64 @@ An adapter without a default model, such as `openai-compat` or
 also names the instance in `provider`. A top-level `model` without
 `provider` names a model of a shipped adapter.
 
-`--base-url` and `DEMERZEL_BASE_URL` apply to the active instance.
+`--base-url` and `DEMERZEL_BASE_URL` apply to the configured head
+instance only. Another instance never sends its key to that endpoint.
 The session file names the instance in `meta.provider` and its adapter
 in `meta.kind`. `doctor` lists each instance with its adapter, its
 endpoint, its model, and the source of its key.
+
+## Roles
+
+A `[roles.<name>]` table names a chain of targets. Each target is a
+table with `provider`, an instance name, and an optional `model`. A
+target without `model` takes its instance's own model: the `model` of
+the `[providers.<name>]` table, or the adapter's default.
+
+`default` is the role of the main loop:
+
+- The first target of `[roles.default]` is the head target. It takes
+  the place of the top-level `provider` and `model` of its file. A
+  file that sets both gives a warning.
+- The other targets are the fallback chain. A model call tries the
+  head first, then each fallback target in order.
+- A `--provider` or `--model` flag, or its variable, replaces the head
+  target. The fallback chain stays. A fallback target equal to the
+  head drops out.
+
+A model call moves to the next target when the call fails before any
+text, reasoning, or tool call reaches the screen. These failures move
+the call:
+
+- an authentication failure, such as a bad key or a missing login;
+- a network failure;
+- a server failure or a rate limit, after the adapter's own retries;
+- an invalid request, such as a model that the server does not have.
+
+A failure after the screen shows output ends the turn, as without a
+chain. A fallback would repeat the visible text. A protocol failure
+also ends the turn.
+
+After a fallback, the turn's later model calls start at the target
+that answered. A failed head then costs its retries once per turn,
+not once per tool call. The next turn tries the head again.
+
+A target takes no `effort`. Each target receives the effort that
+config gives its own instance. A level from `/effort` reaches every
+target. Define a second instance for a low-effort variant.
+
+Each `usage` record in the session file names the target that
+answered the call, in `provider` and `model`. The `meta` records name
+the head target. The full-screen interface names the target in use on
+its status and its progress line. Both interfaces show a notice at the
+turn's first fallback.
+
+A role in the user file that names an instance which config does not
+define stops the run at boot. A role in the project file can name only
+the user file's instances and the shipped adapters. The run ignores a
+project role that names another instance, with a warning, and the
+user file's role of the same name applies. `doctor` shows each role's
+chain. The roles other than `default` serve subagents in a later
+release.
 
 ## Reasoning effort
 
@@ -200,10 +261,14 @@ wire. The full-screen interface and `/effort` then show `default` as
 the effort. Each adapter sends the level by name and does not clamp
 it.
 
+A fallback target receives the effort of its own instance under the
+same rule; see "Roles".
+
 `/effort [level]` shows or sets the level for the session. The
 full-screen interface names the level on its status.
-Each `meta` record in the session file names the session's level, so
-a reader can tell what a run used. The adapter maps the level to its
+Each `meta` record in the session file names the level of the head
+target's requests, so a reader can tell what a run used. A fallback
+target's level follows its own instance. The adapter maps the level to its
 wire: it can clamp the level, or omit it with thinking off. A resumed
 session takes its level from config, not from the file.
 
@@ -430,7 +495,8 @@ The last `meta` record of the session file names them. A change to a
 config file does not replace them. These do:
 
 - The `--provider` or `--model` flag, or its variable, replaces both.
-- `/model` before the first prompt replaces the model.
+- `/model <model>` before the first prompt replaces the model.
+- `/model <provider> <model>` before the first prompt replaces both.
 
 The session continues on the configured instance in these cases:
 
@@ -447,6 +513,15 @@ names the instance. Use `--provider` to continue on another one.
 `DEMERZEL_BASE_URL` apply to the configured instance only. A key
 never follows them to another instance's requests. `/new` keeps the
 instance and the model of the session before it.
+
+`/model` alone shows the head target and the fallback chain.
+`/model <model>` switches the head target's model.
+`/model <provider> <model>` switches the head target's instance and
+model; the fallback chain stays. A model id can hold `/` and `:`, so
+the provider is a separate word. An instance that config does not
+define gives an error, and the session stays as it was. A switch to
+another instance takes the effort that config sets for that instance,
+unless `/effort` set a level.
 
 `/model` keeps the reasoning in the history. Each adapter sends
 reasoning only to the instance and the model that wrote it. After a
@@ -474,7 +549,7 @@ interface prints the notice alone.
 ## The first-run screen
 
 The full-screen interface shows one screen before the prompt when
-no credential resolves for the session's provider. The screen holds
+no credential resolves for any target of the configured route. The screen holds
 the wordmark (the product name in box-drawing characters), the
 credential state of each provider in the words `doctor` uses, and
 the login commands. Enter continues to the session. Ctrl-D ends the
@@ -559,6 +634,10 @@ privilege, move credentials, or raise cost:
   file defines and set its `model`, `effort`, `context_window`, and
   `thinking`.
 - It cannot set `providers.<name>.api_key_env`.
+- It can define a role only over instances that the user file or the
+  shipped adapters define. A role target carries no effort and no
+  limit, so a role cannot raise cost. A project role that names
+  another instance is ignored.
 - It cannot turn `history_file` on against a user file that turned
   it off.
 - It cannot turn `tui.mouse` on against a user file that turned it
@@ -599,4 +678,6 @@ M3 step 2 ([`m3-plan.md`](m3-plan.md)) added provider instances,
 `openai-compat` adapter on 2026-09-22. M3 step 3 added the
 `openai-responses` adapter on 2026-09-26. M3 step 4 added
 `dmz login <instance>`, the `keys` section of the auth store, and
-`providers.<name>.thinking` on 2026-10-02.
+`providers.<name>.thinking` on 2026-10-02. M3 step 6 added
+`[roles.<name>] chain`, the fallback chain, and
+`/model <provider> <model>` on 2026-11-08.

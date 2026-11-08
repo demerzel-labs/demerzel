@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use demerzel_core::{ApprovalMode, Effort};
+use demerzel_core::{ApprovalMode, Effort, Target};
 use demerzel_providers::ThinkingMode;
 use demerzel_tui::theme::{self, Color, Role};
 use demerzel_tui::{Theme, Thinking};
@@ -39,6 +39,9 @@ pub const DEFAULT_MAX_MODEL_CALLS: u32 = demerzel_core::DEFAULT_MAX_MODEL_CALLS;
 pub const DEFAULT_MOUSE: bool = true;
 /// The theme when nothing picks one: the terminal's own palette.
 pub const DEFAULT_THEME: &str = "terminal";
+/// The role of the main loop. Its chain's first target is the head
+/// target, unless a flag or a variable names one.
+pub const DEFAULT_ROLE: &str = "default";
 
 /// Environment variables, one per flag.
 pub const ENV_PROVIDER: &str = "DEMERZEL_PROVIDER";
@@ -121,8 +124,22 @@ pub struct Settings {
     /// default; only an adapter with a thinking switch takes a value.
     pub thinking_mode: Setting<Option<ThinkingMode>>,
     pub history_file: Setting<bool>,
+    /// The `[roles.<name>]` tables, by name: each role's chain as the
+    /// file wrote it, from the highest file that defines the role.
+    /// [`chains`] checks each target and names its model.
+    pub roles: BTreeMap<String, Setting<Vec<RoleTarget>>>,
     /// The `[tui]` table.
     pub tui: TuiSettings,
+}
+
+/// One target of a role's chain as a config file writes it: a
+/// provider instance and an optional model. Without a model, the
+/// target takes the model config gives the instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RoleTarget {
+    pub provider: String,
+    pub model: Option<String>,
 }
 
 /// The resolved `[tui]` keys.
@@ -206,7 +223,7 @@ pub struct Flags {
 }
 
 /// Per-instance keys from a `[providers.<name>]` table.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct ProviderKeys {
     /// The adapter id. Without it, the table name is the adapter id.
     kind: Option<String>,
@@ -220,7 +237,7 @@ struct ProviderKeys {
 }
 
 /// Interface keys from the `[tui]` table.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct TuiKeys {
     mouse: Option<bool>,
     markdown: Option<bool>,
@@ -233,7 +250,7 @@ struct TuiKeys {
 type ThemeKeys = Vec<(Role, Option<Color>)>;
 
 /// One parsed config file.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Layer {
     provider: Option<String>,
     model: Option<String>,
@@ -242,8 +259,20 @@ pub struct Layer {
     max_model_calls: Option<u32>,
     history_file: Option<bool>,
     providers: BTreeMap<String, ProviderKeys>,
+    /// The `[roles.<name>]` chains. The parser keeps only roles with
+    /// at least one target.
+    roles: BTreeMap<String, Vec<RoleTarget>>,
     tui: TuiKeys,
     themes: BTreeMap<String, ThemeKeys>,
+}
+
+impl Layer {
+    /// The first target of this file's `[roles.default]` chain: the
+    /// file's head target, which takes the place of its top-level
+    /// `provider` and `model`.
+    fn role_head(&self) -> Option<&RoleTarget> {
+        self.roles.get(DEFAULT_ROLE).and_then(|chain| chain.first())
+    }
 }
 
 impl Layer {
@@ -300,6 +329,14 @@ impl Layer {
                         return Err(format!("`tui` must be a table, not {}", other.type_str()));
                     }
                 },
+                "roles" => match value {
+                    toml::Value::Table(tables) => {
+                        parse_roles(tables, &mut layer.roles, &mut warnings)?;
+                    }
+                    other => {
+                        return Err(format!("`roles` must be a table, not {}", other.type_str()));
+                    }
+                },
                 "theme" => match value {
                     toml::Value::Table(tables) => {
                         parse_themes(tables, &mut layer.themes, &mut warnings)?;
@@ -346,6 +383,84 @@ fn parse_providers(
         into.insert(id, keys);
     }
     Ok(())
+}
+
+/// The `[roles.<name>]` tables. A role holds one key, `chain`: an
+/// array of targets, each a table with `provider` and an optional
+/// `model`. A chain needs a target; a target carries no other key.
+fn parse_roles(
+    tables: toml::Table,
+    into: &mut BTreeMap<String, Vec<RoleTarget>>,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    for (name, value) in tables {
+        let toml::Value::Table(table) = value else {
+            return Err(format!(
+                "`roles.{name}` must be a table, not {}",
+                value.type_str()
+            ));
+        };
+        let mut chain = None;
+        for (key, value) in table {
+            let path = format!("roles.{name}.{key}");
+            match key.as_str() {
+                "chain" => chain = Some(parse_chain(&path, value, warnings)?),
+                _ => warnings.push(format!("unknown key `{path}`")),
+            }
+        }
+        let Some(chain) = chain else {
+            return Err(format!("`roles.{name}` needs `chain`, a list of targets"));
+        };
+        into.insert(name, chain);
+    }
+    Ok(())
+}
+
+fn parse_chain(
+    path: &str,
+    value: toml::Value,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<RoleTarget>, String> {
+    let toml::Value::Array(items) = value else {
+        return Err(format!(
+            "`{path}` must be an array of targets, not {}",
+            value.type_str()
+        ));
+    };
+    if items.is_empty() {
+        return Err(format!("`{path}` needs at least one target"));
+    }
+    let mut chain = Vec::with_capacity(items.len());
+    for (index, item) in items.into_iter().enumerate() {
+        let path = format!("{path}[{index}]");
+        let toml::Value::Table(table) = item else {
+            return Err(format!(
+                "`{path}` must be a table with `provider`, not {}",
+                item.type_str()
+            ));
+        };
+        let mut provider = None;
+        let mut model = None;
+        for (key, value) in table {
+            let key_path = format!("{path}.{key}");
+            match key.as_str() {
+                "provider" => provider = Some(expect_string(&key_path, value)?),
+                "model" => model = Some(expect_string(&key_path, value)?),
+                // A target carries no effort and no limit: an instance
+                // does. Say so instead of a bare unknown key.
+                "effort" => warnings.push(format!(
+                    "unknown key `{key_path}`: a chain target takes no effort; define a second \
+                     instance with its own `effort`"
+                )),
+                _ => warnings.push(format!("unknown key `{key_path}`")),
+            }
+        }
+        let Some(provider) = provider else {
+            return Err(format!("`{path}` needs `provider`"));
+        };
+        chain.push(RoleTarget { provider, model });
+    }
+    Ok(chain)
 }
 
 fn parse_tui(
@@ -565,20 +680,96 @@ pub fn resolve(
     project: Option<&Layer>,
     user: Option<&Layer>,
 ) -> (Settings, Vec<String>) {
+    // Trust rule: a project file defines no instance, so its role can
+    // name only an instance the user file or a shipped adapter
+    // defines. A role that names any other instance is ignored, with
+    // a warning; a user role of the same name applies instead.
+    let defined: Vec<String> = instances(user).into_iter().map(|i| i.name).collect();
+    let is_defined = |name: &str| {
+        demerzel_providers::PROVIDER_IDS.contains(&name) || defined.iter().any(|d| d == name)
+    };
     let mut warnings = Vec::new();
+    let mut rejected = Vec::new();
+    for (role, chain) in project.into_iter().flat_map(|l| &l.roles) {
+        if let Some(target) = chain.iter().find(|target| !is_defined(&target.provider)) {
+            warnings.push(format!(
+                "ignored: the project file's role `{role}` names provider `{}`, which the user \
+                 file does not define; a project file can name only the user file's instances \
+                 and the shipped adapters",
+                target.provider
+            ));
+            rejected.push(role.clone());
+        }
+    }
+    let trusted;
+    let project = if rejected.is_empty() {
+        project
+    } else {
+        trusted = project.map(|layer| {
+            let mut layer = layer.clone();
+            layer.roles.retain(|role, _| !rejected.contains(role));
+            layer
+        });
+        trusted.as_ref()
+    };
+    let (settings, more) = resolve_layers(flags, env, project, user, true);
+    warnings.extend(more);
+    (settings, warnings)
+}
+
+/// [`resolve`] over layers the role trust rule already checked.
+/// Without `roles`, the files' roles take no part: the result is an
+/// instance's own resolution, as [`resolve_instance`] needs.
+fn resolve_layers(
+    flags: &Flags,
+    env: &dyn Fn(&str) -> Option<String>,
+    project: Option<&Layer>,
+    user: Option<&Layer>,
+    roles: bool,
+) -> (Settings, Vec<String>) {
+    let mut warnings = Vec::new();
+    fn role_head(layer: &Layer, roles: bool) -> Option<&RoleTarget> {
+        if roles { layer.role_head() } else { None }
+    }
+    let head_provider = |layer: &Layer| {
+        role_head(layer, roles)
+            .map(|head| head.provider.clone())
+            .or_else(|| layer.provider.clone())
+    };
     // An empty flag or variable counts as unset, like an empty
     // `XDG_DATA_HOME` in the path rules.
     let flag = |value: &Option<String>| value.clone().filter(|v| !v.is_empty());
     let env = |name: &str| env(name).filter(|v| !v.is_empty());
 
     // The provider resolves first: the model and base_url lookups
-    // below key off the active provider's table.
+    // below key off the active provider's table. In a file, the first
+    // target of `[roles.default]` names the head target and takes the
+    // place of the top-level `provider` and `model`.
     let provider = flag(&flags.provider)
         .map(|v| Setting::new(v, Origin::Flag))
         .or_else(|| env(ENV_PROVIDER).map(|v| Setting::new(v, Origin::Env)))
-        .or_else(|| layer_key(project, Origin::Project, |l| l.provider.clone()))
-        .or_else(|| layer_key(user, Origin::User, |l| l.provider.clone()))
+        .or_else(|| layer_key(project, Origin::Project, head_provider))
+        .or_else(|| layer_key(user, Origin::User, head_provider))
         .unwrap_or_else(|| Setting::new(DEFAULT_PROVIDER.to_string(), Origin::Default));
+    for (layer, name) in [(project, "project"), (user, "user")] {
+        if let Some(layer) = layer
+            && role_head(layer, roles).is_some()
+            && (layer.provider.is_some() || layer.model.is_some())
+        {
+            warnings.push(format!(
+                "ignored: the {name} file sets the top-level `provider` or `model` and \
+                 `[roles.default]`; the role's first target names the head target"
+            ));
+        }
+    }
+    // A role resolves whole from the highest file that defines it: a
+    // project role replaces a user role of the same name.
+    let mut role_settings = BTreeMap::new();
+    for (layer, origin) in [(user, Origin::User), (project, Origin::Project)] {
+        for (name, chain) in layer.into_iter().filter(|_| roles).flat_map(|l| &l.roles) {
+            role_settings.insert(name.clone(), Setting::new(chain.clone(), origin));
+        }
+    }
 
     // Trust rule: only the user file defines an instance and picks its
     // credential. A project file can name an instance the user file
@@ -632,12 +823,23 @@ pub fn resolve(
         .value
         .as_deref()
         .is_none_or(|kind| demerzel_providers::default_model(kind).is_some());
+    // A file's `[roles.default]` head pairs its provider with its
+    // model, so its model wins in that file, and the top-level keys
+    // of that file do not apply.
     let layer_model = |layer: Option<&Layer>, origin| {
         layer_key(layer, origin, |l| {
-            l.providers
-                .get(&provider.value)
-                .and_then(|p| p.model.clone())
+            let role_head = role_head(l, roles);
+            let role_model = role_head
+                .filter(|head| head.provider == provider.value)
+                .and_then(|head| head.model.clone());
+            role_model
+                .or_else(|| {
+                    l.providers
+                        .get(&provider.value)
+                        .and_then(|p| p.model.clone())
+                })
                 .or_else(|| match &l.provider {
+                    _ if role_head.is_some() => None,
                     Some(named) if *named != provider.value => None,
                     None if !lends_unscoped_model => None,
                     _ => l.model.clone(),
@@ -934,6 +1136,7 @@ pub fn resolve(
             context_window,
             thinking_mode,
             history_file,
+            roles: role_settings,
             tui: TuiSettings {
                 mouse,
                 markdown,
@@ -976,18 +1179,41 @@ pub struct Resolved {
     pub effort_origin: Origin,
 }
 
-/// Each instance that config can resolve as the head target, other
-/// than `head`: the shipped adapters' implicit instances, then the
-/// user file's named instances. Each resolves under the rules of
-/// [`resolve`], as if a `--provider` flag named it. The flags and
-/// variables for the provider and the model take no part, because a
-/// resume adopts these only when none is set. The endpoint flag and
-/// variable take no part either: they point the configured head
-/// elsewhere, and an adopted instance's credential must not follow
-/// them to an endpoint the user named for another instance. A resume
-/// checks an adopted instance with [`instance_problems`].
-pub fn resumable(
-    head: &str,
+/// Instance `name` as config resolves it when the instance is the
+/// head target: its keys, its model, and its effort, under the rules
+/// of [`resolve`], as if a `--provider` flag named it. The flags and
+/// variables for the provider and the model take no part: they name
+/// the configured head. The roles take no part either: a role's
+/// target names its own model. The endpoint flag and variable take no part
+/// either: they point the configured head elsewhere, and another
+/// instance's credential must not follow them to an endpoint the user
+/// named for the head. Check the result with [`instance_problems`].
+pub fn resolve_instance(
+    name: &str,
+    flags: &Flags,
+    env: &dyn Fn(&str) -> Option<String>,
+    project: Option<&Layer>,
+    user: Option<&Layer>,
+) -> Resolved {
+    let env = |variable: &str| match variable {
+        ENV_PROVIDER | ENV_MODEL | ENV_BASE_URL => None,
+        other => env(other),
+    };
+    let mut flags = flags.clone();
+    flags.provider = Some(name.to_string());
+    flags.model = None;
+    flags.base_url = None;
+    resolve_layers(&flags, &env, project, user, false)
+        .0
+        .resolved()
+}
+
+/// Every configured instance, each resolved with
+/// [`resolve_instance`]: the shipped adapters' implicit instances,
+/// then the user file's named instances. A fallback chain, a resume,
+/// and `/model <provider> <model>` can name any of them. The run's
+/// head keeps its own resolution, with the flags.
+pub fn run_instances(
     flags: &Flags,
     env: &dyn Fn(&str) -> Option<String>,
     project: Option<&Layer>,
@@ -997,26 +1223,72 @@ pub fn resumable(
     let names = demerzel_providers::PROVIDER_IDS
         .iter()
         .map(|id| id.to_string())
-        .chain(named)
-        .filter(|name| name != head);
-    let env = |name: &str| match name {
-        ENV_PROVIDER | ENV_MODEL | ENV_BASE_URL => None,
-        other => env(other),
-    };
+        .chain(named);
     let mut out: Vec<Resolved> = Vec::new();
     for name in names {
         // A user table can name a shipped adapter's id.
         if out.iter().any(|resolved| resolved.instance.name == name) {
             continue;
         }
-        let mut flags = flags.clone();
-        flags.provider = Some(name);
-        flags.model = None;
-        flags.base_url = None;
-        let (settings, _) = resolve(&flags, &env, project, user);
-        out.push(settings.resolved());
+        out.push(resolve_instance(&name, flags, env, project, user));
     }
     out
+}
+
+/// The chain of each role as targets, checked against `instances`,
+/// every configured instance from [`run_instances`]. A target on the
+/// head instance takes the head's keys, so the endpoint flag applies
+/// to it as it does to the head. A target without a model takes its
+/// instance's own model. Returns the targets by role name, and the
+/// problems that stop the run: a target on an instance that config
+/// does not define, or one that the boot check refuses.
+pub fn chains(
+    settings: &Settings,
+    instances: &[Resolved],
+) -> (BTreeMap<String, Vec<Target>>, Vec<String>) {
+    let head = settings.instance();
+    let mut out = BTreeMap::new();
+    let mut problems = Vec::new();
+    for (role, chain) in &settings.roles {
+        let mut targets = Vec::with_capacity(chain.value.len());
+        for entry in &chain.value {
+            let Some(own) = instances
+                .iter()
+                .map(|resolved| &resolved.instance)
+                .find(|instance| instance.name == entry.provider)
+            else {
+                problems.push(format!(
+                    "role `{role}` in the {} names provider `{}`, which the config does not \
+                     define: define `[providers.{}]` with a `kind` in the user file, or use \
+                     one of: {}",
+                    chain.origin,
+                    entry.provider,
+                    entry.provider,
+                    demerzel_providers::PROVIDER_IDS.join(", ")
+                ));
+                continue;
+            };
+            let mut check = if own.name == head.name {
+                head.clone()
+            } else {
+                own.clone()
+            };
+            check.model = entry.model.clone().or_else(|| own.model.clone());
+            if let Some(problem) = instance_problems(&check).into_iter().next() {
+                problems.push(format!("role `{role}`: {problem}"));
+                continue;
+            }
+            // The check passed, so the model resolved: named, or
+            // the adapter's default.
+            let model = check
+                .model
+                .or_else(|| demerzel_providers::default_model(&check.kind).map(str::to_string))
+                .unwrap_or_default();
+            targets.push(Target::new(&*entry.provider, model));
+        }
+        out.insert(role.clone(), targets);
+    }
+    (out, problems)
 }
 
 impl Instance {
@@ -2287,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn resumable_instances_keep_their_own_endpoint_under_a_base_url_override() {
+    fn run_instances_keep_their_own_endpoint_under_a_base_url_override() {
         let user = layer(&format!(
             "{LOCAL}\n[providers.hosted]\nkind = \"openai-responses\"\nbase_url = \"https://hosted.example/v1\"\nmodel = \"r1\"\napi_key_env = \"HOSTED_KEY\""
         ));
@@ -2296,12 +2568,20 @@ mod tests {
             ..Flags::default()
         };
         let env = |name: &str| (name == ENV_BASE_URL).then(|| "http://env.example/v1".to_string());
-        let resolved = resumable("local", &flags, &env, None, Some(&user));
-        // The head is not listed; the shipped adapters and the other
-        // named instance are, once each.
+        let resolved = run_instances(&flags, &env, None, Some(&user));
+        // The shipped adapters and the named instances are listed,
+        // once each.
         let names: Vec<&str> = resolved.iter().map(|r| r.instance.name.as_str()).collect();
-        assert!(!names.contains(&"local"), "{names:?}");
         assert_eq!(names.iter().filter(|name| **name == "hosted").count(), 1);
+        // The head instance too, without the endpoint override.
+        let local = resolved
+            .iter()
+            .find(|r| r.instance.name == "local")
+            .unwrap();
+        assert_eq!(
+            local.instance.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
         for id in demerzel_providers::PROVIDER_IDS {
             assert!(names.contains(id), "{names:?}");
         }
@@ -2337,5 +2617,176 @@ mod tests {
         let user = layer("provider = \"anthropic\"");
         let (settings, _) = resolve(&Flags::default(), &|_| None, None, Some(&user));
         assert_eq!(settings.route_origin(), Origin::User);
+    }
+
+    /// The user file of the role tests: two compatible instances and
+    /// a default role over them and the shipped Anthropic adapter.
+    const ROLES: &str = "[providers.local]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:11434/v1\"\n\
+         model = \"qwen3\"\n\
+         [providers.hosted]\n\
+         kind = \"openai-responses\"\n\
+         base_url = \"https://hosted.example/v1\"\n\
+         model = \"r1\"\n\
+         api_key_env = \"HOSTED_KEY\"\n\
+         [roles.default]\n\
+         chain = [\n\
+           { provider = \"anthropic\", model = \"claude-sonnet-5\" },\n\
+           { provider = \"local\" },\n\
+           { provider = \"hosted\", model = \"r2\" },\n\
+         ]\n\
+         [roles.fast]\n\
+         chain = [{ provider = \"local\", model = \"small\" }]";
+
+    /// The chains of `settings` over every instance config resolves.
+    fn resolved_chains(
+        settings: &Settings,
+        flags: &Flags,
+        project: Option<&Layer>,
+        user: Option<&Layer>,
+    ) -> (BTreeMap<String, Vec<Target>>, Vec<String>) {
+        chains(settings, &run_instances(flags, &no_env, project, user))
+    }
+
+    #[test]
+    fn the_default_role_names_the_head_and_each_target_its_model() {
+        let user = layer(ROLES);
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, None, Some(&user));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(settings.provider.value, "anthropic");
+        assert_eq!(settings.provider.origin, Origin::User);
+        assert_eq!(settings.model.value.as_deref(), Some("claude-sonnet-5"));
+        let (chains, problems) = resolved_chains(&settings, &Flags::default(), None, Some(&user));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            chains[DEFAULT_ROLE],
+            [
+                Target::new("anthropic", "claude-sonnet-5"),
+                Target::new("local", "qwen3"),
+                Target::new("hosted", "r2"),
+            ]
+        );
+        assert_eq!(chains["fast"], [Target::new("local", "small")]);
+    }
+
+    #[test]
+    fn a_flag_replaces_the_head_and_the_role_keeps_its_tail() {
+        let user = layer(ROLES);
+        let flags = Flags {
+            provider: Some("local".into()),
+            ..Flags::default()
+        };
+        let (settings, _) = resolve(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.provider.value, "local");
+        assert_eq!(settings.model.value.as_deref(), Some("qwen3"));
+        assert_eq!(settings.route_origin(), Origin::Flag);
+        // `--model` alone keeps the role's head instance.
+        let flags = Flags {
+            model: Some("claude-opus-5".into()),
+            ..Flags::default()
+        };
+        let (settings, _) = resolve(&flags, &no_env, None, Some(&user));
+        assert_eq!(settings.provider.value, "anthropic");
+        assert_eq!(settings.model.value.as_deref(), Some("claude-opus-5"));
+        let (chains, _) = resolved_chains(&settings, &flags, None, Some(&user));
+        assert_eq!(chains[DEFAULT_ROLE].len(), 3);
+    }
+
+    #[test]
+    fn a_role_in_a_file_replaces_its_top_level_provider_with_a_warning() {
+        let user = layer(&format!("provider = \"local\"\nmodel = \"other\"\n{ROLES}"));
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.provider.value, "anthropic");
+        assert_eq!(settings.model.value.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn a_project_role_replaces_the_user_role_over_user_instances_only() {
+        let user = layer(ROLES);
+        let project = layer("[roles.default]\nchain = [{ provider = \"hosted\" }]");
+        let (settings, _) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        assert_eq!(settings.provider.value, "hosted");
+        assert_eq!(settings.roles[DEFAULT_ROLE].origin, Origin::Project);
+        let (chains, problems) =
+            resolved_chains(&settings, &Flags::default(), Some(&project), Some(&user));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(chains[DEFAULT_ROLE], [Target::new("hosted", "r1")]);
+
+        // A project file defines no instance, so its role cannot name
+        // one: the role is ignored, and the user role applies.
+        let (project, _) = Layer::parse(
+            "[providers.evil]\nkind = \"openai-compat\"\nbase_url = \"http://evil.example\"\n\
+             model = \"m\"\n\
+             [roles.default]\nchain = [{ provider = \"local\" }, { provider = \"evil\" }]",
+        )
+        .unwrap();
+        let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), Some(&user));
+        // One for the `kind`, one for the role.
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(settings.provider.value, "anthropic");
+        assert_eq!(settings.roles[DEFAULT_ROLE].origin, Origin::User);
+        let (chains, problems) =
+            resolved_chains(&settings, &Flags::default(), Some(&project), Some(&user));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(chains[DEFAULT_ROLE].iter().all(|t| t.instance != "evil"));
+    }
+
+    #[test]
+    fn a_role_target_that_the_boot_check_refuses_is_a_problem() {
+        // `local` has no model of its own here, and the target names
+        // none.
+        let user = layer(
+            "[providers.local]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+             [roles.fast]\nchain = [{ provider = \"local\" }]",
+        );
+        let (settings, _) = resolve(&Flags::default(), &no_env, None, Some(&user));
+        let (_, problems) = resolved_chains(&settings, &Flags::default(), None, Some(&user));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        // A user role that names an undefined instance stops the run.
+        let user = layer("[roles.default]\nchain = [{ provider = \"ghost\" }]");
+        let (settings, _) = resolve(&Flags::default(), &no_env, None, Some(&user));
+        let (_, problems) = resolved_chains(&settings, &Flags::default(), None, Some(&user));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    #[test]
+    fn a_tail_target_without_a_model_takes_its_instances_own_model() {
+        let user = layer(
+            "[providers.anthropic]\nmodel = \"claude-opus-5\"\n\
+             [roles.default]\nchain = [\n\
+               { provider = \"anthropic\", model = \"claude-sonnet-5\" },\n\
+               { provider = \"anthropic\" },\n\
+             ]",
+        );
+        let (settings, _) = resolve(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.model.value.as_deref(), Some("claude-sonnet-5"));
+        let (chains, _) = resolved_chains(&settings, &Flags::default(), None, Some(&user));
+        assert_eq!(
+            chains[DEFAULT_ROLE][1],
+            Target::new("anthropic", "claude-opus-5")
+        );
+    }
+
+    #[test]
+    fn a_role_needs_a_chain_of_targets_with_providers() {
+        for text in [
+            "[roles.default]",
+            "[roles.default]\nchain = []",
+            "[roles.default]\nchain = \"local\"",
+            "[roles.default]\nchain = [\"local\"]",
+            "[roles.default]\nchain = [{ model = \"m\" }]",
+            "roles = 1",
+        ] {
+            assert!(Layer::parse(text).is_err(), "{text}");
+        }
+        // A target takes no effort: the key warns and the run goes on.
+        let (layer, warnings) = Layer::parse(
+            "[roles.default]\nchain = [{ provider = \"local\", effort = \"low\" }]\nother = 1",
+        )
+        .unwrap();
+        assert_eq!(layer.roles[DEFAULT_ROLE].len(), 1);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 }

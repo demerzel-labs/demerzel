@@ -4,7 +4,7 @@
 //! behavior stay identical. Runtime-built commands can add another
 //! table beside this constant one; dispatch stays the join point.
 
-use demerzel_core::{ApprovalMode, Effort};
+use demerzel_core::{ApprovalMode, Effort, EngineEvent, Route, Target};
 use demerzel_providers::EffortWire;
 
 use crate::SessionSettings;
@@ -25,8 +25,8 @@ const COMMANDS: &[Command] = &[
         help: "list the commands",
     },
     Command {
-        usage: "/model [name]",
-        help: "show or switch the session model",
+        usage: "/model [[provider] model]",
+        help: "show the model chain, or switch the model, or the provider and the model",
     },
     Command {
         usage: "/effort [level]",
@@ -62,9 +62,56 @@ pub(crate) fn specs() -> Vec<demerzel_tui::CommandSpec> {
 /// The note both interfaces show after `/new`.
 pub(crate) const NEW_SESSION_NOTE: &str = "the next prompt starts a fresh session";
 
-/// The note both interfaces show for the current or switched model.
-pub(crate) fn model_note(model: &str) -> String {
-    format!("model: {model}")
+/// The note both interfaces show for the current or switched model:
+/// the head target, then each fallback target of the route.
+pub(crate) fn model_note(route: &Route) -> String {
+    let mut note = format!("model: {}", target_text(&route.head));
+    if !route.tail.is_empty() {
+        note.push_str("\n  falls back to: ");
+        let tail: Vec<String> = route.tail.iter().map(target_text).collect();
+        note.push_str(&tail.join(", then "));
+    }
+    note
+}
+
+/// A target in a note: the model, then its provider instance.
+fn target_text(target: &Target) -> String {
+    format!("{} (provider {})", target.model, target.instance)
+}
+
+/// Watches a turn's events for a fallback: a model call attempt
+/// after the first. Both interfaces show one note per turn for it.
+#[derive(Default)]
+pub(crate) struct FallbackWatch {
+    /// The instance of the call's last attempt, to name the target
+    /// that failed.
+    last: std::sync::Mutex<String>,
+    noted: std::sync::atomic::AtomicBool,
+}
+
+impl FallbackWatch {
+    /// The note for `event`, when it starts the turn's first fallback
+    /// attempt.
+    pub(crate) fn note(&self, event: &EngineEvent<'_>) -> Option<String> {
+        let EngineEvent::ModelStart {
+            provider,
+            model,
+            attempt,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let mut last = self.last.lock().unwrap_or_else(|error| error.into_inner());
+        let failed = std::mem::replace(&mut *last, (*provider).to_string());
+        if *attempt == 0 || self.noted.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        Some(format!(
+            "provider `{failed}` failed; the call falls back to provider `{provider}`, model \
+             {model}. The turn stays on it; DEMERZEL_LOG=warn logs the error."
+        ))
+    }
 }
 
 /// The effort on the full-screen status: the level the requests
@@ -132,8 +179,10 @@ pub(crate) enum Effect {
     NewSession,
     /// Show the open session's id and file.
     Session,
-    /// Switch the session model.
+    /// Switch the head target's model.
     SetModel(String),
+    /// Switch the head target's provider instance and model.
+    SetHead { provider: String, model: String },
     /// Set the reasoning effort for the turns that follow.
     SetEffort(Effort),
     /// Set the approval mode for the turns that follow.
@@ -170,10 +219,14 @@ pub(crate) fn dispatch(
             // Two probes decide the shape; a pasted flood of tokens
             // must not build a vector of itself.
             let mut tokens = args.split_whitespace();
-            match (tokens.next(), tokens.next()) {
-                (None, _) => Effect::Note(model_note(&current.route.head.model)),
-                (Some(model), None) => Effect::SetModel(model.to_string()),
-                _ => Effect::Note("usage: /model [name]".to_string()),
+            match (tokens.next(), tokens.next(), tokens.next()) {
+                (None, ..) => Effect::Note(model_note(&current.route)),
+                (Some(model), None, _) => Effect::SetModel(model.to_string()),
+                (Some(provider), Some(model), None) => Effect::SetHead {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                },
+                _ => Effect::Note("usage: /model [[provider] model]".to_string()),
             }
         }
         "effort" => {
@@ -232,20 +285,22 @@ mod tests {
     fn settings(model: &str, effort: Effort, approval: ApprovalMode) -> SessionSettings {
         SessionSettings {
             route: Route::new(Target::new("openai-codex", model)),
-            route_origin: Origin::Default,
-            effort,
-            effort_origin: Origin::Default,
+            pin: crate::HeadPin::None,
+            effort: Some(effort),
             approval,
         }
     }
 
     /// Dispatch with the head target receiving the session's level.
     fn dispatch(line: &str, current: &SessionSettings) -> Option<Effect> {
-        super::dispatch(line, current, EffortWire::Sent(current.effort))
+        super::dispatch(
+            line,
+            current,
+            EffortWire::Sent(current.effort.unwrap_or(Effort::High)),
+        )
     }
 
     use super::*;
-    use crate::config::Origin;
     use demerzel_core::{Route, Target};
 
     #[test]
@@ -343,15 +398,44 @@ mod tests {
         ) else {
             panic!("expected the current model");
         };
-        assert_eq!(note, "model: current-model");
+        assert!(note.starts_with("model: current-model"), "{note}");
 
         let Some(Effect::Note(note)) = dispatch(
-            "/model a b",
+            "/model a b c",
             &settings("m", Effort::Medium, ApprovalMode::Ask),
         ) else {
             panic!("expected the usage line");
         };
         assert!(note.starts_with("usage:"));
+    }
+
+    #[test]
+    fn model_with_two_tokens_switches_the_provider_and_the_model() {
+        let current = settings("m", Effort::Medium, ApprovalMode::Ask);
+        let Some(Effect::SetHead { provider, model }) = dispatch("/model local qwen3:8b", &current)
+        else {
+            panic!("expected a head switch");
+        };
+        assert_eq!((provider.as_str(), model.as_str()), ("local", "qwen3:8b"));
+        // A model id can hold `/` and `:`; one token stays a model.
+        let Some(Effect::SetModel(model)) = dispatch("/model vendor/model:tag", &current) else {
+            panic!("expected a model switch");
+        };
+        assert_eq!(model, "vendor/model:tag");
+    }
+
+    #[test]
+    fn bare_model_shows_the_fallback_chain() {
+        let mut current = settings("m1", Effort::Medium, ApprovalMode::Ask);
+        current.route.tail.push(Target::new("local", "m2"));
+        let Some(Effect::Note(note)) = dispatch("/model", &current) else {
+            panic!("expected the chain");
+        };
+        assert!(
+            note.contains("m1") && note.contains("openai-codex"),
+            "{note}"
+        );
+        assert!(note.contains("m2") && note.contains("local"), "{note}");
     }
 
     #[test]

@@ -516,7 +516,7 @@ async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_c
     let settings = SessionSettings::from_config(runtime.config());
     assert_eq!(
         runtime.effort_wire(&settings),
-        EffortWire::Omitted(settings.effort)
+        EffortWire::Omitted(runtime.config().effort)
     );
     let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
     let noop = |_: EngineEvent<'_>| {};

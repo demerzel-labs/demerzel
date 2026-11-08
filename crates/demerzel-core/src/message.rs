@@ -105,8 +105,8 @@ impl SealedPayload {
 /// carries no price table.
 ///
 /// The session file's `usage` record flattens these fields beside
-/// its clock, so the names `at` and `duration_ms` are reserved by the
-/// record and cannot be counts.
+/// its target and its clock, so the names `provider`, `model`, `at`,
+/// and `duration_ms` are reserved by the record and cannot be counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {

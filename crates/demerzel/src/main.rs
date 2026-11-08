@@ -352,21 +352,28 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
         None if cli.continue_last => Resume::Latest,
         None => Resume::Fresh,
     };
-    // A resume continues on the session's own target; config
-    // resolves the instances it can name. A fresh run, or one whose
-    // flags name the target, needs none.
-    let flagged = matches!(
-        config.route_origin,
-        config::Origin::Flag | config::Origin::Env
-    );
-    if config.resume != Resume::Fresh && !flagged {
-        config.resumable = config::resumable(
-            &settings.provider.value,
-            &cli.flags(),
-            &|name| std::env::var(name).ok(),
-            project.as_ref(),
-            user.as_ref(),
-        );
+    // Every configured instance resolves: a fallback chain, a resume,
+    // and `/model <provider> <model>` can name any of them. The roles
+    // name only these; any other name stops the run here.
+    let env = |name: &str| std::env::var(name).ok();
+    let instances = config::run_instances(&cli.flags(), &env, project.as_ref(), user.as_ref());
+    let (mut chains, problems) = config::chains(&settings, &instances);
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+    // The run's head keeps its own resolution, with the flags.
+    config.other_instances = instances
+        .into_iter()
+        .filter(|resolved| resolved.instance.name != config.instance.name)
+        .collect();
+    // The default role's first target is the head, unless a flag, a
+    // variable, or a higher file named another; the rest is the tail.
+    // A tail target equal to the head would only repeat its failure.
+    if let Some(mut chain) = chains.remove(config::DEFAULT_ROLE) {
+        chain.remove(0);
+        let head = demerzel_core::Target::new(&*config.instance.name, &*config.model);
+        chain.retain(|target| *target != head);
+        config.tail = chain;
     }
     config.mouse = settings.tui.mouse.value;
     config.markdown = settings.tui.markdown.value;

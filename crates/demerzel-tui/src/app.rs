@@ -93,13 +93,19 @@ struct Progress {
 }
 
 impl Progress {
-    fn write(&self, out: &mut String) {
+    /// The line: the spinner, the time, the stage, and the target the
+    /// model call runs on, as the status names it.
+    fn write(&self, out: &mut String, target: &str) {
         let stage = match &self.stage {
             Stage::Thinking => "thinking",
             Stage::Writing => "writing",
             Stage::Tool(name) => name.as_str(),
         };
         cards::write_progress(out, self.started.elapsed(), stage);
+        if !target.is_empty() {
+            out.push_str(" · ");
+            out.push_str(target);
+        }
     }
 }
 
@@ -927,7 +933,7 @@ impl App {
             Mode::Approval { question, .. } => Some(question.as_str()),
         };
         let progress = progress.as_ref().map(|progress| {
-            progress.write(progress_line);
+            progress.write(progress_line, &status.model);
             progress_line.as_str()
         });
         guard.terminal.draw(|frame| {

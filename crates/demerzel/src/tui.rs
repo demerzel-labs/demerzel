@@ -11,14 +11,14 @@
 use std::path::PathBuf;
 
 use demerzel_core::{
-    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, TurnOutcome,
+    ApprovalAnswer, Approver, BoxFuture, Engine, EngineEvent, EventSink, Target, TurnOutcome,
 };
 use demerzel_tui::{ApprovalChannel, Driver, EventSender, Options, StatusPatch, Submission};
 use serde_json::Value;
 
 use crate::commands::{
-    Effect, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, effort_status, exit_line,
-    model_note, session_note,
+    Effect, FallbackWatch, NEW_SESSION_NOTE, approval_note, dispatch, effort_note, effort_status,
+    exit_line, model_note, session_note,
 };
 use crate::git::git_branch;
 use crate::preview::{ask_preview, run_preview};
@@ -40,9 +40,9 @@ pub async fn run(config: &RunConfig) -> Result<(), RunError> {
         "{} ({mode}) — /help lists the commands; /exit, Ctrl-D, or Ctrl-C twice ends the session",
         config.model
     ));
-    options.model = config.model.clone();
     options.mode = mode;
     let settings = SessionSettings::from_config(config);
+    options.model = target_label(&runtime, &settings.route.head);
     // A compatible endpoint receives no effort until one is set, and
     // an instance with thinking off receives none; the status says so
     // rather than naming a level it does not send.
@@ -116,22 +116,66 @@ struct TuiDriver<'r> {
 /// The engine's event sink: it forwards every display event and
 /// renders the dispatch preview — the edit diff, the bash command —
 /// onto the call's card. The preview is built here, next to the
-/// tools.
-struct PreviewSink {
+/// tools. Each model call attempt puts its target on the status, and
+/// the turn's first fallback shows a notice.
+struct PreviewSink<'a> {
     events: EventSender,
+    runtime: &'a Runtime,
+    settings: &'a SessionSettings,
+    fallback: FallbackWatch,
 }
 
-impl EventSink for PreviewSink {
+impl EventSink for PreviewSink<'_> {
     fn event(&self, event: EngineEvent<'_>) {
-        if let EngineEvent::ToolRun {
-            id, name, input, ..
-        } = &event
-            && let Some(preview) = run_preview(name, input)
-        {
-            self.events.tool_preview(id, preview);
+        if let Some(note) = self.fallback.note(&event) {
+            self.events.notice(note);
+        }
+        match &event {
+            EngineEvent::ToolRun {
+                id, name, input, ..
+            } => {
+                if let Some(preview) = run_preview(name, input) {
+                    self.events.tool_preview(id, preview);
+                }
+            }
+            EngineEvent::ModelStart {
+                provider, model, ..
+            } => {
+                let target = Target::new(*provider, *model);
+                self.events
+                    .status(target_patch(self.runtime, self.settings, &target));
+            }
+            _ => {}
         }
         self.events.event(event);
     }
+}
+
+/// A target as the status names it: the model alone on a shipped
+/// adapter's own instance, where the model names the vendor; the
+/// instance and the model on a named instance.
+fn target_label(runtime: &Runtime, target: &Target) -> String {
+    let implicit = runtime
+        .instance(&target.instance)
+        .is_none_or(|instance| instance.is_implicit());
+    if implicit {
+        target.model.clone()
+    } else {
+        format!("{} {}", target.instance, target.model)
+    }
+}
+
+/// The status patch for `target`: its name, its context window, and
+/// the effort its requests carry. An unknown window takes the share
+/// away.
+fn target_patch(runtime: &Runtime, settings: &SessionSettings, target: &Target) -> StatusPatch {
+    let mut patch = StatusPatch::default();
+    patch.context_window = Some(runtime.context_window(target));
+    patch.model = Some(target_label(runtime, target));
+    patch.effort = Some(effort_status(
+        runtime.effort_wire_for(settings, &target.instance),
+    ));
+    patch
 }
 
 /// The engine's approver over the interface's question channel. A
@@ -151,16 +195,14 @@ impl Approver for TuiApprover {
 }
 
 impl TuiDriver<'_> {
-    /// Show the head target on the status: the model, its context
-    /// window, and the effort its requests carry. An unknown window
-    /// takes the share away.
+    /// Show the head target on the status: the target, its context
+    /// window, and the effort its requests carry.
     fn show_target(&self, events: &EventSender) {
-        let head = &self.settings.route.head;
-        let mut patch = StatusPatch::default();
-        patch.context_window = Some(self.runtime.context_window(head));
-        patch.model = Some(head.model.clone());
-        patch.effort = Some(effort_status(self.runtime.effort_wire(&self.settings)));
-        events.status(patch);
+        events.status(target_patch(
+            self.runtime,
+            &self.settings,
+            &self.settings.route.head,
+        ));
     }
 }
 
@@ -199,7 +241,21 @@ impl Driver for TuiDriver<'_> {
                 }
                 self.settings.set_model(name);
                 self.show_target(&events);
-                return Submission::Note(model_note(&self.settings.route.head.model));
+                return Submission::Note(model_note(&self.settings.route));
+            }
+            Some(Effect::SetHead { provider, model }) => {
+                let next = match self.runtime.switch_head(&self.settings, &provider, &model) {
+                    Ok(next) => next,
+                    Err(error) => return Submission::Error(format!("demerzel: {error}")),
+                };
+                if let Some(engine) = self.engine.as_mut()
+                    && let Err(error) = engine.set_head(next.route.head.clone())
+                {
+                    return Submission::Error(format!("demerzel: {error}"));
+                }
+                self.settings = next;
+                self.show_target(&events);
+                return Submission::Note(model_note(&self.settings.route));
             }
             Some(Effect::SetEffort(effort)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -208,11 +264,10 @@ impl Driver for TuiDriver<'_> {
                     return Submission::Error(format!("demerzel: {error}"));
                 }
                 self.settings.set_effort(effort);
-                let wire = self.runtime.effort_wire(&self.settings);
-                let mut patch = StatusPatch::default();
-                patch.effort = Some(effort_status(wire));
-                events.status(patch);
-                return Submission::Note(effort_note(wire));
+                // The whole head target, not the effort alone: after a
+                // fallback turn the status can name a tail target.
+                self.show_target(&events);
+                return Submission::Note(effort_note(self.runtime.effort_wire(&self.settings)));
             }
             Some(Effect::SetApproval(mode)) => {
                 if let Some(engine) = self.engine.as_mut()
@@ -251,9 +306,7 @@ impl Driver for TuiDriver<'_> {
                 )
             });
             let settings = opened.settings;
-            let adopted = settings.route.head != self.settings.route.head
-                || settings.effort != self.settings.effort
-                || settings.effort_origin != self.settings.effort_origin;
+            let adopted = settings.route.head != self.settings.route.head;
             self.settings = settings;
             self.engine = Some(engine);
             self.opened = Some(id);
@@ -283,6 +336,9 @@ impl Driver for TuiDriver<'_> {
             let engine = self.engine.as_mut().expect("engine opened above");
             let sink = PreviewSink {
                 events: events.clone(),
+                runtime: self.runtime,
+                settings: &self.settings,
+                fallback: FallbackWatch::default(),
             };
             let mut approver = TuiApprover { channel: approvals };
             match engine.user_turn(line, &sink, &mut approver).await {

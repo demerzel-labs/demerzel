@@ -61,54 +61,65 @@ pub enum Resume {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionSettings {
-    /// The route of the model calls. Its head target names the
-    /// instance and the model.
+    /// The route of the model calls: the head target, then the
+    /// fallback targets of the default role.
     pub route: Route,
-    /// Which layer named the head target. A resume adopts the
-    /// session's own target, except that a flag or a variable keeps
-    /// the whole head and `/model` keeps the model.
-    pub route_origin: Origin,
-    pub effort: Effort,
-    /// Which layer set the effort; `Default` when none did. For an
-    /// adapter without implicit effort, a file counts only through the
-    /// instance's own `[providers.<name>]` table. Such an adapter
-    /// receives only a set level; the others receive the default too.
-    /// See [`Runtime::effort_wire`]. A resume onto another instance
-    /// takes that instance's configured effort, unless `/effort` set
-    /// one.
-    pub effort_origin: Origin,
+    /// What a resume keeps of `route.head`; see [`HeadPin`].
+    pub pin: HeadPin,
+    /// The level `/effort` set for the session. Every target of the
+    /// route receives it. `None`: each target receives the level that
+    /// config gives its instance, under its adapter's rule; see
+    /// [`Runtime::effort_wire_for`].
+    pub effort: Option<Effort>,
     pub approval: ApprovalMode,
+}
+
+/// What a resume keeps of the settings' head target. A resume
+/// adopts the head target of the session's last meta record, as far
+/// as the pin allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeadPin {
+    /// Nothing: config named the head. A resume adopts the session's
+    /// instance and model.
+    None,
+    /// The model: `/model <model>` named it. A resume adopts the
+    /// session's instance and keeps the model.
+    Model,
+    /// The whole head: a flag or a variable, or
+    /// `/model <provider> <model>`, named it. A resume keeps it.
+    Target,
 }
 
 impl SessionSettings {
     /// The settings a run starts with.
     pub fn from_config(config: &RunConfig) -> Self {
+        let mut route = Route::new(Target::new(&*config.instance.name, &*config.model));
+        route.tail.clone_from(&config.tail);
+        let pin = match config.route_origin {
+            Origin::Flag | Origin::Env => HeadPin::Target,
+            _ => HeadPin::None,
+        };
         Self {
-            route: Route::new(Target::new(&*config.instance.name, &*config.model)),
-            route_origin: config.route_origin,
-            effort: config.effort,
-            effort_origin: config.effort_origin,
+            route,
+            pin,
+            effort: None,
             approval: config.approval,
         }
-    }
-
-    /// Whether a layer or `/effort` set the effort.
-    pub fn effort_set(&self) -> bool {
-        self.effort_origin != Origin::Default
     }
 
     /// `/model`: switch the head target's model.
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.route.head.model = model.into();
-        if !matches!(self.route_origin, Origin::Flag | Origin::Env) {
-            self.route_origin = Origin::Command;
+        if self.pin == HeadPin::None {
+            self.pin = HeadPin::Model;
         }
     }
 
-    /// `/effort`: set the level for the turns that follow.
+    /// `/effort`: set the level for the turns that follow, on every
+    /// target.
     pub fn set_effort(&mut self, effort: Effort) {
-        self.effort = effort;
-        self.effort_origin = Origin::Command;
+        self.effort = Some(effort);
     }
 }
 
@@ -137,14 +148,19 @@ pub struct RunConfig {
     pub instance: config::Instance,
     /// The head model.
     pub model: String,
+    /// The fallback targets of the default role, after the head.
+    /// [`Runtime::new`] refuses a target on an instance the run does
+    /// not know.
+    pub tail: Vec<Target>,
     /// Which layer named the head target; see
     /// [`config::Settings::route_origin`]. A flag or a variable wins
     /// over a resumed session's own target.
     pub route_origin: Origin,
-    /// The other instances a resume can adopt, resolved from config;
-    /// see [`config::resumable`]. Empty, a resume adopts only the
-    /// session's model, and only on the head instance.
-    pub resumable: Vec<config::Resolved>,
+    /// Every configured instance other than the head, resolved; see
+    /// [`config::run_instances`]. A fallback target, a resume, and
+    /// `/model <provider> <model>` can name only the head instance
+    /// and these.
+    pub other_instances: Vec<config::Resolved>,
     pub approval: ApprovalMode,
     /// Which session the first prompt opens.
     pub resume: Resume,
@@ -152,9 +168,10 @@ pub struct RunConfig {
     pub data_root: Option<PathBuf>,
     /// The session's reasoning effort.
     pub effort: Effort,
-    /// The layer that set `effort`; `Default` when none did. See
-    /// [`SessionSettings::effort_origin`] for the adapter rule. Unset,
-    /// a compatible endpoint receives no effort field.
+    /// The layer that set `effort`; `Default` when none did. An
+    /// adapter without implicit effort receives only a set level, and
+    /// a file sets one for it only through the instance's own
+    /// `[providers.<name>]` table.
     pub effort_origin: Origin,
     /// Model calls one user turn may make before the loop stops.
     pub max_model_calls: u32,
@@ -183,8 +200,9 @@ impl RunConfig {
             project_dir,
             instance: config::Instance::new(config::DEFAULT_PROVIDER, config::DEFAULT_PROVIDER),
             model: openai_codex::DEFAULT_MODEL.to_string(),
+            tail: Vec::new(),
             route_origin: Origin::Default,
-            resumable: Vec::new(),
+            other_instances: Vec::new(),
             approval: ApprovalMode::ReadOnly,
             resume: Resume::Fresh,
             data_root: None,
@@ -248,10 +266,10 @@ pub struct Opened<'r> {
     pub notice: Option<String>,
 }
 
-/// The run's provider instances: the configured head first, then the
-/// instances a resume can adopt. Each has one lazy provider slot, so
-/// a provider lives as long as the runtime and a failed build retries
-/// at the next call.
+/// The run's provider instances: the configured head first, then
+/// every other configured instance. Each has one lazy provider slot,
+/// so a provider lives as long as the runtime and a failed build
+/// retries at the next call.
 struct Providers {
     entries: Vec<Entry>,
     auth: Option<AuthPaths>,
@@ -287,7 +305,26 @@ impl Providers {
     }
 }
 
+impl Entry {
+    /// What requests to this instance carry when the session sets no
+    /// level: the level config gives the instance, under the
+    /// instance's adapter rule.
+    fn effort_wire(&self) -> EffortWire {
+        let resolved = &self.resolved;
+        demerzel_providers::effort_wire(
+            &resolved.instance.kind,
+            resolved.instance.thinking_mode,
+            resolved.effort,
+            resolved.effort_origin != Origin::Default,
+        )
+    }
+}
+
 impl ProviderHost for Providers {
+    /// The boot check refuses a route target or a `/model` instance
+    /// that the run does not know, so a lookup finds every name the
+    /// engine asks for. A build that fails on its config, such as a
+    /// missing endpoint, maps to an invalid request.
     fn provider(&self, instance: &str) -> Result<&dyn Provider, ProviderError> {
         self.get(instance).map_err(|error| match error {
             RunError::Auth(error) => error,
@@ -299,14 +336,20 @@ impl ProviderHost for Providers {
         self.entry(instance)
             .map(|entry| entry.resolved.instance.kind.as_str())
     }
+
+    fn effort(&self, instance: &str) -> Option<demerzel_core::Effort> {
+        self.entry(instance)
+            .and_then(|entry| entry.effort_wire().request())
+    }
 }
 
 impl Runtime {
     /// Build the long-lived pieces: the session store, the tool
     /// registries, and the checks that stop a run at boot — a
     /// `--session <id>` with no file, a provider id this build does
-    /// not have. The credentials resolve at the first turn; see
-    /// `Runtime::provider`.
+    /// not have, a fallback target on an instance the run does not
+    /// know. The credentials resolve at the first turn; see
+    /// `Runtime::check_credentials`.
     pub fn new(mut config: RunConfig) -> Result<Self, RunError> {
         let store = match &config.data_root {
             Some(root) => SessionStore::at(root),
@@ -339,7 +382,7 @@ impl Runtime {
             effort_origin: config.effort_origin,
         };
         let entries = std::iter::once(head)
-            .chain(std::mem::take(&mut config.resumable))
+            .chain(std::mem::take(&mut config.other_instances))
             .map(|resolved| Entry {
                 resolved,
                 slot: OnceLock::new(),
@@ -349,6 +392,21 @@ impl Runtime {
             entries,
             auth: config.auth.clone(),
         };
+        // A fallback target on an instance the run does not know stops
+        // the run here, so the host never meets an unknown name.
+        for target in &config.tail {
+            let Some(entry) = providers.entry(&target.instance) else {
+                return Err(RunError::Config(format!(
+                    "the fallback chain names provider `{}`, which the config does not define",
+                    target.instance
+                )));
+            };
+            let mut check = entry.resolved.instance.clone();
+            check.model = Some(target.model.clone());
+            if let Some(problem) = config::instance_problems(&check).into_iter().next() {
+                return Err(RunError::Config(problem));
+            }
+        }
 
         Ok(Self {
             config,
@@ -363,59 +421,91 @@ impl Runtime {
         &self.config
     }
 
-    /// The provider of the run's head instance, built on the first
-    /// call. Credentials resolve here, so a missing login fails with
-    /// a clear message. The plain interface calls this at boot, and
-    /// [`Runtime::open`] for the head target of the session it opens,
-    /// so a missing login stops both before a request goes out or a
-    /// record is written.
-    pub(crate) fn provider(&self) -> Result<&dyn Provider, RunError> {
-        self.providers.get(&self.config.instance.name)
+    /// Check that a target of `route` builds its provider: the head,
+    /// or a fallback target. Credentials resolve here, so a missing
+    /// key fails with a clear message: the head's error when no
+    /// target builds. A build does not prove a login: an adapter
+    /// whose login refreshes at the first request builds without one,
+    /// and that request names the failure. The plain interface checks
+    /// the configured route at boot, and [`Runtime::open`] the route
+    /// of the session it opens, before a request goes out or a
+    /// record is written. A tail target builds only when the head
+    /// does not.
+    pub(crate) fn check_credentials(&self, route: &Route) -> Result<(), RunError> {
+        let Err(error) = self.providers.get(&route.head.instance) else {
+            return Ok(());
+        };
+        let tail_runs = route
+            .tail
+            .iter()
+            .any(|target| self.providers.get(&target.instance).is_ok());
+        if tail_runs {
+            log::warn!(
+                "provider `{}` does not build: {error}; the calls fall back",
+                route.head.instance
+            );
+            return Ok(());
+        }
+        Err(error)
     }
 
     /// The first-run screen's text when no credential resolves for
-    /// the session's provider; `None` when one does. The decision
-    /// comes first and the text second: a run that can authenticate
-    /// pays the probe alone, and an Anthropic session with its key in
-    /// the environment opens no store at all. The state lines come
-    /// from the read-only probe `doctor` runs, with its wording: the
-    /// store stays unwritten, and a Codex CLI login that the first
-    /// turn would import counts as a credential. A store that does
-    /// not open is a state to show, not a stop: the first turn fails
-    /// on it with the same error.
+    /// any target of the configured route; `None` when one does. The
+    /// decision comes first and the text second: a run that can
+    /// authenticate pays the probe alone, and an Anthropic session
+    /// with its key in the environment opens no store at all. The
+    /// state lines come from the read-only probe `doctor` runs, with
+    /// its wording: the store stays unwritten, and a Codex CLI login
+    /// that the first turn would import counts as a credential. A
+    /// store that does not open is a state to show, not a stop: the
+    /// first turn fails on it with the same error. A resumed session
+    /// can continue on another instance; [`Runtime::open`] checks
+    /// that one and names it.
     pub fn first_run(&self) -> Option<FirstRun> {
-        let instance = &self.config.instance;
-        // An instance with its own key variable, and an adapter
-        // without credentials of its own, have no login to offer: the
-        // first turn names the missing variable.
-        let own_credentials = demerzel_providers::adapter_rules(&instance.kind)
-            .is_some_and(|rules| rules.own_credentials);
-        if instance.api_key_env.is_some() || !own_credentials {
-            return None;
-        }
         let env_key = std::env::var(anthropic::ENV_API_KEY)
             .ok()
             .filter(|key| !key.is_empty());
-        let provider = instance.kind.as_str();
-        // The environment wins and skips the store, the order the
-        // provider build applies.
-        if provider == anthropic::PROVIDER_ID && env_key.is_some() {
-            return None;
-        }
-        let store = open_store(self.config.auth.as_ref());
-        let resolves = match (provider, &store) {
-            (_, Err(_)) => false,
-            (openai_codex::PROVIDER_ID, Ok(store)) => {
-                store.probe().is_some_and(|probe| probe.source.usable())
+        let mut store = None;
+        let route = SessionSettings::from_config(&self.config).route;
+        for target in route.targets() {
+            let instance = self.instance(&target.instance)?;
+            // An instance with its own key variable runs when the
+            // variable holds a key; unset, it cannot run, and no login
+            // helps it. An adapter without credentials of its own can
+            // run without a key.
+            if let Some(variable) = &instance.api_key_env {
+                if std::env::var(variable).is_ok_and(|key| !key.is_empty()) {
+                    return None;
+                }
+                continue;
             }
-            (anthropic::PROVIDER_ID, Ok(store)) => store.anthropic_api_key().is_some(),
-            // The boot check refuses any other id; the build's error
-            // says so at the first turn.
-            _ => return None,
-        };
-        if resolves {
-            return None;
+            let own_credentials = demerzel_providers::adapter_rules(&instance.kind)
+                .is_some_and(|rules| rules.own_credentials);
+            if !own_credentials {
+                return None;
+            }
+            // The environment wins and skips the store, the order the
+            // provider build applies.
+            if instance.kind == anthropic::PROVIDER_ID && env_key.is_some() {
+                return None;
+            }
+            let store = store.get_or_insert_with(|| open_store(self.config.auth.as_ref()));
+            let resolves = match (instance.kind.as_str(), &*store) {
+                (_, Err(_)) => false,
+                (openai_codex::PROVIDER_ID, Ok(store)) => {
+                    store.probe().is_some_and(|probe| probe.source.usable())
+                }
+                (anthropic::PROVIDER_ID, Ok(store)) => store.anthropic_api_key().is_some(),
+                // The boot check refuses any other id; the build's
+                // error says so at the first turn.
+                _ => return None,
+            };
+            if resolves {
+                return None;
+            }
         }
+        let provider = self.config.instance.kind.as_str();
+        let store = store.unwrap_or_else(|| open_store(self.config.auth.as_ref()));
         let credentials = match &store {
             Ok(store) => credential_states(store, env_key.as_deref())
                 .map(|state| format!("{}: {}", state.provider, state.state))
@@ -451,16 +541,16 @@ impl Runtime {
     /// or the open fails.
     ///
     /// A resume continues on the session's own head target: the
-    /// instance and the model of its last meta record. A flag or a
-    /// variable keeps the whole head of `settings`, and `/model` keeps
-    /// its model (see [`SessionSettings::route_origin`]). When config
+    /// instance and the model of its last meta record, as far as
+    /// [`SessionSettings::pin`] allows. When config
     /// can no longer run the recorded instance, the session continues
     /// on the head of `settings` and [`Opened::notice`] says so.
     /// [`Opened::settings`] holds the target the session runs on; a
     /// failed open leaves the caller's settings as they were.
     ///
-    /// A session opens only with a provider to run it: a missing
-    /// login fails here, before a record is written. A resume appends
+    /// A session opens only when a target of its route builds its
+    /// provider: a missing key on every target fails here, before a
+    /// record is written. A resume appends
     /// a fresh meta record, so the file names the target that
     /// continues it.
     pub fn open(
@@ -509,10 +599,11 @@ impl Runtime {
                 Err(why) => notice = Some(fallback_notice(session.id(), meta, &settings, &why)),
             }
         }
-        // The credentials of the target the session runs on. A
-        // missing login on an adopted instance names the session's
-        // instance, so the user knows why this instance runs.
-        if let Err(error) = self.providers.get(&settings.route.head.instance) {
+        // The credentials of the route the session runs on: the head
+        // target, or a fallback target. A missing login on an adopted
+        // instance names the session's instance, so the user knows why
+        // this instance runs.
+        if let Err(error) = self.check_credentials(&settings.route) {
             return Err(match adopted {
                 Some((id, instance)) => RunError::Config(format!(
                     "session {id} ran on provider `{instance}`: {error}. Pass --provider to \
@@ -536,7 +627,10 @@ impl Runtime {
         }
 
         let mut engine_config = EngineConfig::new(settings.route.clone());
-        engine_config.effort = self.effort_wire(&settings).request();
+        // A level from `/effort` reaches every target. Otherwise each
+        // target gets the level config gives its instance, from the
+        // host.
+        engine_config.effort = settings.effort;
         engine_config.max_model_calls = self.config.max_model_calls;
         let mut parts = EngineParts::new(
             &self.providers,
@@ -556,17 +650,15 @@ impl Runtime {
     }
 
     /// Adopt the head target that a resumed session's last meta
-    /// record names, as far as `settings.route_origin` allows: a flag
-    /// or a variable keeps the whole head, and `/model` keeps the
-    /// model. `Ok(true)` when the open adopted another instance. A
-    /// switch to another instance takes that instance's configured
-    /// effort, unless `/effort` set one. `Err` says why config can no
-    /// longer run the recorded instance.
+    /// record names, as far as `settings.pin` allows. `Ok(true)` when
+    /// the open adopted another instance; its requests then carry the
+    /// effort config gives it, unless `/effort` set one. `Err` says
+    /// why config can no longer run the recorded instance.
     fn adopt(&self, meta: &SessionMeta, settings: &mut SessionSettings) -> Result<bool, String> {
-        let keep_model = match settings.route_origin {
-            Origin::Flag | Origin::Env => return Ok(false),
-            Origin::Command => true,
-            _ => false,
+        let keep_model = match settings.pin {
+            HeadPin::Target => return Ok(false),
+            HeadPin::Model => true,
+            HeadPin::None => false,
         };
         let head = &settings.route.head;
         let model = if keep_model { &head.model } else { &meta.model };
@@ -596,17 +688,13 @@ impl Runtime {
             return Err(format!("The config cannot run it: {problem}."));
         }
         let other_instance = meta.provider != head.instance;
-        if other_instance && settings.effort_origin != Origin::Command {
-            settings.effort = entry.resolved.effort;
-            settings.effort_origin = entry.resolved.effort_origin;
-        }
         settings.route.head = Target::new(&*meta.provider, model.clone());
         Ok(other_instance)
     }
 
     /// The instance keys of `instance`; `None` for an instance this
     /// run does not know.
-    fn instance(&self, instance: &str) -> Option<&config::Instance> {
+    pub(crate) fn instance(&self, instance: &str) -> Option<&config::Instance> {
         self.providers
             .entry(instance)
             .map(|entry| &entry.resolved.instance)
@@ -617,13 +705,66 @@ impl Runtime {
     /// `/effort` note. The rule follows the head target's adapter
     /// and its `thinking` key.
     pub fn effort_wire(&self, settings: &SessionSettings) -> EffortWire {
-        let instance = self.instance(&settings.route.head.instance);
-        demerzel_providers::effort_wire(
-            instance.map_or("", |instance| instance.kind.as_str()),
-            instance.and_then(|instance| instance.thinking_mode),
-            settings.effort,
-            settings.effort_set(),
-        )
+        self.effort_wire_for(settings, &settings.route.head.instance)
+    }
+
+    /// What the requests to `instance` carry in a session with
+    /// `settings`: the level `/effort` set, else the level config
+    /// gives the instance, each under the instance's adapter rule.
+    /// Each attempt of a fallback chain follows the rule of its own
+    /// target, as the engine does through [`ProviderHost::effort`].
+    pub fn effort_wire_for(&self, settings: &SessionSettings, instance: &str) -> EffortWire {
+        let Some(entry) = self.providers.entry(instance) else {
+            // The boot check and `/model` refuse an unknown instance.
+            return EffortWire::Default;
+        };
+        match settings.effort {
+            Some(effort) => demerzel_providers::effort_wire(
+                &entry.resolved.instance.kind,
+                entry.resolved.instance.thinking_mode,
+                effort,
+                true,
+            ),
+            None => entry.effort_wire(),
+        }
+    }
+
+    /// `/model <provider> <model>`: `settings` with the head target
+    /// on instance `instance` and model `model`. The tail stays. The
+    /// requests to another instance carry the effort config gives it,
+    /// unless `/effort` set one, as after a resume. `Err` says why
+    /// the run cannot switch: an instance config does not define, or
+    /// one the boot check refuses with this model. Credentials
+    /// resolve at the next model call, where a missing login falls
+    /// back.
+    pub fn switch_head(
+        &self,
+        settings: &SessionSettings,
+        instance: &str,
+        model: &str,
+    ) -> Result<SessionSettings, String> {
+        let Some(entry) = self.providers.entry(instance) else {
+            let mut known: Vec<&str> = self
+                .providers
+                .entries
+                .iter()
+                .map(|entry| entry.resolved.instance.name.as_str())
+                .collect();
+            known.sort_unstable();
+            return Err(format!(
+                "the config does not define provider `{instance}`; the run knows: {}",
+                known.join(", ")
+            ));
+        };
+        let mut check = entry.resolved.instance.clone();
+        check.model = Some(model.to_string());
+        if let Some(problem) = config::instance_problems(&check).into_iter().next() {
+            return Err(problem);
+        }
+        let mut next = settings.clone();
+        next.route.head = Target::new(instance, model);
+        next.pin = HeadPin::Target;
+        Ok(next)
     }
 
     /// What a meta record names for this run and these settings.

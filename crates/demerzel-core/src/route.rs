@@ -2,11 +2,12 @@
 //! maps an instance name to its provider.
 //!
 //! A target names a provider instance and a model. The route holds the
-//! targets of the main loop; the engine reads the head target at each
-//! model call and asks the [`ProviderHost`] for its provider, so the
-//! capabilities and the adapter come from the target it calls.
+//! targets of the main loop: the head, then the fallback chain. The
+//! engine tries them in order, as [`Route`] describes, and asks the
+//! [`ProviderHost`] for each one's provider, so the capabilities, the
+//! adapter, and the effort come from the target it calls.
 
-use crate::provider::{Provider, ProviderError};
+use crate::provider::{Effort, Provider, ProviderError};
 
 /// One model target: a provider instance and the model it serves.
 /// Non-exhaustive: build one with [`Target::new`].
@@ -29,19 +30,35 @@ impl Target {
     }
 }
 
-/// The targets of the main loop's model calls. The head target serves
-/// every call. Non-exhaustive: build one with [`Route::new`], so a
-/// fallback chain behind the head stays additive.
+/// The targets of the main loop's model calls: the head, then the
+/// tail. A turn's first model call tries the head first. A failure
+/// that another endpoint can avoid, before the first stream event
+/// reaches the screen, moves the call to the next target, and the
+/// turn's later calls start at the target that answered. The engine
+/// names the failures that move a call. Non-exhaustive: build one
+/// with [`Route::new`] and set the tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
+    /// The first target of each model call. The meta records name it.
     pub head: Target,
+    /// The fallback targets, in order.
+    pub tail: Vec<Target>,
 }
 
 impl Route {
     /// A route with `head` alone.
     pub fn new(head: Target) -> Self {
-        Self { head }
+        Self {
+            head,
+            tail: Vec::new(),
+        }
+    }
+
+    /// Every target in the order a model call tries them: the head,
+    /// then the tail.
+    pub fn targets(&self) -> impl Iterator<Item = &Target> {
+        std::iter::once(&self.head).chain(&self.tail)
     }
 }
 
@@ -59,6 +76,15 @@ pub trait ProviderHost: Send + Sync {
     /// credential resolves. `None` for an instance the host does not
     /// know.
     fn kind(&self, instance: &str) -> Option<&str>;
+
+    /// The reasoning effort that requests to `instance` carry when
+    /// the session sets no level of its own: the level config gives
+    /// the instance, or `None` for the provider's default. The
+    /// default implementation sends none.
+    fn effort(&self, instance: &str) -> Option<Effort> {
+        let _ = instance;
+        None
+    }
 }
 
 /// A host over one provider that serves every instance name: the host
