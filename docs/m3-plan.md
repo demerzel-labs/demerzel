@@ -1650,8 +1650,15 @@ for judgments. Letters keep the later step numbers stable.
     `dmz login` stored a key for an `openai-compat` and an
     `openai-responses` instance after a 200 reply from `/v1/models`.
     One-shot turns on both instances completed. No log or session file
-    held the key. No live `anthropic` check ran: the stored test key
-    returns 401 since 2026-09-26.
+    held the key. No live `anthropic` check ran then: the stored test
+    key returned 401 from 2026-09-26.
+  - Live `anthropic` receipt, 2026-11-08, at `424c31b`: a
+    `claude-off` instance with `thinking = "off"` and
+    `claude-haiku-4-5` completed a tool turn and a turn after
+    `/effort low`. Each request sent `thinking: {"type": "disabled"}`
+    and no `output_config.effort`. The status showed `effort not
+    sent`, and the `/effort` note said that the instance omits the
+    level.
   - Crate API: `demerzel_providers::ThinkingMode`;
     `AdapterRules::thinking_switch`; `pub mod endpoint` with
     `verify_key` and `KeyCheck`; `auth::StoredKey`, and the
@@ -1756,6 +1763,20 @@ for judgments. Letters keep the later step numbers stable.
   - Measure: the turn bench against `main` on the same machine moved
     the turns by 0% to -6%. The bench has no case with a long
     reasoning history.
+  - Live receipt, 2026-11-08: the `anthropic` adapter at `424c31b`,
+    with a key from `dmz login anthropic`, in the full-screen
+    interface:
+    - `claude-sonnet-5` wrote two signed thinking blocks in a tool
+      turn and replayed them on later turns.
+    - After `/model claude-opus-5`, the request carried no thinking
+      block. After the switch back, `claude-sonnet-5` received its
+      three blocks again.
+    - A `-c` resume after a config change to `claude-opus-5`
+      continued on `claude-sonnet-5` and replayed the three blocks.
+      The status changed to the session's model, and the prefix
+      cache served 2,571 of 2,593 input tokens.
+    - The session file bound each payload to `anthropic` and
+      `claude-sonnet-5`. No log or session file held the key.
   - Crate API: `demerzel_core::{Route, Target, ProviderHost,
     SingleProvider, EngineParts}`; `Engine::new(EngineParts)` replaces
     `Engine::new` and `Engine::with_history`; `EngineConfig::new(Route)`;
