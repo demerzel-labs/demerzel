@@ -10,17 +10,18 @@ ordered, verifiable steps. It follows the shape of
 ## Next-session handoff
 
 **Checked 2026-11-08:** M0 through M2.5 are complete, with both close-outs.
-M3 steps 1 to 5 are on `main`: this plan, `openai-compat` with named
+M3 steps 1 to 6 are on `main`: this plan, `openai-compat` with named
 instances (`f4b7900`), `openai-responses` (`d9e51e8`), instance
-login with the thinking key (`3e6a935`), and one runtime call with
-model identity. Step 3's hosted receipt is pending,
+login with the thinking key (`3e6a935`), one runtime call with
+model identity (`424c31b`), and roles with fallback chains
+(`88cb35e`). Step 3's hosted receipt is pending,
 because no OpenAI or xAI API key is available. See the step's build
 notes.
 
 Start the next work in this order:
 
-1. Build roles and fallback chains as step 6. Read the
-   **From step 5** notes in its block first.
+1. Build prompt composition and instruction files as step 7. Read
+   the **From step 6** notes in its block first.
 2. Record the step 3 hosted receipt when a key is available. The step's
    build notes list the three runs that it covers. Exit criterion 1
    needs this receipt, so it must land before the M3 close-out.
@@ -60,8 +61,9 @@ step. Do not fold them into a step without a decision in this document.
 | 3. General Responses API adapter | Built: `d9e51e8`. The hosted receipt is pending. |
 | 4. Instance login and the thinking key | Done on 2026-10-02, with a local login receipt |
 | 5. One runtime call and model identity | Done on 2026-11-08, with a local dogfood receipt |
-| 6. Roles and fallback chains | Next |
-| 7 to 19, with 8a to 8c | Not started |
+| 6. Roles and fallback chains | Done on 2026-11-08: `88cb35e`, with a local dogfood receipt |
+| 7. Prompt composition and instruction files | Next |
+| 8 to 19, with 8a to 8c | Not started |
 
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
@@ -467,7 +469,9 @@ The close-out checks these boundaries and the current upstream contracts.
 ### Model routing: roles, chains, and session identity
 
 A role names a chain of targets. Each target is an instance name and an
-optional model. The engine tries the chain in order at each model call.
+optional model. A turn's first model call tries the chain in order.
+After a fallback, the turn's later calls start at the target that
+answered; the next turn tries the head again (step 6 build notes).
 
 ```toml
 [roles.default]
@@ -483,13 +487,17 @@ chain = [{ provider = "local" }]
 Rules:
 
 - `default` is the role of the main loop. Subagents name other roles.
-  A role that names an unknown instance stops the run at boot.
-- A target carries no effort. The session effort applies to every
-  target, under the existing precedence and trust rules. A user who
-  wants a low-effort variant defines a second instance.
+  A user-file role that names an unknown instance stops the run at
+  boot.
+- A target carries no effort. Each attempt carries the level config
+  gives its own instance, under the existing precedence and trust
+  rules. A level from `/effort` reaches every target. A user who wants
+  a low-effort variant defines a second instance.
 - Trust: a project file can define a role only over instances the user
-  file or the shipped defaults define. It cannot raise cost through a
-  role, because a target carries no effort and no limit.
+  file or the shipped defaults define. The run ignores a project role
+  that names another instance, with a warning. A project file cannot
+  raise cost through a role, because a target carries no effort and no
+  limit.
 - The top-level `provider` and `model` keys define the head target of
   `default` when no `[roles.default]` table exists. A `--provider` or
   `--model` flag, or its variable, replaces the head target and keeps
@@ -502,9 +510,9 @@ Rules:
   invalid-request error after the adapter's own retries. A failure
   after a delta reached the screen surfaces as today. Falling back then
   would repeat visible text.
-- The engine emits `ModelStart { provider, model }` once per attempt,
-  before the call, so the progress line and the status name the target
-  in use. The `usage` record gains `provider` and `model`, optional, so
+- The engine emits `ModelStart { provider, model, attempt }` once per
+  attempt, before the call, so the progress line and the status name
+  the target in use. `attempt` counts from 0 within the call. The `usage` record gains `provider` and `model`, optional, so
   the file names the target that answered each call. The `meta` record
   keeps the head target.
 - The engine reads capabilities from the target it is about to call,
@@ -1323,7 +1331,7 @@ contract.
 | Family | Proposed growth |
 |---|---|
 | Provider trait | The methods are unchanged: `id`, `capabilities`, `stream`. Step 19 removes each `Capabilities` field without a consumer; the struct stays. That is a breaking change to a public type in the provider contract. Step 8a adds the `Judge` trait beside it, with `id` and `ask`. The judge is a second model contract; step 8a adds it to the `AGENTS.md` contract list. |
-| Engine events | `ModelStart { provider, model }` (step 6); `Judgment { call_id, source, action, text }` (8b); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
+| Engine events | `ModelStart { provider, model, attempt }` (step 6); `Judgment { call_id, source, action, text }` (8b); `AgentStart { id, name }` and `AgentEnd { id }` (step 17). |
 | Tool names and schemas | `bash` gains `background` (step 9); new tools `task_output`, `task_stop` (9), `skill` (10), `memory_save`, `memory_search`, `memory_forget` (13), `profile_propose` (14), `search_tools` and `<server>__<tool>` (16), `agent` and `submit_result` (17). |
 | Config keys | `providers.<name>.kind`, `.api_key_env`, and instance names as `provider` values (2); `kind = "openai-responses"` as a new value (3); `.thinking` (4); `[roles.<name>] chain` (6); `[prompt] base_file` (7); `kind = "typesafe"` as a new value, `[judgments] instance`, `checks` with `off` and `log`, `max_calls` (8a); the `warn`, `note`, and `act` actions and `[[judgments.rules]] event`, `tool`, `ask`, `threshold`, `action`, `reason` (8b); `openai-compat` instances as `judgments.instance` (8c); `discovery` (12); `[memory] enabled`, `recall_tokens` (13); `[[hooks]] event`, `tool`, `run`, `timeout_seconds` (15); `[mcp.<name>] command`, `args`, `env`, `always` (16); `[subagents] max_model_calls`, `timeout_seconds` (17). The environment gains `DEMERZEL_EVAL_BANK` (8), a variable and not a key, like `DEMERZEL_LOG`. |
 | Session file | `meta.provider` redefined as the instance name, `meta.kind`, and optional `SealedPayload.model` and `.instance` added; `SealedPayload` becomes non-exhaustive (2); shipped adapters populate payload identity (5); `usage.provider`, `usage.model` (6); the `judgment` record (8a); the `answer` value `judge` (8b); the `recall` record (13); the `hook` record and the `answer` value `hook` (15); `meta.parent` and the `agent_child` record (17); `meta.prompt_hash`, `meta.tools_hash`, and the `tool_set` record (18). The schema version stays 1. |
@@ -1832,6 +1840,58 @@ for judgments. Letters keep the later step numbers stable.
   A cross-protocol chain runs through the same tools and approval policy.
 - **Done when:** exit criterion 2 holds.
 - **Measure:** the turn bench stays flat: one route lookup per call.
+- **Build notes (2026-11-08):**
+  - The chain advances on an authentication, network, server,
+    rate-limit, or invalid-request failure after the adapter's retries,
+    and only while no event reached the sink. A protocol failure ends
+    the call. A failed provider build is a failed attempt.
+  - Deviation from the design text: after a fallback, the turn's later
+    calls start at the target that answered. The performance review
+    showed that a dead head otherwise pays its retry budget on every
+    tool round: 3.5 s or more per call on a 5xx head, minutes on a 429
+    head. A call skips a target that it already tried, and the boot
+    drops a tail target equal to the head.
+  - Effort: `SessionSettings.effort` holds only the `/effort`
+    override. Each instance's configured level comes from the host
+    (`ProviderHost::effort`). The request, the status, `/effort`,
+    `doctor`, and `meta.effort` read the same rule.
+  - `SessionSettings.pin: HeadPin` decides what a resume keeps: a flag,
+    a variable, or `/model <provider> <model>` keeps the whole head;
+    `/model <model>` keeps the model.
+  - `config::run_instances` resolves every configured instance on every
+    run, through `config::resolve_instance`. Instance resolution
+    ignores the roles and the provider, model, and endpoint flags. A
+    target without a model takes its instance's own model.
+  - Trust: a project role over an undefined instance is ignored with a
+    warning, as other project keys are, so a cloned repository cannot
+    block a run. A user role over one stops the run. Every role is
+    checked, also the roles that only step 17 reads.
+  - `Runtime::open` proceeds when the head does not build but a tail
+    target does. The first-run screen shows only when no configured
+    target can run. A resume's adopted instance is checked at the open.
+  - A payload without a model identity goes to the head target alone.
+  - The status label is the model on a shipped adapter's own instance
+    and `instance model` on a named instance. The progress line appends
+    it. Both interfaces show one fallback notice per turn.
+  - Review: three lenses and one verification pass. Material and fixed:
+    the per-call retry cost, the head repeated in the tail, the
+    undeclared crate API, and the effort rule copied into four places.
+    The correctness lens found no material problem.
+  - Measure: interleaved A/B runs of prebuilt bench binaries put the
+    turns within -2% to +3% of `main`. An external process held about
+    14 cores, so one A/B run swung `transport_floor` by 16%.
+  - Dogfood: Ollama 0.34.4 with `qwen3-8b-16k` on the Linux reference
+    machine. An `anthropic` head with a bad key fell back to a Chat
+    Completions instance; the status named it and the usage records
+    named it. A chain from a missing model on Chat Completions to a
+    Responses instance ran a `bash` call through the approval question.
+  - Crate API: `Route.tail`, `Route::targets`, `ProviderHost::effort`,
+    `Engine::set_head`; `Session::append_usage` takes a `&Target`;
+    `config::{resolve_instance, run_instances, chains, RoleTarget,
+    DEFAULT_ROLE}` and `Settings.roles` replace `config::resumable`;
+    `RunConfig.other_instances` and `RunConfig.tail`; `HeadPin` and
+    `SessionSettings.pin`; `SessionSettings.effort` becomes
+    `Option<Effort>`; `Runtime::{effort_wire_for, switch_head}`.
 
 ### 7. Prompt composition and instruction files
 
@@ -1846,6 +1906,9 @@ for judgments. Letters keep the later step numbers stable.
 - **Crates:** `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `prompt.base_file`; session none; CLI none.
+- **From step 6:** the composed prompt is one per session, not one per
+  target. A fallback attempt sends the same system prompt to another
+  adapter, so a segment must not name the head's provider or model.
 - **Compatibility:** a project without instruction files sends the base
   prompt alone, as today. A project file cannot set `prompt.base_file`.
 - **Verify:** tests: the segment order; byte-equal prompts across two
@@ -2222,6 +2285,11 @@ for judgments. Letters keep the later step numbers stable.
   `meta.parent` and `agent_child`; latest-session filtering and child-resume refusal;
   the agent card; the `config.md` update.
 - **Depends on:** steps 6 and 12.
+- **From step 6:** `config::chains` returns every role's targets; the
+  runtime keeps only the default role's tail today. Carry the other
+  roles on `RunConfig` here. Every instance a role can name already
+  has a provider slot. A child route needs its own `HeadPin`
+  semantics: a child session resumes only through its parent.
 - **Crates:** `demerzel` (the subagent runner), `demerzel-core`
   (`ToolContext`, events, session records), `demerzel-tui` (the card),
   `demerzel-tools` (the validator next to input parsing).
@@ -2289,6 +2357,9 @@ Three pull requests, in order:
    the plan docs, and the M4 handoff.
 
 *Depends on: every step. Done when: exit criterion 10 holds.*
+
+From step 6: every run now resolves each configured instance at boot.
+The work is in memory, but the warm-boot receipt must confirm it.
 
 ## Decisions
 
@@ -2448,6 +2519,11 @@ step:
   top-level `json!` turns the moved message array into a new tree. A
   hand-built top-level map, or a typed borrowed body, removes the copy.
   The step 4 performance review found it. It needs a turn-bench A/B.
+- The HTTP clients set no connect timeout. A host that drops packets
+  holds each fallback attempt for the system's TCP timeout before the
+  chain moves on. When every target of a chain fails, the user sees
+  the last error alone; the warn log holds each attempt's error. The
+  step 6 reviews found both.
 - Message `phase` on Responses replay. The neutral text block has no
   field for it, so replay drops it. Two message items of one reply
   also merge into one text block. Keeping `phase` needs a field on
