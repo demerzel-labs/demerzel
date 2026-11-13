@@ -9,25 +9,32 @@ ordered, verifiable steps. It follows the shape of
 
 ## Next-session handoff
 
-**Checked 2026-11-08:** M0 through M2.5 are complete, with both close-outs.
-M3 steps 1 to 6 are on `main`: this plan, `openai-compat` with named
+**Checked 2026-11-12:** M0 through M2.5 are complete, with both close-outs.
+M3 steps 1 to 7 are on `main`: this plan, `openai-compat` with named
 instances (`f4b7900`), `openai-responses` (`d9e51e8`), instance
 login with the thinking key (`3e6a935`), one runtime call with
-model identity (`424c31b`), and roles with fallback chains
-(`88cb35e`). Step 3's hosted receipt is pending,
-because no OpenAI or xAI API key is available. See the step's build
-notes.
+model identity (`424c31b`), roles with fallback chains
+(`88cb35e`), and prompt composition with instruction files
+(`404e39a`). Two receipts are pending. Step 3's hosted receipt needs
+an OpenAI or xAI API key. Step 7's cache-hit replay needs a hosted
+login: on 2026-11-12 the stored Anthropic key and the ChatGPT login
+both failed. See each step's build notes.
 
 Start the next work in this order:
 
-1. Build prompt composition and instruction files as step 7. Read
-   the **From step 6** notes in its block first.
-2. Record the step 3 hosted receipt when a key is available. The step's
+1. Build the hermetic smoke runner as step 8.
+2. Record the step 7 cache-hit replay when a hosted login works. The
+   step's build notes name the run.
+3. Record the step 3 hosted receipt when a key is available. The step's
    build notes list the three runs that it covers. Exit criterion 1
    needs this receipt, so it must land before the M3 close-out.
-3. Follow the remaining steps in order. Each step names its dependencies.
+4. Follow the remaining steps in order. Each step names its dependencies.
    Until pull requests return, commit each step to `main` under
    the [`AGENTS.md`](../AGENTS.md) rules for direct commits.
+
+A release build can link stale code from a benchmark worktree that
+shared the target directory. Give each benchmark side its own
+`CARGO_TARGET_DIR`; see the step 7 build notes.
 
 The Linux reference machine runs a local Ollama server. It serves both
 protocols at `http://127.0.0.1:11434/v1` for dogfood. Its default
@@ -52,7 +59,7 @@ A step's block holds the notes that earlier steps left for it, under
 The [tracked items](#tracked-separately) are not prerequisites for any
 step. Do not fold them into a step without a decision in this document.
 
-## Status (2026-11-08)
+## Status (2026-11-12)
 
 | Step | State |
 |---|---|
@@ -62,8 +69,9 @@ step. Do not fold them into a step without a decision in this document.
 | 4. Instance login and the thinking key | Done on 2026-10-02, with a local login receipt |
 | 5. One runtime call and model identity | Done on 2026-11-08, with a local dogfood receipt |
 | 6. Roles and fallback chains | Done on 2026-11-08: `88cb35e`, with a local dogfood receipt |
-| 7. Prompt composition and instruction files | Next |
-| 8 to 19, with 8a to 8c | Not started |
+| 7. Prompt composition and instruction files | Built on 2026-11-12: `404e39a`, with a local dogfood receipt. The cache-hit replay is pending. |
+| 8. The hermetic smoke runner | Next |
+| 8a to 19 | Not started |
 
 The M2.5 close-out
 ([`m2.5-closeout.md`](m2.5-closeout.md)) recorded the receipts on both
@@ -808,7 +816,9 @@ The segments, in this order:
    or `CLAUDE.md` when no `AGENTS.md` exists, then the discovered
    instruction files. Each file is capped at 32 KiB with a marker, and
    the segment at 64 KiB. Two paths that resolve to one file count once,
-   so a `CLAUDE.md` symlink to `AGENTS.md` does not repeat.
+   so a `CLAUDE.md` symlink to `AGENTS.md` does not repeat. The caps
+   count file content, and a project file must resolve inside the
+   project (step 7 build notes).
 4. The skill index: one line per skill, name and description, each line
    capped at 200 bytes, the segment at 8 KiB. When the segment
    overflows, skills drop from the lowest precedence level first, and
@@ -1920,6 +1930,82 @@ for judgments. Letters keep the later step numbers stable.
 - **Done when:** the tests pass and the replay shows the stable prefix.
 - **Measure:** the composer runs once per session; the cache-hit replay
   is the measurement.
+- **Build notes (2026-11-12):**
+  - The composer is `crates/demerzel/src/prompt.rs`, a private module.
+    `Segments` holds the five positions. This step fills positions 1 to
+    3. The engine did not change.
+  - The composer takes no route and no settings. A segment cannot name
+    a provider, an instance, or a model. A test sends one prompt to a
+    head target and to a fallback target on another adapter.
+  - The base prompt has no heading and goes out as it is. Segments 2
+    and 3 start with a fixed heading. Each instruction file has a label
+    line.
+  - The caps count file content: 8 KiB, 32 KiB, and 64 KiB. The
+    headings and the markers are outside the count. With the overhead
+    inside the count, the segment cap always cuts two full files. A
+    file at its cap joins whole, which matches the step 14 check.
+  - At the segment cap, the later files stay out. One marker ends the
+    segment.
+  - The composer removes the white space and a byte-order mark at the
+    ends of the profile and of each instruction file.
+  - The project file is `AGENTS.md` in the working directory. There is
+    no upward search, as for the project config file. `CLAUDE.md`
+    serves only when the project has no `AGENTS.md` entry.
+  - Deviation, from the correctness review: a project instruction file
+    must resolve inside the project directory. A project link to
+    `/proc/self/environ` put the process environment into the prompt
+    with no tool call. A link in the user's config directory can point
+    to any file.
+  - The duplicate check compares resolved paths, so two hard links
+    count twice.
+  - A path that is not a regular file stays out before the open. A
+    file whose read part is not UTF-8 text stays out. The read stops
+    one byte after the cap.
+  - `Opened.prompt_notes` holds one line for each file that a cap cuts
+    and for each file that stays out. Both interfaces and a one-shot
+    run show the lines. `doctor` has a `prompt` section with each file
+    and its size.
+  - `prompt.base_file`: the run reads the file once, at boot, and a
+    file that does not read stops the run. A relative path starts at
+    the directory of the user file. The file has no size limit. The
+    profile and the instruction files are read at each session open,
+    so `/new` takes their edits.
+  - `Runtime::open` takes `first_prompt` and gives it to the composer.
+    The composer does not read it before step 13. The open composes
+    before it writes the session's record.
+  - Source rules: `prompt.rs` holds the file name `CLAUDE.md` as a
+    constant, because this plan names it as a native path. The
+    constant and its comment use Demerzel's own terms. The `AGENTS.md`
+    exception for such names arrives with step 12.
+  - Review: three lenses and one verification pass. Material and
+    fixed: a file that stayed out was silent in a session. The
+    verification pass found one regression from a fix: a project link
+    to no file was silent. That link now gives a notice.
+  - Measure: interleaved A/B runs of prebuilt bench binaries put the
+    turns within -5% to +1% of `main`, at a load average of 5 to 7.
+    The bench project has no instruction file, so the bench shows the
+    unchanged path. The release binary is 8,958,392 bytes.
+  - Dogfood: Ollama 0.34.4 with `qwen3-8b-16k` in the full-screen
+    interface, in this repository. The model named the three Rust
+    checks from `AGENTS.md`. The trace held the composed prompt at the
+    `trace` level: 9,364 bytes, the size that `doctor` shows.
+  - Pending: the cache-hit replay. On 2026-11-12 the API returned 401
+    for the stored Anthropic key, and the ChatGPT login failed after
+    its token refresh. Run `bench/cache/replay.py --provider anthropic`
+    after a new login. The second session's first call must read the
+    prefix from the cache. The `cache_replay` example now composes
+    from the current directory and reads no user file.
+  - Process: the shared `target` directory held release fingerprints
+    from the step 6 benchmark worktree. The first release build of an
+    example linked a library from that worktree's sources. A touch of
+    the worktree's sources made cargo build the units again. Check
+    `target/release/.fingerprint/*/dep-*` for a worktree path before a
+    release test run.
+  - Crate API: the `first_prompt` argument of `Runtime::open`;
+    `RunConfig.config_dir` and `RunConfig.prompt_base_file`;
+    `Opened.prompt_notes`; `config::Settings.prompt_base_file`;
+    `config::Locations::{user_dir, base_prompt_file}`. `Runtime::new`
+    fails on a base prompt file that does not read.
 
 ### 8. The hermetic smoke runner
 
@@ -1929,6 +2015,10 @@ for judgments. Letters keep the later step numbers stable.
   tasks; the `gates` CI step and the [`ci.md`](ci.md) update; the bank
   layout and index format; `DEMERZEL_EVAL_BANK`.
 - **Depends on:** step 2.
+- **From step 7:** the binary reads the user's profile and instruction
+  file from `$XDG_CONFIG_HOME/demerzel`. A smoke run needs its own
+  `XDG_CONFIG_HOME`, or the user's files change the prompt. A task
+  directory with an `AGENTS.md` sends that file.
 - **Crates:** `demerzel-mock` (the binary). The rest is Python.
 - **Contracts:** provider trait none; engine events none; tools none;
   config none, with the `DEMERZEL_EVAL_BANK` variable; session none;
@@ -2095,6 +2185,10 @@ for judgments. Letters keep the later step numbers stable.
   the [`prior-art.md`](prior-art.md) rows for the borrowed
   formats.
 - **Depends on:** step 7.
+- **From step 7:** `prompt::Segments.skills` is position 4, with its
+  heading. Give `prompt::Sources` the skill directories. A dropped
+  skill joins `Composed::skipped`, so `doctor` and the session notices
+  name it.
 - **Crates:** `demerzel`, `demerzel-tools` (the `skill` tool).
 - **Contracts:** provider trait none; engine events none; tools `skill`;
   config none; session none; CLI `/skill`.
@@ -2136,6 +2230,19 @@ for judgments. Letters keep the later step numbers stable.
   exception; the `config.md` update. MCP definition discovery waits for
   step 16.
 - **Depends on:** steps 10 and 11.
+- **From step 7:**
+  - `prompt::instruction_files` builds the list of segment 3. Add the
+    discovered files to it, after the project's native file.
+  - Give each discovered project file the project as its `root`, so a
+    link out of the project stays out.
+  - The reader takes a whole file. A Cursor rule needs its frontmatter
+    removed first, so the reader's input changes here.
+  - Two full files reach the segment cap exactly. Discovered files are
+    the first public path past it. Add a test through `Runtime::open`.
+  - The Source-rules exception must also cover the `CLAUDE.md` file
+    name in `prompt.rs`.
+  - Decide here whether a run from a subdirectory reads the
+    repository's `AGENTS.md`. Step 7 reads the working directory only.
 - **Crates:** `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools none;
   config `discovery`; session none; CLI none.
@@ -2163,6 +2270,10 @@ for judgments. Letters keep the later step numbers stable.
   the `recall` record; `memory.enabled` and `memory.recall_tokens`
   with their trust lines; the `config.md` update.
 - **Depends on:** step 7.
+- **From step 7:** `prompt::compose` receives the first prompt and
+  does not read it yet. `prompt::Segments.recall` is position 5, with
+  its heading. The open composes before it writes a record, so the
+  `recall` record can follow the compose.
 - **Crates:** `demerzel-core`, `demerzel-memory` (new), `demerzel`.
 - **Contracts:** provider trait none; engine events none; tools
   `memory_save`, `memory_search`, `memory_forget`; config
@@ -2191,6 +2302,10 @@ for judgments. Letters keep the later step numbers stable.
 - **Scope:** `profile_propose`; the proposals file; `/profile` with
   `accept` and `reject`; the notice.
 - **Depends on:** step 7.
+- **From step 7:** the composer reads the profile at each session
+  open. Accepted text thus joins the next session, also after `/new`,
+  not only the next run. The 8 KiB cap counts the bytes of the file,
+  and a file at the cap joins whole.
 - **Crates:** `demerzel`, `demerzel-tools`.
 - **Contracts:** provider trait none; engine events none; tools
   `profile_propose`; config none; session none; CLI `/profile`.
@@ -2325,6 +2440,10 @@ for judgments. Letters keep the later step numbers stable.
   joined parent and child evidence; the process probe for
   memory and I/O; one local Harbor run; the bank at 10 to 20 tasks.
 - **Depends on:** steps 8, 8b, 16, and 17; every dogfood before it for the bank.
+- **From step 7:** `Runtime::open` composes the prompt before it
+  writes the session's `meta` record, so the record can carry
+  `prompt_hash`. The engine keeps the text in
+  `EngineConfig.system_prompt`.
 - **Crates:** `demerzel-core` (hashes and tool-set records). The rest is Python.
 - **Contracts:** provider trait none; engine events none; tools none;
   config none; session `meta.prompt_hash`, `meta.tools_hash`, `tool_set`;
@@ -2519,6 +2638,13 @@ step:
   top-level `json!` turns the moved message array into a new tree. A
   hand-built top-level map, or a typed borrowed body, removes the copy.
   The step 4 performance review found it. It needs a turn-bench A/B.
+  Since step 7 the system prompt can reach about 73 KiB, and each call
+  copies it into the request and into the body. A shared prompt in
+  `Request` changes the provider contract. The turn bench has no case
+  with an instruction file.
+- `prompt.base_file` has no size limit, because a replaced base prompt
+  goes out as it is. The step 7 performance review asked for a refusal
+  above 1 MiB.
 - The HTTP clients set no connect timeout. A host that drops packets
   holds each fallback attempt for the system's TCP timeout before the
   chain moves on. When every target of a chain fails, the user sees
