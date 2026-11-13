@@ -187,7 +187,7 @@ async fn effort_reaches_the_endpoint_only_when_set() {
     let bed = Bed::start(vec![text_turn("one"), text_turn("two"), text_turn("three")]).await;
     let runtime = Runtime::new(bed.config()).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
+    let mut engine = runtime.open(&Resume::Fresh, &settings, "").unwrap().engine;
     engine
         .user_turn("first".into(), &noop, &mut NoPrompt)
         .await

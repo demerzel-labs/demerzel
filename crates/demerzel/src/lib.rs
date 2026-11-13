@@ -11,6 +11,7 @@ pub mod doctor;
 mod git;
 pub mod login;
 mod preview;
+mod prompt;
 pub mod repl;
 mod replay;
 pub mod trace;
@@ -190,6 +191,15 @@ pub struct RunConfig {
     pub thinking: Thinking,
     /// The colors of the full-screen interface.
     pub theme: Theme,
+    /// The user's config directory. The system prompt takes the
+    /// user's profile and the user's instruction file from it.
+    /// `None` reads no user file: the prompt holds the base prompt
+    /// and the project's instruction file alone.
+    pub config_dir: Option<PathBuf>,
+    /// The file whose content replaces the base prompt, the path
+    /// `prompt.base_file` resolves to. `None` keeps the harness
+    /// default. [`Runtime::new`] refuses a file it cannot read.
+    pub prompt_base_file: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -215,6 +225,8 @@ impl RunConfig {
             markdown: true,
             thinking: Thinking::default(),
             theme: Theme::default(),
+            config_dir: None,
+            prompt_base_file: None,
         }
     }
 }
@@ -244,6 +256,9 @@ pub struct Runtime {
     registry: Registry,
     read_only_registry: Registry,
     store: SessionStore,
+    /// The content of `prompt.base_file`, read at boot. `None` keeps
+    /// the harness default.
+    base_prompt: Option<String>,
 }
 
 /// A session open for its first prompt.
@@ -264,6 +279,10 @@ pub struct Opened<'r> {
     /// session's own head target: config no longer runs its instance,
     /// and the session continues on the run's head.
     pub notice: Option<String>,
+    /// One line for the user per instruction file or profile that
+    /// the system prompt cut at a size limit or left out. Empty when
+    /// the prompt holds every file whole.
+    pub prompt_notes: Vec<String>,
 }
 
 /// The run's provider instances: the configured head first, then
@@ -348,7 +367,8 @@ impl Runtime {
     /// registries, and the checks that stop a run at boot — a
     /// `--session <id>` with no file, a provider id this build does
     /// not have, a fallback target on an instance the run does not
-    /// know. The credentials resolve at the first turn; see
+    /// know, a base prompt file that does not read. The credentials
+    /// resolve at the first turn; see
     /// `Runtime::check_credentials`.
     pub fn new(mut config: RunConfig) -> Result<Self, RunError> {
         let store = match &config.data_root {
@@ -408,12 +428,21 @@ impl Runtime {
             }
         }
 
+        // The user named the base prompt file: a file that does not
+        // read stops the run here, not at the first prompt. The
+        // content stays fixed for the run.
+        let base_prompt = match &config.prompt_base_file {
+            Some(path) => Some(prompt::read_base(path).map_err(RunError::Config)?),
+            None => None,
+        };
+
         Ok(Self {
             config,
             providers,
             registry,
             read_only_registry,
             store,
+            base_prompt,
         })
     }
 
@@ -540,6 +569,16 @@ impl Runtime {
     /// one — except that a session named by id must exist and match,
     /// or the open fails.
     ///
+    /// The open composes the system prompt of the session, once: the
+    /// base prompt, the user's profile, and the instruction files of
+    /// the user and the project. `first_prompt` is the prompt that
+    /// starts the session; the composer retrieves for it. Every model
+    /// call of the session sends the same text, to every target of
+    /// the route. A resume composes again from the profile and the
+    /// instruction files as they are now; the base prompt stays as
+    /// [`Runtime::new`] read it. [`Opened::prompt_notes`] names each
+    /// file that the prompt cut or left out.
+    ///
     /// A resume continues on the session's own head target: the
     /// instance and the model of its last meta record, as far as
     /// [`SessionSettings::pin`] allows. When config
@@ -557,6 +596,7 @@ impl Runtime {
         &self,
         resume: &Resume,
         settings: &SessionSettings,
+        first_prompt: &str,
     ) -> Result<Opened<'_>, RunError> {
         let mut settings = settings.clone();
         let path = match resume {
@@ -612,6 +652,21 @@ impl Runtime {
                 None => error,
             });
         }
+        // The prompt comes before the session's record, so a later
+        // record can name the prompt the session runs under.
+        let mut composed = prompt::compose(self.prompt_sources(), first_prompt);
+        let prompt_notes = composed.notes();
+        log::info!(
+            "prompt composed: {} bytes, base {}, {}",
+            composed.text.len(),
+            if self.base_prompt.is_some() {
+                "replaced"
+            } else {
+                "default"
+            },
+            prompt::file_list(&composed)
+        );
+        let system_prompt = std::mem::take(&mut composed.text);
         let (session, replay) = match resumed {
             Some((mut session, replay)) => {
                 session.append_meta(&SessionMeta::now(&self.session_open(&settings)))?;
@@ -627,6 +682,7 @@ impl Runtime {
         }
 
         let mut engine_config = EngineConfig::new(settings.route.clone());
+        engine_config.system_prompt = system_prompt;
         // A level from `/effort` reaches every target. Otherwise each
         // target gets the level config gives its instance, from the
         // host.
@@ -646,6 +702,7 @@ impl Runtime {
             usage: replay.usage,
             tools: replay.tools,
             notice,
+            prompt_notes,
         })
     }
 
@@ -767,6 +824,15 @@ impl Runtime {
         Ok(next)
     }
 
+    /// What the composer reads for a session of this run.
+    fn prompt_sources(&self) -> prompt::Sources<'_> {
+        prompt::Sources {
+            base: self.base_prompt.as_deref(),
+            user_dir: self.config.config_dir.as_deref(),
+            project_dir: &self.config.project_dir,
+        }
+    }
+
     /// What a meta record names for this run and these settings.
     fn session_open<'a>(&'a self, settings: &'a SessionSettings) -> SessionOpen<'a> {
         let head = &settings.route.head;
@@ -815,15 +881,16 @@ impl Runtime {
 
     /// Run one prompt to completion. Display events go to `sink`; the
     /// returned outcome says how the turn ended. A fallback notice of
-    /// the open goes to stderr, as the interfaces show theirs.
+    /// the open and its prompt notes go to stderr, as the interfaces
+    /// show theirs.
     pub async fn one_shot(
         &self,
         prompt: String,
         sink: &dyn EventSink,
     ) -> Result<TurnOutcome, RunError> {
         let settings = SessionSettings::from_config(&self.config);
-        let mut opened = self.open(&self.config.resume, &settings)?;
-        if let Some(notice) = &opened.notice {
+        let mut opened = self.open(&self.config.resume, &settings, &prompt)?;
+        for notice in opened.notice.iter().chain(&opened.prompt_notes) {
             eprintln!("demerzel: {notice}");
         }
         Ok(opened.engine.user_turn(prompt, sink, &mut NoPrompt).await?)

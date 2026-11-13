@@ -292,7 +292,7 @@ impl Driver for TuiDriver<'_> {
             // The open adopts a resumed session's head target into
             // its own settings: a failure leaves these and the screen
             // as they were.
-            let opened = match self.runtime.open(&self.resume, &self.settings) {
+            let opened = match self.runtime.open(&self.resume, &self.settings, &line) {
                 Ok(opened) => opened,
                 Err(error) => return Submission::Error(format!("demerzel: {error}")),
             };
@@ -320,6 +320,9 @@ impl Driver for TuiDriver<'_> {
             }
             if let Some(notice) = opened.notice {
                 events.notice(notice);
+            }
+            for note in opened.prompt_notes {
+                events.notice(note);
             }
         }
         Submission::Run(Box::pin(async move {

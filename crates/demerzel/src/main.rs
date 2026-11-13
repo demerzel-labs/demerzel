@@ -379,6 +379,8 @@ fn run_config(cli: &Cli, cwd: PathBuf) -> Result<RunConfig, String> {
     config.markdown = settings.tui.markdown.value;
     config.thinking = settings.tui.thinking.value;
     config.theme = config::theme(&settings.tui.theme.value, user.as_ref())?;
+    config.config_dir = locations.user_dir().map(Path::to_path_buf);
+    config.prompt_base_file = locations.base_prompt_file(&settings);
     if settings.history_file.value {
         config.history_path = demerzel_core::paths::data_dir()
             .ok()

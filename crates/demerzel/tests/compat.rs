@@ -182,7 +182,7 @@ async fn effort_reaches_a_compat_endpoint_only_when_set() {
     let bed = Bed::start(vec![text_turn("one"), text_turn("two"), text_turn("three")]).await;
     let runtime = Runtime::new(bed.config()).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
+    let mut engine = runtime.open(&Resume::Fresh, &settings, "").unwrap().engine;
     engine
         .user_turn("first".into(), &noop, &mut NoPrompt)
         .await
@@ -255,7 +255,7 @@ async fn a_level_set_before_the_first_prompt_reaches_the_first_request() {
         runtime.effort_wire(&settings),
         EffortWire::Sent(Effort::Low)
     );
-    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
+    let mut engine = runtime.open(&Resume::Fresh, &settings, "").unwrap().engine;
     engine
         .user_turn("first".into(), &noop, &mut NoPrompt)
         .await
@@ -338,7 +338,7 @@ async fn a_resume_keeps_the_sessions_model_over_a_config_change() {
     config.resume = Resume::Latest;
     let runtime = Runtime::new(config).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let mut opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     assert!(opened.notice.is_none());
     assert_eq!(opened.settings.route.head.model, "m1");
     opened
@@ -372,7 +372,7 @@ async fn a_resume_adopts_the_sessions_instance_and_its_effort() {
     let runtime = Runtime::new(config).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
     assert_eq!(runtime.effort_wire(&settings), EffortWire::Default);
-    let mut opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let mut opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     assert!(opened.notice.is_none());
     assert_eq!(opened.settings.route.head.instance, "alpha");
     assert_eq!(opened.settings.route.head.model, "m1");
@@ -412,7 +412,7 @@ async fn a_resume_falls_back_with_a_notice_when_config_drops_the_instance() {
     config.resume = Resume::Latest;
     let runtime = Runtime::new(config).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let mut opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     let notice = opened.notice.clone().expect("a fallback notice");
     assert!(
         notice.contains("alpha") && notice.contains("hosted"),
@@ -456,7 +456,7 @@ async fn a_model_switch_keeps_reasoning_off_the_other_model_and_back_on_return()
     .await;
     let runtime = Runtime::new(bed.config()).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
+    let mut engine = runtime.open(&Resume::Fresh, &settings, "").unwrap().engine;
     engine
         .user_turn("read f.txt".into(), &noop, &mut NoPrompt)
         .await
@@ -518,7 +518,7 @@ async fn model_before_the_first_prompt_keeps_its_model_on_the_adopted_instance()
     let runtime = resume_on_beta(&bed, &two_instances(&bed));
     let mut settings = SessionSettings::from_config(runtime.config());
     settings.set_model("m7");
-    let mut opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let mut opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     assert_eq!(opened.settings.route.head.instance, "alpha");
     assert_eq!(opened.settings.route.head.model, "m7");
     opened
@@ -547,7 +547,7 @@ async fn a_resume_falls_back_when_the_instance_changed_its_adapter() {
     let user = demerzel::config::Layer::parse(&text).unwrap().0;
     let runtime = resume_on_beta(&bed, &user);
     let settings = SessionSettings::from_config(runtime.config());
-    let opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     let notice = opened.notice.expect("a fallback notice");
     assert!(notice.contains("openai-responses"), "{notice}");
     assert_eq!(opened.settings.route.head.instance, "beta");
@@ -566,7 +566,7 @@ async fn a_missing_login_on_the_adopted_instance_fails_before_a_record() {
     let runtime = resume_on_beta(&bed, &user);
     let before = meta_records(&bed);
     let settings = SessionSettings::from_config(runtime.config());
-    let Err(error) = runtime.open(&Resume::Latest, &settings) else {
+    let Err(error) = runtime.open(&Resume::Latest, &settings, "") else {
         panic!("the open must fail on the missing key");
     };
     let error = error.to_string();
@@ -703,7 +703,7 @@ async fn model_with_two_tokens_moves_the_head_to_another_instance() {
     let user = two_instances(&bed);
     let runtime = Runtime::new(chain_run(&bed, &user, Vec::new())).unwrap();
     let settings = SessionSettings::from_config(runtime.config());
-    let mut opened = runtime.open(&Resume::Fresh, &settings).unwrap();
+    let mut opened = runtime.open(&Resume::Fresh, &settings, "").unwrap();
 
     let error = runtime
         .switch_head(&opened.settings, "ghost", "m9")
@@ -737,7 +737,7 @@ async fn a_two_token_switch_before_the_first_prompt_keeps_the_whole_head_on_resu
     let runtime = resume_on_beta(&bed, &two_instances(&bed));
     let settings = SessionSettings::from_config(runtime.config());
     let settings = runtime.switch_head(&settings, "beta", "m7").unwrap();
-    let opened = runtime.open(&Resume::Latest, &settings).unwrap();
+    let opened = runtime.open(&Resume::Latest, &settings, "").unwrap();
     assert_eq!(opened.settings.route.head, Target::new("beta", "m7"));
 }
 

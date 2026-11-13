@@ -11,6 +11,7 @@ use demerzel_providers::auth::{AuthStore, CredentialSource, NO_CREDENTIALS_HELP}
 use demerzel_providers::{AdapterRules, EffortWire, anthropic, openai_codex};
 
 use crate::config::{self, Flags, Layer, Locations, Origin};
+use crate::prompt;
 
 /// Run the checks and print the report to stdout. Returns the process
 /// exit code: 0 when every check passes, 1 otherwise.
@@ -162,6 +163,16 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         &context_window,
         settings.context_window.origin,
     )?;
+    print_setting(
+        out,
+        "prompt.base_file",
+        settings
+            .prompt_base_file
+            .value
+            .as_deref()
+            .unwrap_or("none — the default base prompt"),
+        settings.prompt_base_file.origin,
+    )?;
     for problem in settings.problems() {
         problems += 1;
         writeln!(out, "  problem: {problem}")?;
@@ -190,6 +201,8 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         }
     }
 
+    report_prompt(project_dir, &locations, &settings, &mut problems, out)?;
+
     // The instance keys read the store's path, the way a session does,
     // so a run without HOME still finds them.
     let store_path = AuthStore::default_path().ok();
@@ -210,6 +223,71 @@ pub fn report(project_dir: &Path, flags: &Flags, out: &mut dyn Write) -> std::io
         n => writeln!(out, "result: {n} problems")?,
     }
     Ok(problems)
+}
+
+/// Report what a session's system prompt holds now: the base prompt,
+/// each file that joins it, and each file that cannot. A base prompt
+/// file that does not read stops a run.
+fn report_prompt(
+    project_dir: &Path,
+    locations: &Locations,
+    settings: &config::Settings,
+    problems: &mut u32,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    writeln!(out, "prompt")?;
+    let base = match locations.base_prompt_file(settings) {
+        None => {
+            writeln!(out, "  base: the default")?;
+            None
+        }
+        Some(path) => match prompt::read_base(&path) {
+            Ok(base) => {
+                writeln!(out, "  base: {} ({} bytes)", path.display(), base.len())?;
+                Some(base)
+            }
+            Err(error) => {
+                *problems += 1;
+                writeln!(out, "  problem: {error}")?;
+                None
+            }
+        },
+    };
+    let composed = prompt::compose(
+        prompt::Sources {
+            base: base.as_deref(),
+            user_dir: locations.user_dir(),
+            project_dir,
+        },
+        "",
+    );
+    for file in &composed.files {
+        let label = match file.kind {
+            prompt::Kind::Profile => "profile",
+            prompt::Kind::Instructions => "instructions",
+        };
+        let cut = if file.cut {
+            " — cut at the size limit"
+        } else {
+            ""
+        };
+        writeln!(
+            out,
+            "  {label}: {} ({} bytes){cut}",
+            file.path.display(),
+            file.bytes
+        )?;
+    }
+    for (path, reason) in &composed.skipped {
+        writeln!(out, "  warning: {} is left out: {reason}", path.display())?;
+    }
+    // The token estimate of the plan: bytes divided by four.
+    writeln!(
+        out,
+        "  size: {} bytes, about {} tokens",
+        composed.text.len(),
+        composed.text.len() / 4
+    )
 }
 
 fn on_off(value: bool) -> &'static str {

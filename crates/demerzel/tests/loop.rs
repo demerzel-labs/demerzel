@@ -518,7 +518,7 @@ async fn an_instance_with_thinking_off_completes_its_tool_turn_after_an_effort_c
         runtime.effort_wire(&settings),
         EffortWire::Omitted(runtime.config().effort)
     );
-    let mut engine = runtime.open(&Resume::Fresh, &settings).unwrap().engine;
+    let mut engine = runtime.open(&Resume::Fresh, &settings, "").unwrap().engine;
     let noop = |_: EngineEvent<'_>| {};
     let outcome = engine
         .user_turn("read f.txt".into(), &noop, &mut NoPrompt)

@@ -124,6 +124,10 @@ pub struct Settings {
     /// default; only an adapter with a thinking switch takes a value.
     pub thinking_mode: Setting<Option<ThinkingMode>>,
     pub history_file: Setting<bool>,
+    /// `prompt.base_file` as the user file wrote it: the file whose
+    /// content replaces the base prompt. Only the user file sets it.
+    /// [`Locations::base_prompt_file`] gives the path to read.
+    pub prompt_base_file: Setting<Option<String>>,
     /// The `[roles.<name>]` tables, by name: each role's chain as the
     /// file wrote it, from the highest file that defines the role.
     /// [`chains`] checks each target and names its model.
@@ -264,6 +268,8 @@ pub struct Layer {
     roles: BTreeMap<String, Vec<RoleTarget>>,
     tui: TuiKeys,
     themes: BTreeMap<String, ThemeKeys>,
+    /// `prompt.base_file`.
+    prompt_base_file: Option<String>,
 }
 
 impl Layer {
@@ -343,6 +349,25 @@ impl Layer {
                     }
                     other => {
                         return Err(format!("`theme` must be a table, not {}", other.type_str()));
+                    }
+                },
+                "prompt" => match value {
+                    toml::Value::Table(table) => {
+                        for (key, value) in table {
+                            let path = format!("prompt.{key}");
+                            match key.as_str() {
+                                "base_file" => {
+                                    layer.prompt_base_file = Some(expect_string(&path, value)?);
+                                }
+                                _ => warnings.push(format!("unknown key `{path}`")),
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "`prompt` must be a table, not {}",
+                            other.type_str()
+                        ));
                     }
                 },
                 _ => warnings.push(format!("unknown key `{key}`")),
@@ -660,6 +685,24 @@ impl Locations {
                 .map(|dir| dir.join("config.toml")),
             project: project_dir.join(".demerzel").join("config.toml"),
         }
+    }
+
+    /// The user's config directory, which holds the user file, the
+    /// profile, and the user's instruction file. `None` when no home
+    /// directory resolves.
+    pub fn user_dir(&self) -> Option<&Path> {
+        self.user.as_deref().and_then(Path::parent)
+    }
+
+    /// The file `prompt.base_file` names: an absolute path as it is,
+    /// a relative path from the directory of the user file. `None`
+    /// when the key is unset.
+    pub fn base_prompt_file(&self, settings: &Settings) -> Option<PathBuf> {
+        let file = Path::new(settings.prompt_base_file.value.as_deref()?);
+        Some(match self.user_dir() {
+            Some(dir) => dir.join(file),
+            None => file.to_path_buf(),
+        })
     }
 }
 
@@ -1122,6 +1165,19 @@ fn resolve_layers(
         ));
     }
 
+    // Trust rule: only the user file replaces the base prompt. The
+    // base prompt holds the harness's own rules for the model, and a
+    // project file travels with the repository.
+    if let Some(file) = project.and_then(|l| l.prompt_base_file.as_deref()) {
+        warnings.push(format!(
+            "ignored: the project file sets prompt.base_file = {file}; a project file \
+             cannot replace the base prompt; set it in the user file"
+        ));
+    }
+    let prompt_base_file = layer_key(user, Origin::User, |l| l.prompt_base_file.clone())
+        .map(some_setting)
+        .unwrap_or_else(|| Setting::new(None, Origin::Default));
+
     (
         Settings {
             provider,
@@ -1136,6 +1192,7 @@ fn resolve_layers(
             context_window,
             thinking_mode,
             history_file,
+            prompt_base_file,
             roles: role_settings,
             tui: TuiSettings {
                 mouse,
@@ -2482,6 +2539,71 @@ mod tests {
         let user = layer("approval = \"auto\"");
         let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
         assert_eq!(settings.approval_mode(false), ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn only_the_user_file_sets_the_base_prompt_file() {
+        let user = layer("[prompt]\nbase_file = \"base.md\"");
+        let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+        assert_eq!(settings.prompt_base_file.value.as_deref(), Some("base.md"));
+        assert_eq!(settings.prompt_base_file.origin, Origin::User);
+
+        // The project file's key is ignored, with a warning; the user
+        // file's own value stays.
+        let project = layer("[prompt]\nbase_file = \"/repo/evil.md\"");
+        for user in [None, Some(&user)] {
+            let (settings, warnings) = resolve(&Flags::default(), &no_env, Some(&project), user);
+            assert_eq!(
+                settings.prompt_base_file.value.as_deref(),
+                user.map(|_| "base.md")
+            );
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("prompt.base_file"), "{warnings:?}");
+        }
+
+        let settings = resolve_clean(&Flags::default(), &no_env, None, None);
+        assert_eq!(settings.prompt_base_file.value, None);
+        assert_eq!(settings.prompt_base_file.origin, Origin::Default);
+    }
+
+    #[test]
+    fn the_base_prompt_file_starts_at_the_user_files_directory() {
+        let locations = Locations {
+            user: Some(PathBuf::from("/cfg/demerzel/config.toml")),
+            project: PathBuf::from("/repo/.demerzel/config.toml"),
+        };
+        let path = |text: &str| {
+            let user = layer(text);
+            let settings = resolve_clean(&Flags::default(), &no_env, None, Some(&user));
+            locations.base_prompt_file(&settings)
+        };
+        assert_eq!(
+            path("[prompt]\nbase_file = \"base.md\""),
+            Some(PathBuf::from("/cfg/demerzel/base.md"))
+        );
+        assert_eq!(
+            path("[prompt]\nbase_file = \"/etc/base.md\""),
+            Some(PathBuf::from("/etc/base.md"))
+        );
+        assert_eq!(path("model = \"m\""), None);
+    }
+
+    #[test]
+    fn the_prompt_table_takes_one_string_key() {
+        let (_, warnings) = Layer::parse("[prompt]\nfuture_key = 1").unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("prompt.future_key"), "{warnings:?}");
+        assert!(Layer::parse("prompt = 1").unwrap_err().contains("prompt"));
+        assert!(
+            Layer::parse("[prompt]\nbase_file = \"\"")
+                .unwrap_err()
+                .contains("prompt.base_file")
+        );
+        assert!(
+            Layer::parse("[prompt]\nbase_file = true")
+                .unwrap_err()
+                .contains("prompt.base_file")
+        );
     }
 
     #[test]

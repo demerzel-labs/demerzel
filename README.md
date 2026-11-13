@@ -152,6 +152,10 @@ layers are command-line flags, environment variables, a project
 file at `.demerzel/config.toml`, and a user file at
 `$XDG_CONFIG_HOME/demerzel/config.toml`.
 
+Demerzel puts the project's `AGENTS.md` into the system prompt of
+each session. It also reads your own instruction file and your
+profile. See [The system prompt](docs/config.md#the-system-prompt).
+
 ## Safety notes
 
 Demerzel stores sessions, history, credentials, and optional debug
@@ -166,6 +170,10 @@ real shell command with a constructed environment and a timeout.
 Write tools stay inside the project root, but `bash` in `auto` mode
 can write wherever the process can write.
 
+The project's `AGENTS.md` joins the prompt without a question. Read
+that file before you start a session in a repository that you do not
+trust.
+
 ## Principles
 
 - **Provider-neutral.** The current build ships four adapters:
@@ -176,7 +184,7 @@ can write wherever the process can write.
   number comes from a reproducible benchmark in [`bench/`](bench/).
 - **Yours to extend.** Skills, hooks, MCP, subagents, and memory are
   planned work. The current extension surface is config, provider
-  instances, and the built-in slash commands.
+  instances, instruction files, and the built-in slash commands.
 
 ## Current limits
 

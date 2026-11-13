@@ -10,7 +10,10 @@
 //! The run advertises the full tool set in `ask` mode with no
 //! approver. Only read tools can run; every other call is declined
 //! without a prompt. Sessions use a private temporary data root.
-//! Credentials resolve like a normal session. A failed turn exits
+//! Credentials resolve like a normal session. The system prompt
+//! holds the default base prompt and the instruction file of the
+//! current directory. No user file joins it, so a trace does not
+//! depend on the user of the machine. A failed turn exits
 //! non-zero; a partial trace is not a receipt.
 //!
 //! One `calls` entry per usage report; both shipped adapters report
@@ -86,7 +89,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut sessions = Vec::new();
     for run in 1..=args.runs {
         let settings = demerzel::SessionSettings::from_config(runtime.config());
-        let mut engine = runtime.open(&demerzel::Resume::Fresh, &settings)?.engine;
+        let mut engine = runtime
+            .open(&demerzel::Resume::Fresh, &settings, &args.prompts[0])?
+            .engine;
         let session_id = engine.session().id().to_string();
         let mut turns: Vec<Value> = Vec::with_capacity(args.prompts.len());
         for (index, prompt) in args.prompts.iter().enumerate() {

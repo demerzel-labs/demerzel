@@ -57,6 +57,9 @@ chain = [
   { provider = "local" },
 ]
 
+[prompt]
+base_file = "base.md"            # replaces the base prompt, see The system prompt
+
 [tui]
 mouse = true                     # off: the terminal's own selection, no wheel
 markdown = true                  # render model replies as markdown
@@ -82,6 +85,7 @@ error = "bright-red"
 | `providers.<name>.thinking` | — | — | `adaptive` |
 | `roles.<name>.chain` | — | — | unset: `provider` and `model` name the head |
 | `history_file` | — | — | `true` |
+| `prompt.base_file` | — | — | unset: the built-in base prompt |
 | `tui.mouse` | — | — | `true` |
 | `tui.markdown` | — | — | `true` |
 | `tui.thinking` | — | — | `closed` |
@@ -237,6 +241,75 @@ project role that names another instance, with a warning, and the
 user file's role of the same name applies. `doctor` shows each role's
 chain. The roles other than `default` serve subagents in a later
 release.
+
+## The system prompt
+
+Demerzel composes the system prompt once for each session, at the
+first prompt. Each model call of the session sends the same text.
+`/new` and a resumed session each compose the prompt again. An edit
+to the profile or to an instruction file thus takes effect in the
+next session.
+
+The prompt holds these segments, in this order:
+
+1. The base prompt.
+2. The personality profile:
+   `$XDG_CONFIG_HOME/demerzel/personality.md`.
+3. The instruction files: the user's
+   `$XDG_CONFIG_HOME/demerzel/AGENTS.md`, then the project's
+   `AGENTS.md`.
+
+The project's instruction file is `AGENTS.md` in the working
+directory. There is no upward search. A project without `AGENTS.md`
+gives its `CLAUDE.md` instead. A missing file or an empty file adds
+nothing. Without a profile and an instruction file, the prompt is the
+base prompt alone. Demerzel removes the white space at the start and
+the end of each file.
+
+Each file has a size limit:
+
+- The profile: 8 KiB.
+- Each instruction file: 32 KiB.
+- All instruction files together: 64 KiB.
+
+Demerzel cuts the text at a limit and puts a marker line after the
+cut. At the limit for all instruction files, the later files stay
+out. A limit counts the bytes of the files. The headings and the
+marker lines are not in the count.
+
+These rules decide which paths join the prompt:
+
+- Demerzel follows a symbolic link. Two paths that resolve to one
+  file put the file in the prompt once.
+- The project's instruction file must resolve inside the working
+  directory. A link to a file outside that directory stays out. A link
+  in your own config directory can point to any file.
+- A path that is not a regular file stays out.
+- A file that is not UTF-8 text stays out.
+
+The session shows one notice for each file that a limit cuts and for
+each file that stays out.
+
+`prompt.base_file` names a file. The content of the file replaces the
+built-in base prompt:
+
+- The content goes out as it is. Demerzel does not trim it, limit its
+  size, or repair it.
+- A relative path starts at the directory of the user file. The key
+  does not expand `~`.
+- The run reads the file once, at boot. A file that the run cannot
+  read stops the run there. An edit to the file takes effect in the
+  next run.
+- Only the user file can set the key.
+
+Nothing that changes between sessions enters the prompt: no date, no
+path, and no provider or model name. Equal files give equal bytes, so
+a provider can serve the prompt from its cache. A fallback target
+receives the same prompt as the head target.
+
+`doctor` shows the base prompt, each file in the prompt with its
+size, and each file that stays out. The debug trace shows the whole
+prompt in each request body at the `trace` level.
 
 ## Reasoning effort
 
@@ -593,6 +666,8 @@ attempt. At `warn`: a model call that failed, a stream that failed
 or ended early. At `info`:
 
 - The session create and resume, with the id and the path.
+- The system prompt of the session, with its size and the files in
+  it.
 - Each model call, with the provider, the model, the effort, the
   stop reason, the duration, and the usage.
 - Each request attempt that got an answer, with its HTTP status and
@@ -651,6 +726,12 @@ privilege, move credentials, or raise cost:
   above the default `128`.
 - It cannot define a theme's colors. It can pick `tui.theme`. A color
   can hide the approval question or a preview.
+- It cannot set `prompt.base_file`. The base prompt holds the rules
+  that the harness gives the model.
+
+The project's instruction file is prompt content. It joins the prompt
+without a question. It cannot raise privilege, because each tool call
+still passes the approval mode.
 
 A flag or a variable decides outright. Ignored project keys warn on
 stderr and in `doctor`.
@@ -680,4 +761,6 @@ M3 step 2 ([`m3-plan.md`](m3-plan.md)) added provider instances,
 `dmz login <instance>`, the `keys` section of the auth store, and
 `providers.<name>.thinking` on 2026-10-02. M3 step 6 added
 `[roles.<name>] chain`, the fallback chain, and
-`/model <provider> <model>` on 2026-11-08.
+`/model <provider> <model>` on 2026-11-08. M3 step 7 added the composed
+system prompt, the instruction files, the profile file, and
+`prompt.base_file` on 2026-11-12.

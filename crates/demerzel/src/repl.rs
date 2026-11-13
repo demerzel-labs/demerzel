@@ -495,7 +495,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                     None => {}
                 }
                 if engine.is_none() {
-                    let open = match runtime.open(&resume, &settings) {
+                    let open = match runtime.open(&resume, &settings, line) {
                         Ok(open) => open,
                         Err(error) => {
                             result = Err(error);
@@ -514,7 +514,7 @@ async fn repl(runtime: &Runtime) -> Result<(), RunError> {
                         eprintln!("{}", model_note(&open.settings.route));
                     }
                     settings = open.settings;
-                    if let Some(notice) = &open.notice {
+                    for notice in open.notice.iter().chain(&open.prompt_notes) {
                         eprintln!("demerzel: {notice}");
                     }
                     engine = Some(open.engine);
